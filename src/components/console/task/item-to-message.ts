@@ -1,0 +1,399 @@
+/**
+ * Map a normalized conversation `item` to the shared MessageType, for both the
+ * live SSE reducer and the persisted-history replay. One function, two callers
+ * — so what the browser shows live and what it rebuilds on refresh agree by
+ * construction instead of each decoding the item shape its own way.
+ *
+ * The item shape is the one the runtime emits (see claude.ts `claudeMessageToItems`):
+ * `{id, type, text?, title?, input?, output?, status?, agent_name?, task?}`.
+ * The MessageType shape is what the existing renderers in `toolcalls/` and
+ * `message-*` expect — `kind`, `rawInput`, `rawOutput`, `_meta.claudeCode…`,
+ * `status`. This module is the single adapter between them.
+ */
+import type { MessageType } from "./message"
+import type { EditorSessionSubAgent } from "@/components/console/editor/editor-session-stream-client"
+
+export type AgentId = string
+
+/**
+ * Message id for one root conversation item.
+ *
+ * Lives here so the live stream reducer, the replay reducer, and the optimistic
+ * user-input bubble all derive the same id from the same key: the item's
+ * logical id (which the backend sets to the sender-minted `client_message_id`
+ * for user input). Sharing the formula is what lets a live frame replace its
+ * optimistic twin by id instead of stacking a duplicate bubble beside it.
+ */
+export function rootMessageIdFor(itemId: string, seq: number): string {
+  return `item-${itemId || seq}`
+}
+
+export interface NormalizedItem {
+  id: string
+  type: string
+  text?: string
+  title?: string
+  input?: unknown
+  output?: unknown
+  status?: string
+  agent_name?: string
+  task?: string
+  /** Set by the backend when ClickHouse is unreachable for this frame. */
+  content_unavailable?: boolean
+}
+
+/** Claude tool name → message.data.kind the existing renderers route on. */
+export function kindForTool(toolName: string): string {
+  switch (toolName) {
+    case "Read":
+      return "read"
+    case "Edit":
+    case "Write":
+    case "MultiEdit":
+    case "NotebookEdit":
+      return "edit"
+    case "Bash":
+    case "BashOutput":
+      return "execute"
+    case "Grep":
+    case "Glob":
+      return "search"
+    default:
+      return "other"
+  }
+}
+
+/** SDK `status` → the `data.status` values the renderers switch on. */
+export function mapStatus(s: string | undefined): string {
+  switch (s) {
+    case "running":
+      return "in_progress"
+    case "done":
+      return "completed"
+    case "failed":
+      return "failed"
+    default:
+      return s ?? "completed"
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+/** Pull a flat string out of a tool_result `output` (string or content blocks). */
+export function outputText(output: unknown): string {
+  if (typeof output === "string") return output
+  if (Array.isArray(output)) {
+    return output
+      .map((part) => {
+        if (typeof part === "string") return part
+        if (part && typeof part === "object") {
+          const record = part as Record<string, unknown>
+          return typeof record.text === "string" ? record.text : ""
+        }
+        return ""
+      })
+      .filter(Boolean)
+      .join("\n")
+  }
+  return ""
+}
+
+/**
+ * Build the `_meta.claudeCode.toolResponse` the per-tool renderers read, from the
+ * item's flat `input`/`output`. Each tool's renderer reaches for a different
+ * path under this object; rather than rewrite the renderers, we seat the values
+ * where they already look.
+ */
+function buildToolMeta(toolName: string, input: Record<string, unknown>, output: unknown): Record<string, unknown> | undefined {
+  if (toolName === "Read") {
+    return {
+      file: {
+        content: outputText(output),
+        startLine: Number(input.offset ?? 1) || 1,
+        filePath: asString(input.file_path),
+      },
+    }
+  }
+  if (toolName === "Edit" || toolName === "MultiEdit" || toolName === "Write") {
+    return {
+      filePath: asString(input.file_path),
+      oldString: asString(input.old_string),
+      newString: asString(input.new_string ?? input.content),
+    }
+  }
+  return undefined
+}
+
+/** Convert one item to a root-agent message, or null if it shouldn't render inline. */
+export function itemToRootMessage(item: NormalizedItem, seq: number): MessageType | null {
+  const id = rootMessageIdFor(String(item.id ?? ""), seq)
+  // The backend marks a frame `content_unavailable` when ClickHouse cannot be
+  // read for it. Rendering nothing would read as data loss (a gap where a turn
+  // should be); a muted notice reads as a degraded store, which is what it is.
+  if (item.content_unavailable) {
+    return {
+      id,
+      time: 0,
+      role: "system",
+      type: "system_message",
+      data: { text: "该消息内容暂不可用（内容存储暂时不可达）" },
+    }
+  }
+  switch (item.type) {
+    case "user_input": {
+      const text = asString(item.text)
+      return text ? { id, time: 0, role: "user", type: "user_input", data: { content: text } } : null
+    }
+    case "agent_message": {
+      const text = asString(item.text)
+      return text ? { id, time: 0, role: "agent", type: "agent_message_chunk", data: { content: text } } : null
+    }
+    case "reasoning": {
+      const text = asString(item.text)
+      return text ? { id, time: 0, role: "agent", type: "agent_thought_chunk", data: { content: text } } : null
+    }
+    case "error": {
+      const text = asString(item.text) || "运行时报告错误"
+      return { id, time: 0, role: "agent", type: "error_message", data: { text } }
+    }
+    case "tool_call":
+    case "command_execution":
+    case "mcp_tool_call":
+    case "file_change":
+    case "web_search": {
+      const toolName = asString(item.title)
+      const input = (item.input && typeof item.input === "object" ? item.input : {}) as Record<string, unknown>
+      return {
+        id,
+        time: 0,
+        role: "agent",
+        type: "tool_call",
+        data: {
+          kind: kindForTool(toolName),
+          title: toolName,
+          status: mapStatus(item.status),
+          rawInput: input,
+          rawOutput: item.output,
+          content: outputText(item.output),
+          ...(buildToolMeta(toolName, input, item.output)
+            ? { _meta: { claudeCode: { toolResponse: buildToolMeta(toolName, input, item.output) } } }
+            : {}),
+        },
+      }
+    }
+    default:
+      return null
+  }
+}
+
+/**
+ * Fold a later report of an item onto the earlier one.
+ *
+ * Only fields the new report actually carries win. A tool call's completion
+ * frame is sparse — `{id, type, output, status}` — so a blind spread would erase
+ * the `title` and `input` that only the opening frame had, turning a finished
+ * card into an untitled blank. Text is replaced rather than concatenated because
+ * the runtime re-sends the full text of a block, not a delta.
+ *
+ * Shared by the replay reducer and the live stream client so both merge the
+ * same way on `logical_event_id`.
+ */
+export function mergeItems(previous: NormalizedItem, next: NormalizedItem): NormalizedItem {
+  const merged = { ...previous } as unknown as Record<string, unknown>
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined || value === null) continue
+    if (typeof value === "string" && !value) continue
+    merged[key] = value
+  }
+  return merged as unknown as NormalizedItem
+}
+
+/**
+ * Reduce an ordered list of items into (root messages, sub-agents).
+ *
+ * Root messages are the main transcript. Items carrying a non-empty `agent_id`
+ * belong to a sub-agent: they are accumulated into the matching
+ * `EditorSessionSubAgent` and a single inline entry is inserted at the first
+ * item's position so the user can open that sub-agent's detail. Reused by both
+ * live and replay so a refresh produces the same structure.
+ *
+ * A failed turn is reported twice (provider assistant text + runtime error
+ * frame); :func:`collapseErrorDuplicates` folds them into one error card.
+ */
+/** Logical id behind a root-item message, for per-turn error boundaries.
+ *
+ * Root items carry id `item-<logicalId>` (see :func:`rootMessageIdFor`); the
+ * slice recovers the logical id so two cards from two different turns (different
+ * logical ids) are not treated as repeats of one another. Positional ids
+ * (`user-N-M`, `subagent-entry-…`) have no logical id and each form their own
+ * boundary. */
+function logicalIdOf(message: MessageType): string {
+  return message.id.startsWith("item-") ? message.id.slice("item-".length) : message.id
+}
+
+/**
+ * One upstream failure reaches the transcript twice: the provider echoes the
+ * error text as an `agent_message`, then the runtime's own error frame repeats
+ * it. Rendering both showed the same "API Error: 429 …" as a plain bubble plus
+ * an error card. Collapse them to ONE error card: the card is the canonical
+ * presentation (it carries the retry affordance), so an `error_message` whose
+ * text matches an earlier plain agent bubble of the same turn replaces it in
+ * place, and a later `error_message` repeating the same text *and* logical id
+ * (the live twin beside its persisted replay) is dropped.
+ *
+ * The dedupe key is `(text, logical_id)`, not text alone: the same provider
+ * error text in two real turns has different logical ids and must both render.
+ * Text-only keying swallowed the second turn's card whenever the turn boundary
+ * — the user's own message — was missing from the rendered set, which was the
+ * "first message gone → later errors disappear" symptom.
+ *
+ * Applied to both the replay reducer's output and the live∪replay merge, so a
+ * failed turn renders exactly one card whether it is on screen live, replayed
+ * after a refresh, or both.
+ */
+export function collapseErrorDuplicates(messages: MessageType[]): MessageType[] {
+  const seenErrorKeys = new Set<string>()
+  const out: MessageType[] = []
+  let turnStart = 0
+  for (const message of messages) {
+    if (message.role === "user") {
+      seenErrorKeys.clear()
+      turnStart = out.length
+      out.push(message)
+      continue
+    }
+    if (message.type === "agent_message_chunk") {
+      out.push(message)
+      continue
+    }
+    if (message.type !== "error_message") {
+      out.push(message)
+      continue
+    }
+    const text = String(message.data.text || "")
+    if (!text) {
+      out.push(message)
+      continue
+    }
+    const logicalId = logicalIdOf(message)
+    // A plain bubble already carries this text: upgrade it to the error card
+    // in place, keeping the timeline position. The twin always sits inside the
+    // current turn (the provider text precedes the error frame).
+    const bubbleIndex = out.findIndex((m, index) => (
+      index >= turnStart
+      && m.type === "agent_message_chunk"
+      && String(m.data.content || "") === text
+    ))
+    if (bubbleIndex >= 0) {
+      out[bubbleIndex] = message
+      seenErrorKeys.add(`${text}::${logicalId}`)
+      continue
+    }
+    // The same failure already has its card (same logical id): drop the repeat.
+    const key = `${text}::${logicalId}`
+    if (seenErrorKeys.has(key)) continue
+    seenErrorKeys.add(key)
+    out.push(message)
+  }
+  return out
+}
+
+/**
+ * Reduce an ordered list of items into (root messages, sub-agents).
+ *
+ * Root messages are the main transcript. Items carrying a non-empty `agent_id`
+ * belong to a sub-agent: they are accumulated into the matching
+ * `EditorSessionSubAgent` and a single inline entry is inserted at the first
+ * item's position so the user can open that sub-agent's detail. Reused by both
+ * live and replay so a refresh produces the same structure.
+ */
+export function reduceItems(rows: { item: NormalizedItem; agentId: AgentId; seq: number }[]): {
+  messages: MessageType[]
+  subAgents: EditorSessionSubAgent[]
+} {
+  const messages: MessageType[] = []
+  const subAgentMap = new Map<AgentId, EditorSessionSubAgent>()
+  const subAgentSeenInline = new Set<AgentId>()
+  // Position of each already-emitted message id, so a re-sent item updates its
+  // entry in place. The runtime reports one logical item several times as it
+  // advances (a tool call arrives `running`, then again `done` with its output)
+  // and every report is persisted as its own row. Appending each one rendered
+  // the same tool call twice — the first copy stuck at `in_progress`, spinning
+  // forever beside its own completed twin. The live reducer has always replaced
+  // by id; this makes replay agree with it.
+  const indexById = new Map<string, number>()
+  // Latest merged raw item per id, so each new report builds on the last.
+  const rawById = new Map<string, NormalizedItem>()
+
+  for (const { item, agentId, seq } of rows) {
+    if (agentId) {
+      // First sighting of this sub-agent → insert an inline entry in the root
+      // transcript so the conversation marks where the sub-agent's turn began.
+      if (!subAgentSeenInline.has(agentId)) {
+        subAgentSeenInline.add(agentId)
+        const existing = subAgentMap.get(agentId)
+        messages.push({
+          id: `subagent-entry-${agentId}`,
+          time: 0,
+          role: "system",
+          type: "system_message",
+          data: { text: existing?.name || `子 Agent ${agentId.slice(0, 8)}`, toolCallId: agentId },
+        })
+      }
+      // Fold the item into the sub-agent record.
+      const prev = subAgentMap.get(agentId)
+      const name = asString(item.agent_name) || prev?.name || `子 Agent ${agentId.slice(0, 8)}`
+      const task = asString(item.task) || prev?.task || ""
+      if (item.type === "agent_message") {
+        const text = asString(item.text)
+        subAgentMap.set(agentId, {
+          ...prev!,
+          id: agentId,
+          name,
+          task,
+          status: "running",
+          content: (prev?.content || "") + (prev?.content ? "\n" : "") + text,
+          toolCalls: prev?.toolCalls || [],
+        })
+      } else if (item.type === "tool_call" || item.type === "command_execution" || item.type === "mcp_tool_call") {
+        const toolCall = {
+          name: asString(item.title),
+          args: item.input ?? {},
+          result: item.output,
+          status: "running" as const,
+        }
+        subAgentMap.set(agentId, {
+          ...prev!,
+          id: agentId,
+          name,
+          task,
+          status: "running",
+          content: prev?.content || "",
+          toolCalls: [...(prev?.toolCalls || []), toolCall],
+        })
+      }
+      continue
+    }
+    // Merge onto the previous report rather than replacing it: a tool call's
+    // completion carries only `output` and `status`, so overwriting would drop
+    // the `title` and `input` that arrived with the opening report and leave the
+    // card blank.
+    const key = String(item.id ?? seq)
+    const previous = rawById.get(key)
+    const merged = previous ? mergeItems(previous, item) : item
+    rawById.set(key, merged)
+    const msg = itemToRootMessage(merged, seq)
+    if (!msg) continue
+    const existing = indexById.get(msg.id)
+    if (existing !== undefined) {
+      messages[existing] = msg
+      continue
+    }
+    indexById.set(msg.id, messages.length)
+    messages.push(msg)
+  }
+
+  return { messages: collapseErrorDuplicates(messages), subAgents: [...subAgentMap.values()] }
+}

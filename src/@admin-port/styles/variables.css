@@ -1,0 +1,107 @@
+/* ====== 主题变量 ======
+ * 通过 body class 切换主题：theme-midnight / theme-slate / theme-emerald / theme-light / light
+ * 默认无 class 时使用 slate 深色主题
+ * 来源于 static/admin.html 的 :root 和 body.theme-* 定义
+ * 注意：不要与 static/admin.html 一同修改，保持同步
+ */
+
+/* ---------- 共享（不随主题变化） ---------- */
+:root {
+  --admin-radius: 7px;
+  --admin-radiusL: 12px;
+  --font: system-ui, -apple-system, sans-serif;
+  --fontM: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+/* ---------- 默认主题：slate（蓝灰深色） ---------- */
+:root,
+.theme-slate {
+  --bg: #0f172a;
+  --bg2: #111827;
+  --bg3: #1f2937;
+  --admin-border: #334155;
+  --text: #cbd5e1;
+  --text2: #94a3b8;
+  --textH: #f8fafc;
+  --blue: #60a5fa;
+  --green: #34d399;
+  --red: #fb7185;
+  --yellow: #fbbf24;
+  --surface: rgba(17, 24, 39, 0.92);
+  --surface2: rgba(31, 41, 55, 0.82);
+  --shadow: 0 18px 45px rgba(0, 0, 0, 0.24);
+  --tint: rgba(96, 165, 250, 0.12);
+  --hover: rgba(255, 255, 255, 0.06);
+}
+
+/* ---------- 主题：midnight（深夜黑） ---------- */
+.theme-midnight {
+  --bg: #0b0e14;
+  --bg2: #131720;
+  --bg3: #1a1f2b;
+  --admin-border: #252b36;
+  --text: #aab2c0;
+  --text2: #697180;
+  --textH: #e2e7f0;
+  --blue: #4d8cf7;
+  --green: #26b752;
+  --red: #e5484d;
+  --yellow: #e8a828;
+  --surface: rgba(19, 23, 32, 0.92);
+  --surface2: rgba(26, 31, 43, 0.78);
+  --shadow: 0 16px 42px rgba(0, 0, 0, 0.28);
+  --tint: rgba(77, 140, 247, 0.12);
+  --hover: rgba(255, 255, 255, 0.06);
+}
+
+/* ---------- 主题：emerald（墨绿控制台） ---------- */
+.theme-emerald {
+  --bg: #071412;
+  --bg2: #0d1f1b;
+  --bg3: #16332c;
+  --admin-border: #24534a;
+  --text: #b8d7cf;
+  --text2: #72a39a;
+  --textH: #ecfffa;
+  --blue: #2dd4bf;
+  --green: #34d399;
+  --red: #fb7185;
+  --yellow: #facc15;
+  --surface: rgba(13, 31, 27, 0.94);
+  --surface2: rgba(22, 51, 44, 0.82);
+  --shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+  --tint: rgba(45, 212, 191, 0.12);
+  --hover: rgba(255, 255, 255, 0.06);
+}
+
+/* ---------- 主题：light（明亮浅色） ---------- */
+.theme-light {
+  --bg: #ffffff;
+  --bg2: #ffffff;
+  --bg3: #f8fafc;
+  --admin-border: #e2e8f0;
+  --text: #475569;
+  --text2: #64748b;
+  --textH: #0f172a;
+  --blue: #2563eb;
+  --green: #059669;
+  --red: #dc2626;
+  --yellow: #d97706;
+  --surface: #ffffff;
+  --surface2: #f8fafc;
+  --shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+  --tint: rgba(37, 99, 235, 0.08);
+  --hover: #f1f5f9;
+}
+
+/* ---------- 兼容别名：body.light（等价于 theme-light） ---------- */
+.light {
+  --bg: #f6f8fb;
+  --bg2: #ffffff;
+  --bg3: #eef3f8;
+  --admin-border: #d8e1ec;
+  --text: #475569;
+  --text2: #64748b;
+  --textH: #0f172a;
+  /* 其余变量继承 theme-light 或默认值 */
+}
