@@ -74,7 +74,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { copyToClipboard } from '@/utils/clipboard'
 import { McpServiceDialog } from './McpServiceDialog'
+import { McpGithubImportDialog, type McpGithubImportPayload } from '@/components/manager/McpGithubImportDialog'
 import {
   listMcpServices, deleteMcpService,
   testMcpService, getMcpServiceTools, listMcpEnvVars, saveMcpEnvVars, getMcpClientConfig,
@@ -339,6 +341,7 @@ export function McpMarket({ initialTab = "installed", lockTab = false, bare = fa
   const [sourceFilter, setSourceFilter] = useState<string>('全部')
 
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [githubOpen, setGithubOpen] = useState(false)
   const [editing, setEditing] = useState<McpService | null>(null)
   const [installing, setInstalling] = useState<McpService | null>(null)
   const [testing, setTesting] = useState<number | null>(null)
@@ -461,6 +464,27 @@ export function McpMarket({ initialTab = "installed", lockTab = false, bare = fa
   }, [catalog])
 
   const handleCreate = () => { setEditing(null); setInstalling(null); setDialogOpen(true) }
+
+  const handleGithubCreate = async (p: McpGithubImportPayload) => {
+    const { createMcpService } = await import('@/@admin-port/api/mcp')
+    await createMcpService({
+      name: p.name,
+      display_name: p.display_name,
+      description: p.description,
+      category: 'custom',
+      transport: p.transport,
+      command: p.command || undefined,
+      url: p.url || undefined,
+      docs_url: p.docs_url || undefined,
+      env_template: {},
+      source: 'github',
+      template: false,
+      enabled: true,
+    } as CreateMcpPayload)
+    await load()
+    toast.success(`已从 GitHub 识别并创建 MCP「${p.name}」`)
+    setTab('installed')
+  }
 
   const handleInstallFromCatalog = async (svc: McpService) => {
     // 市场只负责下载：从 manifest/catalog 直接创建本地服务。连接参数、运行设置、
@@ -618,6 +642,7 @@ export function McpMarket({ initialTab = "installed", lockTab = false, bare = fa
     <>
       <ManagerRefreshButton loading={loading} onClick={() => void load()} />
       <Button variant="outline" onClick={handleCreate}>+ 注册自定义 MCP</Button>
+      <Button variant="outline" onClick={() => setGithubOpen(true)}>GitHub 识别</Button>
       <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>⚙ MCP 设置</Button>
     </>
   )
@@ -699,6 +724,13 @@ export function McpMarket({ initialTab = "installed", lockTab = false, bare = fa
         onSave={handleSave}
       />
 
+      {/* 从 GitHub 识别添加 MCP */}
+      <McpGithubImportDialog
+        open={githubOpen}
+        onOpenChange={setGithubOpen}
+        onConfirm={handleGithubCreate}
+      />
+
       <McpMarketSettings open={settingsOpen} initialPrincipalId={settingsPrincipalId} onClose={() => { setSettingsOpen(false); setSettingsPrincipalId(null) }} onChanged={load} />
 
       {/* MCP 管理 dialog（manifest 驱动） */}
@@ -778,17 +810,72 @@ export function McpMarket({ initialTab = "installed", lockTab = false, bare = fa
 // 子组件：MCP 设置弹层（Runtime 设置 + MCP 用户管理）
 // =============================================================================
 
+// 过渡 shim：管理端 authorization/options 尚未下发 param_kinds 目录（后端 TODO），
+// 从 builtin_resource 实例的 resource_type 反查 param key/标签。与后端
+// mcp_plugin_store 的 _PARAM_DETAIL_TYPE/_PARAM_LABEL 同源；管理端端点补齐后删除。
+const ADMIN_PARAM_KEY_BY_TYPE: Record<string, string> = {
+  cdp_client: 'cdp_client_id',
+  mail_account: 'mail_account_id',
+  device: 'device_id',
+}
+const ADMIN_PARAM_LABEL_BY_TYPE: Record<string, string> = {
+  cdp_client: 'CDP 浏览器客户端',
+  mail_account: '邮箱账户',
+  device: '设备',
+}
+
 function McpMarketSettings({ open, initialPrincipalId, onClose, onChanged }: {
   open: boolean
   initialPrincipalId?: number | null
   onClose: () => void
   onChanged: () => void
 }) {
-  /** 通用权限编辑器注入的管理端 API 适配器（平台级 principal 走 /mcp/users 契约）。 */
+  /**
+   * 通用授权编辑器注入的管理端 API 适配器（平台级 principal 走 /mcp/users 契约）。
+   *
+   * TODO(管理端 grants 端点)：管理端 /mcp/users/{id}/grants 与 authorization-options
+   * 的 param_kinds/stdio 扩展尚未落地（后端未加，本次只改用户侧链路）。过渡期沿用
+   * 旧 /params 端点并保持与旧编辑器同等能力：service 行不出现在管理端（旧编辑器本就
+   * 没有 services 区），实例绑定沿用单值语义（旧端点 UNIQUE param_key，多选会拒）。
+   * param_kinds 目录在管理端 options 未下发前从 builtin_resource 实例的
+   * resource_type 派生（key/label 映射为过渡 shim，端点补齐后删除）。
+   */
   const permissionApi: PermissionEditorApi = {
-    loadResources: async () => (await listMcpUserAuthorizationOptions()),
-    loadParams: async (id: number) => (await getMcpUserParams(id)),
-    saveParams: async (id, params) => (await setMcpUserParams(id, params)),
+    loadResources: async () => {
+      const all = await listMcpUserAuthorizationOptions()
+      // 过渡期：管理端旧 /params 端点写不进 service 行（写单行侥幸成功、多行/取消
+      // 均坏），服务区整体不开放，等管理端 grants 端点落地后放开。
+      const resources = all.filter((r) => r.resource_kind !== 'service')
+      const paramKinds: Array<{ key: string; label: string; resource_type: string }> = []
+      const seen = new Set<string>()
+      for (const r of all) {
+        if (r.resource_kind !== 'builtin_resource' || !r.resource_type || seen.has(r.resource_type)) continue
+        seen.add(r.resource_type)
+        paramKinds.push({
+          key: ADMIN_PARAM_KEY_BY_TYPE[r.resource_type] || r.resource_type,
+          label: ADMIN_PARAM_LABEL_BY_TYPE[r.resource_type] || r.resource_type,
+          resource_type: r.resource_type,
+        })
+      }
+      return { resources, param_kinds: paramKinds }
+    },
+    loadGrants: async (id: number) =>
+      (await getMcpUserParams(id)).map((p) => ({ grant_key: p.param_key, grant_value: p.param_value })),
+    saveGrants: async (id, grants) => {
+      if (grants.some((g) => g.grant_key === 'service')) {
+        throw new Error('管理端服务授权待 grants 端点上线后开放，请先在用户侧入口配置')
+      }
+      const byKey = new Map<string, string>()
+      for (const g of grants) {
+        if (byKey.has(g.grant_key)) {
+          throw new Error(`管理端过渡期仅支持每种类型绑定一个实例（${g.grant_key} 多选待 grants 端点）`)
+        }
+        byKey.set(g.grant_key, g.grant_value)
+      }
+      const params = [...byKey].map(([param_key, param_value]) => ({ param_key, param_value }))
+      const saved = await setMcpUserParams(id, params)
+      return saved.map((p) => ({ grant_key: p.param_key, grant_value: p.param_value }))
+    },
   }
 
   /** MCP 用户管理弹框注入的管理端 API 适配器。 */
@@ -1140,7 +1227,6 @@ function isRevisionConflict(error: any) {
 function ServiceUsersPanel({ service, onChanged }: { service: McpService; onChanged: () => void }) {
   const [users, setUsers] = useState<McpUser[]>([])
   const [selected, setSelected] = useState<number[]>([])
-  const [authEnabled, setAuthEnabled] = useState(true)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -1150,7 +1236,6 @@ function ServiceUsersPanel({ service, onChanged }: { service: McpService; onChan
       const [all, current] = await Promise.all([listMcpUsers(), getServiceUsers(service.id)])
       setUsers(Array.isArray(all) ? all : [])
       setSelected(current.user_ids || [])
-      setAuthEnabled(current.auth_enabled)
     } catch (e: any) { toast.error(e?.message || '加载可操作用户失败') }
     finally { setLoading(false) }
   }, [service.id])
@@ -1169,7 +1254,7 @@ function ServiceUsersPanel({ service, onChanged }: { service: McpService; onChan
   return (
     <SectionCardLike title="可操作用户">
       <p className="mb-2 text-xs text-muted-foreground">
-        勾选允许连接本服务的 MCP 用户。{authEnabled ? '' : '当前服务未开启鉴权，任何人可连接；开启鉴权后此列表生效。'}
+        勾选允许连接本服务的 MCP 用户。所有服务一律要求 token，未授权用户无法连接。
       </p>
       {loading ? <Empty>加载中...</Empty> : (
         <>
@@ -1682,7 +1767,7 @@ function CdpClientsCollection({ service, resourceKey, definition, sessionsViewKe
         <p className="text-yellow-600 dark:text-yellow-400">完整 token 仅显示这一次。请立即复制并安全保存，关闭后无法再次查看。</p>
         <Textarea readOnly rows={4} value={oneTimeToken?.token || ''} />
         <DialogFooter>
-          <Button onClick={async () => { if (oneTimeToken?.token) { await navigator.clipboard.writeText(oneTimeToken.token); toast.success('完整 CDP token 已复制') } }}>复制完整 token</Button>
+          <Button onClick={async () => { if (oneTimeToken?.token) { if (await copyToClipboard(oneTimeToken.token)) toast.success('完整 CDP token 已复制'); else toast.error('复制失败，请手动选择') } }}>复制完整 token</Button>
           <Button variant="outline" onClick={() => setOneTimeToken(null)}>我已保存</Button>
         </DialogFooter>
       </DialogContent>
@@ -2015,7 +2100,7 @@ function CopyableText({ text, children, className }: { text: string; children: R
         type="button"
         aria-label="复制"
         className="shrink-0 text-muted-foreground hover:text-foreground"
-        onClick={async () => { await navigator.clipboard.writeText(text); toast.success('已复制') }}
+        onClick={async () => { if (await copyToClipboard(text)) toast.success('已复制'); else toast.error('复制失败，请手动选择') }}
       >
         <Copy className="size-3" />
       </button>
@@ -2527,16 +2612,17 @@ function ConfigPanel({ service, copyable, onOpenUser }: { service: McpService; c
   }, [service.id])
 
   const copyText = async (text: string, ok = '已复制') => {
-    await navigator.clipboard.writeText(text)
-    toast.success(ok)
+    if (await copyToClipboard(text)) {
+      toast.success(ok)
+    } else {
+      toast.error('复制失败，请手动选择')
+    }
   }
 
   const copyTemplate = async () => {
     if (!config) return
     await copyText(JSON.stringify(config.configs.claude_desktop || config.configs.generic, null, 2), '配置模板已复制（请在客户端安全地提供 MCP 用户凭据）')
   }
-
-  const authEnabled = !!config?.auth_enabled
 
   return (
     <div>
@@ -2552,10 +2638,10 @@ function ConfigPanel({ service, copyable, onOpenUser }: { service: McpService; c
         </>
       )}
 
-      <span className="text-xs text-muted-foreground">SSE URL{authEnabled ? '（需带 token 参数）' : ''}</span>
+      <span className="text-xs text-muted-foreground">SSE URL（需带 token 参数）</span>
       <pre style={codeBlock}>{config?.sse_url || '加载中...'}</pre>
 
-      {authEnabled && config?.token_template && (
+      {config?.token_template && (
         <>
           <div className="mx-0 mb-1 mt-2.5 flex items-center justify-between">
             <span className="text-xs text-muted-foreground">参数化模板（连接方需在本地安全注入 MCP 用户凭据）</span>
@@ -2567,15 +2653,10 @@ function ConfigPanel({ service, copyable, onOpenUser }: { service: McpService; c
           </span>
         </>
       )}
-      {!authEnabled && (
-        <span className="mt-1 block text-[11px] text-muted-foreground">
-          该服务未开启鉴权，任何人可连接。建议在「用户管理」里开启访问控制。
-        </span>
-      )}
 
       <div className="mx-0 mb-2 mt-3.5 flex items-center justify-between">
         <span className="text-xs text-muted-foreground">
-          Claude Desktop / Cursor 配置片段{authEnabled ? '（模板，含 <TOKEN> 占位）' : ''}
+          Claude Desktop / Cursor 配置片段（模板，含 &lt;TOKEN&gt; 占位）
         </span>
         {copyable && config && (
           <Button variant="outline" size="sm" onClick={copyTemplate}>复制配置</Button>
@@ -2583,24 +2664,22 @@ function ConfigPanel({ service, copyable, onOpenUser }: { service: McpService; c
       </div>
       <pre style={codeBlock}>{config ? JSON.stringify(config.configs.claude_desktop, null, 2) : '加载中...'}</pre>
 
-      {authEnabled && (
-        <SectionCardLike title="已授权用户" className="mt-3.5">
-          <p className="mb-2 text-muted-foreground">为避免管理页面泄露凭据，这里仅显示可连接用户身份；完整 MCP 用户 token 不会出现在连接配置中。</p>
-          {(config?.users || []).length === 0 ? <Empty>暂无已授权用户。请到右上角「MCP 设置」分配服务。</Empty> : <span className="flex flex-wrap gap-1">{(config?.users || []).map(user => (
-            onOpenUser ? (
-              <button
-                key={user.user_id}
-                type="button"
-                className="inline-flex"
-                title="点击查看该 MCP 用户详情"
-                onClick={() => onOpenUser(Number(user.user_id))}
-              >
-                <Badge variant="outline" className="cursor-pointer hover:bg-accent">{user.name}</Badge>
-              </button>
-            ) : <Badge key={user.user_id} variant="outline">{user.name}</Badge>
-          ))}</span>}
-        </SectionCardLike>
-      )}
+      <SectionCardLike title="已授权用户" className="mt-3.5">
+        <p className="mb-2 text-muted-foreground">为避免管理页面泄露凭据，这里仅显示可连接用户身份；完整 MCP 用户 token 不会出现在连接配置中。</p>
+        {(config?.users || []).length === 0 ? <Empty>暂无已授权用户。请到右上角「MCP 设置」分配服务。</Empty> : <span className="flex flex-wrap gap-1">{(config?.users || []).map(user => (
+          onOpenUser ? (
+            <button
+              key={user.user_id}
+              type="button"
+              className="inline-flex"
+              title="点击查看该 MCP 用户详情"
+              onClick={() => onOpenUser(Number(user.user_id))}
+            >
+              <Badge variant="outline" className="cursor-pointer hover:bg-accent">{user.name}</Badge>
+            </button>
+          ) : <Badge key={user.user_id} variant="outline">{user.name}</Badge>
+        ))}</span>}
+      </SectionCardLike>
     </div>
   )
 }

@@ -1,7 +1,6 @@
 /**
  * 用户侧「内置工具」API 客户端（CDP 浏览器 / 邮箱 / 设备控制）。
  *
- * 直连后端 `/api/v1/users/builtin-tools/*`，用 monkeycode C 端 session cookie
  * 鉴权（`credentials: "include"`），不携带 admin token。后端严格按
  * `owner_user_id == 当前用户` 隔离——用户只能看/改自己拥有的资源。
  *
@@ -178,6 +177,8 @@ export interface DeviceResource extends BuiltinToolResource {
   platform: "android" | "ios" | string
   online: boolean
   capabilities: string[]
+  /** ISO 时间：在线=心跳实时点，离线=断连时刻（服务端落库兜底）。 */
+  last_seen_at?: string
   node_id?: string
   node?: DeviceHostNode
 }
@@ -281,8 +282,23 @@ export interface IosSigningProfile {
   id: number
   owner_user_id: string
   name: string
-  kind: "asc" | "p12"
+  kind: "asc" | "p12" | "apple_id"
   created_at: string
+  /** p12：mobileprovision 的 ExpirationDate（服务端现解析）；asc：恒 null。 */
+  expires_at?: string | null
+  /** 服务端统一算，前端只渲染：valid / expiring（≤3天）/ expired / unknown。
+   *  apple_id 的 expired 表示会话过期（需重新登录），非描述文件过期。 */
+  status?: "valid" | "expiring" | "expired" | "unknown"
+  team_id?: string | null
+  profile_name?: string | null
+}
+
+/** Apple ID 两步登录中间态：login 返回 2fa_required 时拿到的令牌。 */
+export interface IosAppleIdLoginResult {
+  status: "authenticated" | "2fa_required"
+  method?: "trusteddevice" | "sms"
+  login_token?: string
+  profile?: IosSigningProfile
 }
 
 export interface IosWdaJobSnapshot {
@@ -318,12 +334,56 @@ export function listIosSigningProfiles(): Promise<{ profiles: IosSigningProfile[
   return toolFetch(`/ios/signing-profiles`, { baseOverride: "/api/v1/users/ios" })
 }
 
-export function createIosSigningProfile(body: { name: string; kind: "asc" | "p12"; secret_data: Record<string, unknown> }): Promise<IosSigningProfile> {
+export function createIosSigningProfile(body: { name: string; kind: "asc" | "p12" | "apple_id"; secret_data: Record<string, unknown> }): Promise<IosSigningProfile> {
   return toolFetch(`/ios/signing-profiles`, { method: "POST", body: JSON.stringify(body), baseOverride: "/api/v1/users/ios" })
 }
 
 export function deleteIosSigningProfile(profileId: number): Promise<{ deleted: boolean }> {
   return toolFetch(`/ios/signing-profiles/${profileId}`, { method: "DELETE", baseOverride: "/api/v1/users/ios" })
+}
+
+/** 原地更新签名配置：只改名（secret_data 省略），或整包替换材料（id 不变，设备绑定不断）。 */
+export function updateIosSigningProfile(
+  profileId: number,
+  body: { name: string; secret_data?: Record<string, unknown> },
+): Promise<IosSigningProfile> {
+  return toolFetch(`/ios/signing-profiles/${profileId}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+    baseOverride: "/api/v1/users/ios",
+  })
+}
+
+// ── Apple ID 免费签名（两步登录；密码只在请求体内走，绝不落库）─────────────────
+// 2FA 完成需重发密码（服务端引擎 complete_2fa 内部重新认证），所以 verifyAppleId2fa
+// 也要带 password——不是前端缓存密码。
+
+export function loginAppleId(body: {
+  name?: string
+  email: string
+  password: string
+  /** 重新登录已有配置（原 id 更新，设备绑定不断）。 */
+  profile_id?: number
+}): Promise<IosAppleIdLoginResult> {
+  return toolFetch(`/ios/signing-profiles/apple-id/login`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    baseOverride: "/api/v1/users/ios",
+  })
+}
+
+export function verifyAppleId2fa(body: {
+  login_token: string
+  email: string
+  password: string
+  code: string
+  profile_id?: number
+}): Promise<IosAppleIdLoginResult> {
+  return toolFetch(`/ios/signing-profiles/apple-id/verify-2fa`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    baseOverride: "/api/v1/users/ios",
+  })
 }
 
 export function startIosWdaJob(resourceId: number, body: {

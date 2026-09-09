@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Copy, UserPlus } from "lucide-react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import dayjs from "dayjs"
 import { useTranslation } from "react-i18next"
 
@@ -77,10 +78,9 @@ export default function NavInvite() {
   }, [fetchInvitations, open])
 
   const handleCopyInvitationLink = async () => {
-    try {
-      await navigator.clipboard.writeText(invitationLink)
+    if (await copyToClipboard(invitationLink)) {
       toast.success(t("consoleShell.rewards.invite.copySuccess"))
-    } catch {
+    } else {
       toast.error(t("consoleShell.rewards.invite.copyFailed"))
     }
   }

@@ -411,10 +411,12 @@ export default function TaskDetailPage() {
   // 活跃模型 = models_snapshot 头部（模型名）。model_id 是 ProjectTask 绑定的
   // UUID，不是模型名，不能用于判断或展示。
   const currentModel = task.models?.[0] || ""
-  // 快照非空时只显示任务已添加的集合；快照为空 = 不限制，但下拉仍展示
-  // 父 Key 当前允许的完整模型目录，避免「不限制」状态下模型菜单为空。
-  // 从空快照首次选择模型会由服务端建立任务模型集合。
-  const modelOptions = task.models?.length ? task.models : keyModels.map((model) => model.id)
+  // 下拉列表恒为父 Key 当前可用目录——列表回答「这个 Key 能用哪些模型」，
+  // 当前模型回答「下一轮下发给运行时的是哪个」，两者不是一个东西，切换只
+  // 换后者。快照只承载活跃模型与子 Key 白名单，不再当列表来源：曾把列表
+  // 塌缩成快照，用户切过一次模型后下拉就只剩那一个。目录加载失败时回退
+  // 快照，至少保住当前模型可见可切。
+  const modelOptions = keyModels.length ? keyModels.map((model) => model.id) : (task.models || [])
   const addedModelSet = new Set(task.models || [])
   const addableModelOptions = keyModels
     .filter((model) => !addedModelSet.has(model.id))
@@ -535,7 +537,7 @@ export default function TaskDetailPage() {
                     onSubAgents={setSubAgents}
                     activeSubAgentId={activeSubAgentId}
                     onSelectSubAgent={setActiveSubAgentId}
-                    modelLabel={{ model: currentModel || "不限制（可从下方列表选择）", mode: modeOptions.find((option) => option.value === (task.mode || ""))?.label || modeLabel }}
+                    modelLabel={{ model: currentModel, mode: modeOptions.find((option) => option.value === (task.mode || ""))?.label || modeLabel }}
                     models={modelOptions}
                     onSwitchModel={switchModel}
                     onAddModel={() => { setModelsToAdd([]); setAddModelsOpen(true) }}

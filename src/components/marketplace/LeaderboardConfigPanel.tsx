@@ -4,9 +4,13 @@
  * 简化：不再配仓库地址/榜单类型/专用 agent——仓库用内置默认，全量 board 同步。
  * 同步信息与配置在同一张卡里（同步是配置的直接结果，拆成两张卡读起来割裂）。
  * 一个 tab 一个保存：只发 leaderboard_* 字段。
+ *
+ * 「立即同步」是后台异步任务：POST 立即返回，前端轮询 status 端点拿实时进度与
+ * 执行日志；已在跑时后端 409，toast 提示「已有同步在运行中」。重启后内存进度
+ * 没了——status 端点内部回落 DB 执行记录，面板仍显示最近一次的日志与时间。
  */
 import { useCallback, useEffect, useState } from "react"
-import { RefreshCw, Save, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronRight, RefreshCw, Save, Trash2 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -15,41 +19,49 @@ import { Label } from "@/components/ui/label"
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
-import { getMarketplaceSourceConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
+import { getMarketplaceSourceConfig, getProxyPoolTabConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
+import type { ProxyEntry } from "@/@admin-port/api/proxyPool"
 import {
   fetchLeaderboardStatus,
   purgeLeaderboardItems,
   triggerLeaderboardSync,
   type LeaderboardStatus,
 } from "@/api/marketplaceAdmin"
-import { INTERVAL_OPTIONS } from "./leaderboard-labels"
+import { INTERVAL_OPTIONS, fmtSyncAt } from "./leaderboard-labels"
 import { toast } from "sonner"
 
 export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
   const [config, setConfig] = useState<Awaited<ReturnType<typeof getMarketplaceSourceConfig>> | null>(null)
+  const [proxies, setProxies] = useState<ProxyEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [syncStatus, setSyncStatus] = useState<LeaderboardStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [purging, setPurging] = useState(false)
+  // 打开面板默认展开执行日志（重启后靠 DB 记录也能直接看到最近一次）
+  const [showLogs, setShowLogs] = useState(true)
 
   const [enabled, setEnabled] = useState(false)
   const [interval, setInterval] = useState(24)
   const [requireVerified, setRequireVerified] = useState(false)
+  const [proxyId, setProxyId] = useState("")
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [source, status] = await Promise.all([
+      const [source, status, proxyResp] = await Promise.all([
         getMarketplaceSourceConfig(),
         fetchLeaderboardStatus().catch(() => null),
+        getProxyPoolTabConfig().catch(() => ({ proxies: [] as ProxyEntry[] })),
       ])
       setConfig(source)
       setSyncStatus(status)
+      setProxies(proxyResp.proxies || [])
       setEnabled(!!source.leaderboard_sync_enabled)
       const iv = source.leaderboard_sync_interval_hours || 24
       setInterval(INTERVAL_OPTIONS.some((o) => o.value === iv) ? iv : 24)
       setRequireVerified(!!source.leaderboard_require_verified)
+      setProxyId(source.leaderboard_proxy_id || "")
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "加载配置失败")
     } finally {
@@ -61,15 +73,35 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
 
   const handleSync = async () => {
     setSyncing(true)
+    setShowLogs(true)
     try {
-      await triggerLeaderboardSync()
-      toast.success("同步完成，新条目已进候选池（草稿）")
-      const st = await fetchLeaderboardStatus().catch(() => null)
-      setSyncStatus(st)
-      onSaved?.()
+      // 后台异步执行：POST 立即返回 {started: true}；已在跑 → 后端 409（toast 显示）
+      const res = await triggerLeaderboardSync()
+      if (!res.started) {
+        toast.error(res.detail || "启动同步失败")
+        setSyncing(false)
+        return
+      }
+      // 轮询 status 端点拿实时进度+日志（last_sync.progress）
+      const poll = window.setInterval(async () => {
+        try {
+          const st = await fetchLeaderboardStatus()
+          setSyncStatus(st)
+          const running = st.last_sync?.progress?.running
+          if (!running && st.last_sync?.ran_at) {
+            window.clearInterval(poll)
+            setSyncing(false)
+            if (st.last_sync.ok === false) {
+              toast.error("同步失败", { description: st.last_sync.detail })
+            } else if (st.last_sync.ok === true) {
+              toast.success(st.last_sync.detail || "同步完成，新条目已进候选池（草稿）")
+              onSaved?.()
+            }
+          }
+        } catch { /* 轮询失败静默，继续 */ }
+      }, 3000)
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "同步失败")
-    } finally {
+      toast.error(err instanceof Error ? err.message : "启动同步失败")
       setSyncing(false)
     }
   }
@@ -97,6 +129,7 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
         leaderboard_sync_enabled: enabled,
         leaderboard_sync_interval_hours: interval,
         leaderboard_require_verified: requireVerified,
+        leaderboard_proxy_id: proxyId,
       })
       toast.success("外部榜单同步配置已保存")
       await load()
@@ -114,6 +147,8 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
 
   const notConfigured = syncStatus !== null && !syncStatus.configured
   const repo = config?.default_leaderboard_repo || "jaychempan/Agent-Leaderboard"
+  const lastSync = syncStatus?.last_sync
+  const progress = lastSync?.progress
 
   return (
     <div className="space-y-4">
@@ -136,11 +171,35 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
                   <span className="text-muted-foreground">每 {syncStatus?.interval_hours ?? interval} 小时</span>
                   <span className="text-muted-foreground">草稿池 {syncStatus?.draft_count ?? 0} 条</span>
                   <span className="text-muted-foreground">已发布 {syncStatus?.published_count ?? 0} 条</span>
-                  {syncStatus?.last_sync?.ran_at ? (
+                  {lastSync?.ran_at ? (
                     <span className="text-muted-foreground">
-                      上次 {syncStatus.last_sync.ran_at}
-                      {syncStatus.last_sync.ok === false ? <span className="text-destructive"> 失败</span> : null}
-                      {syncStatus.last_sync.detail ? <span className="ml-1">· {syncStatus.last_sync.detail}</span> : null}
+                      上次 {fmtSyncAt(lastSync.ran_at)}
+                      {lastSync.ok === false ? <span className="text-destructive"> 失败</span> : null}
+                      {lastSync.detail ? <span className="ml-1">· {lastSync.detail}</span> : null}
+                    </span>
+                  ) : config?.leaderboard_last_sync_at ? (
+                    // 重启后内存没了：回落配置里持久化的上次同步时间
+                    <span className="text-muted-foreground">
+                      上次 {fmtSyncAt(config.leaderboard_last_sync_at)}（历史记录）
+                    </span>
+                  ) : null}
+                  {/* 同步中：实时进度 */}
+                  {syncing && progress?.running ? (
+                    <span className="inline-flex items-center gap-2 text-xs">
+                      <span className="font-medium text-foreground">
+                        {progress.phase === "fetch" ? "拉取榜单文件…"
+                          : progress.phase === "upsert" && progress.total > 0
+                            ? `${progress.current}/${progress.total}`
+                            : "准备中…"}
+                      </span>
+                      {progress.phase === "upsert" && progress.total > 0 ? (
+                        <>
+                          <span className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
+                            <span className="block h-full bg-primary transition-all" style={{ width: `${Math.round((progress.current / progress.total) * 100)}%` }} />
+                          </span>
+                          {progress.current_item ? <span className="font-mono text-muted-foreground">{progress.current_item}</span> : null}
+                        </>
+                      ) : null}
                     </span>
                   ) : null}
                 </>
@@ -152,15 +211,43 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
             </Button>
           </div>
 
+          {/* 执行日志：折叠面板（默认展开；重启后回落 DB 记录仍有最近一份） */}
+          {lastSync?.logs && lastSync.logs.length > 0 ? (
+            <div className="rounded-md border">
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted/50"
+                onClick={() => setShowLogs((v) => !v)}
+              >
+                {showLogs ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                执行日志（{lastSync.logs.length} 条）
+                {syncing ? <Spinner className="ml-auto size-3" /> : null}
+              </button>
+              {showLogs ? (
+                <div className="max-h-64 overflow-y-auto border-t bg-muted/10 px-3 py-2 font-mono text-[11px] leading-5">
+                  {lastSync.logs.map((log: { ts: string; phase: string; detail: string }, i: number) => (
+                    <div key={i} className="flex gap-2">
+                      <span className="shrink-0 text-muted-foreground/60">{log.ts.slice(11, 19)}</span>
+                      <span className={`shrink-0 ${["fail", "error"].includes(log.phase) ? "text-destructive" : log.phase === "done" ? "text-emerald-600" : "text-muted-foreground"}`}>
+                        [{log.phase}]
+                      </span>
+                      <span className="min-w-0 break-all">{log.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <Separator />
 
           {/* 配置项 */}
           <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
             <Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} />
-            启用外部榜单同步
+            启用外部榜单同步（每 {interval} 小时自动执行）
           </label>
 
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 md:grid-cols-3">
             <div>
               <Label>仓库（内置默认，不可改）</Label>
               <p className="mt-1.5 font-mono text-sm text-muted-foreground">{repo}</p>
@@ -170,6 +257,15 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
               <NativeSelect value={String(interval)} onChange={(e) => setInterval(Number(e.target.value))} disabled={!enabled}>
                 {INTERVAL_OPTIONS.map((o) => (
                   <NativeSelectOption key={o.value} value={String(o.value)}>{o.label}</NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </div>
+            <div>
+              <Label>出网代理</Label>
+              <NativeSelect value={proxyId} onChange={(e) => setProxyId(e.target.value)}>
+                <NativeSelectOption value="">跟随全局代理（未配全局则直连）</NativeSelectOption>
+                {proxies.map((proxy) => (
+                  <NativeSelectOption key={proxy.id} value={proxy.id}>{proxy.name || proxy.id}</NativeSelectOption>
                 ))}
               </NativeSelect>
             </div>

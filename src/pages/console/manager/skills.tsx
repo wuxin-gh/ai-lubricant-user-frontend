@@ -13,6 +13,9 @@ import { toast } from "sonner"
 
 import { type DomainTeamGroup, type GithubComChaitinMonkeyCodeBackendDomainTeamSkill as DomainTeamSkill } from "@/api/Api"
 import { sharedApi } from "@/api/shared-api"
+import { GithubRecognizeImporter } from "@/components/manager/GithubRecognizeImporter"
+import { importSkillUrl } from "@/lib/agent-resources-api"
+import { createReferenceFromGithubV2 } from "@/api/resourceReferences"
 import {
   findSkillMarkdownPath,
   normalizeSkillTags,
@@ -573,6 +576,10 @@ function AddSkillDialog({
                 <Upload className="size-4" />
                 {t("managerSkills.tabs.upload")}
               </TabsTrigger>
+              <TabsTrigger value="github">
+                <Sparkles className="size-4" />
+                GitHub 识别
+              </TabsTrigger>
             </TabsList>
             <TabsContent value="paste" className="space-y-3">
               <Field>
@@ -603,6 +610,53 @@ function AddSkillDialog({
                   </FieldDescription>
                 </FieldContent>
               </Field>
+            </TabsContent>
+            <TabsContent value="github" className="space-y-3">
+              <GithubRecognizeImporter
+                domain="skill"
+                onConfirm={async (result, payload) => {
+                  // 引用模式走 v2（先落池 resources 再建引用 resource_references）；
+                  // 安装模式维持本地入库链路不变。
+                  if (payload.mode === "reference" || payload.type === "skills") {
+                    const pinned = payload.mode === "install" || payload.pinCommit
+                    await createReferenceFromGithubV2({
+                      repo: result.repo_full_name,
+                      ref: result.ref,
+                      kind: payload.type as "skills" | "skill" | "plugin",
+                      name: payload.name,
+                      display_name: payload.name,
+                      description: payload.description,
+                      entry_index: payload.entryIndex,
+                      ...(pinned && result.head_sha ? { pin_commit: result.head_sha } : {}),
+                    })
+                    const verb = payload.mode === "reference" ? "已引用" : "已安装"
+                    toast.success(
+                      payload.type === "skills"
+                        ? `${verb}技能集「${payload.name}」含 ${result.skill_entries.length} 个 skill（GitHub 直连）`
+                        : `已引用 skill「${payload.name}」（GitHub 直连，服务器不存字节）`,
+                    )
+                    handleOpenChange(false)
+                    return
+                  }
+                  // type=skill 安装：zip + skill_md_path 入本地库
+                  const entries = (result.install_spec.skill?.entries || []) as Array<{
+                    name?: string; path?: string; entry?: string
+                  }>
+                  const entry = entries[Math.min(payload.entryIndex ?? 0, entries.length - 1)] ?? entries[0]
+                  const url = `https://github.com/${result.repo_full_name}/archive/refs/heads/${result.ref || "main"}.zip`
+                  const path = (entry?.path || "").replace(/^\/+|\/+$/g, "")
+                  const skillMdPath = path ? `${path}/${entry?.entry || "SKILL.md"}` : (entry?.entry || "SKILL.md")
+                  await importSkillUrl(url, {
+                    name: payload.name,
+                    description: payload.description,
+                    enabled: true,
+                    skill_md_path: skillMdPath,
+                  })
+                  toast.success(`已安装 skill「${payload.name}」`)
+                  handleOpenChange(false)
+                }}
+                onCancel={() => handleOpenChange(false)}
+              />
             </TabsContent>
           </Tabs>
 

@@ -1044,7 +1044,7 @@ export interface DomainStackProfile {
   frameworks?: string[];
   /** 包管理器 */
   package_managers?: string[];
-  /** 项目形态（web_frontend/web_backend/mobile_app/desktop/cli/library/containerized） */
+  /** 项目形态（web_frontend/web_backend/ios/android/mobile_app/desktop/cli/library/containerized） */
   project_types?: string[];
   /** 主语言（小写标识，如 python/typescript） */
   primary_language?: string;

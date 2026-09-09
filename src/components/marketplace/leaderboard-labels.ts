@@ -5,16 +5,35 @@
  * 之后漂移（比如详情里显示「MCP」而卡片显示「mcp」）。
  */
 
-/** 我们市场的四种安装形态。board 是「主题」，这里是「安装形态」，两者不等价。 */
+/** 我们市场的安装形态。board 是「主题」，这里是「安装形态」，两者不等价。 */
 export const MODULE_LABELS: Record<string, string> = {
   mcp: "MCP",
   skill: "Skill",
+  skills: "技能集",
   prompt: "提示词",
   plugin: "插件",
 }
 
-/** 分类多选的固定顺序（与后端 TARGET_MODULES 对齐）。 */
-export const ALL_MODULES = ["mcp", "skill", "plugin", "prompt"] as const
+/** 来源（source）的中文标签。每个内容源/手动添加一个值，卡片顶部展示用。 */
+export const SOURCE_LABELS: Record<string, string> = {
+  "agent-leaderboard": "Agent-Leaderboard",
+  "agency-agents": "agency-agents",
+  "agency-agents-zh": "agency-agents-zh",
+  "agentscope": "agentscope",
+  manual: "手动添加",
+}
+
+/** 编辑器/客户端的中性展示名。skill entries.editors、prompt providers、plugin provider 都用它。 */
+export const EDITOR_LABELS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  opencode: "OpenCode",
+  cursor: "Cursor",
+  gemini: "Gemini",
+}
+
+/** 分类单选的固定顺序（与后端 TARGET_MODULES 对齐）。 */
+export const ALL_MODULES = ["mcp", "skill", "skills", "plugin", "prompt"] as const
 
 export type LeaderboardModuleOption = typeof ALL_MODULES[number]
 
@@ -158,3 +177,19 @@ export const INTERVAL_OPTIONS = [
 
 /** MCP 远程启动方式的合法 transport（与后端 _ALLOWED_TRANSPORTS 对齐）。 */
 export const LAUNCH_TRANSPORTS = ["sse", "streamable-http"] as const
+
+/**
+ * 同步时间显示：把后端 UTC ISO 串（``...+00:00``）转成**当前客户端时区**。
+ * 解析失败/为空回落原值——配置回落路径存的是历史字符串，格式可能不齐。
+ */
+export function fmtSyncAt(iso: string | null | undefined): string {
+  const raw = String(iso || "").trim()
+  if (!raw) return ""
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return d.toLocaleString(undefined, {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  })
+}

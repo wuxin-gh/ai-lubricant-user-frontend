@@ -5,23 +5,27 @@
  * 纯分组容器（passive_management）不走这里。
  *
  * 安装方式统一按平台 Tab 呈现，不再有单独的「安装方式」下拉：
- * - 执行节点：Linux / macOS / Windows（同一条一键命令，脚本自识别平台）+ Docker。
- * - 管理节点客户端：只 Docker / docker-compose（`nodes/management` 二进制只支持容器化）。
+ * - 执行节点：Linux / macOS / Windows（同一条一键命令，脚本自识别平台）+ Docker + 安装包。
+ * - 管理节点客户端：只 Docker + 安装包（`nodes/management` 二进制只支持容器化）。
+ * 「安装包」tab 列出全部平台的 agent-compose 运行程序手动下载（一键命令会自动下载，
+ * 离线 / 自定义部署才需手动取）。比折叠块直观，不再有「藏在底部被挡」的问题。
+ *
+ * 「sudo 提权」开关（默认开）把一键命令切到 `curl … | sudo bash`：docker 方式访问
+ * /var/run/docker.sock 需要 root（普通用户会报 docker API 权限错）；standalone 装在
+ * 当前用户目录，通常无需提权，可按需关闭。
  */
-import { useCallback, useEffect, useState } from "react"
-import { ChevronsUpDown, Copy, Download, Eye, EyeOff } from "lucide-react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import { ChevronDown, ChevronsUpDown, Copy, Download, Eye, EyeOff } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import {
   downloadNodeBinary,
   listNodeBinaries,
@@ -38,11 +42,10 @@ import { ARCH_LABEL, OS_LABEL, ROLE_LABEL, formatBytes } from "./types"
 export const DEFAULT_NODE_IMAGE = "ai-lubricant-node:local"
 
 export async function copyText(text: string, msg = "已复制") {
-  try {
-    await navigator.clipboard.writeText(text)
+  if (await copyToClipboard(text)) {
     toast.success(msg)
-  } catch {
-    toast.error("复制失败")
+  } else {
+    toast.error("复制失败，请手动选择")
   }
 }
 
@@ -119,15 +122,19 @@ export function resolvePublicOrigin(serverUrl?: string): string {
  * ``method`` 是可选的呈现覆盖：执行节点默认按 standalone 入驻，Docker 标签页需要显式
  * 请求 docker 版脚本（本地 build 镜像并起容器），不改后端节点记录。管理节点本就以
  * docker 入驻，无需传。
+ *
+ * ``sudo`` 为真时管道右侧用 root 执行：`curl … | sudo bash`。docker 方式访问
+ * /var/run/docker.sock 需要 root；否则普通用户会报 docker API 权限错。
  */
 export function oneClickCommand(
   origin: string,
   nodeId: string,
   method?: "docker" | "docker-compose",
+  sudo?: boolean,
 ): string {
   const base = origin || "<服务端地址>"
   const query = method ? `?method=${method}` : ""
-  return `curl -fsSL "${base}/api/v1/public/nodes/${nodeId}/install.sh${query}" | bash`
+  return `curl -fsSL "${base}/api/v1/public/nodes/${nodeId}/install.sh${query}" | ${sudo ? "sudo " : ""}bash`
 }
 
 /**
@@ -154,10 +161,11 @@ function dockerRunCmd(
   secret: string,
   role: string,
   image: string,
+  sudo = false,
 ): string {
   const img = image || DEFAULT_NODE_IMAGE
   return [
-    "docker run -d \\",
+    sudo ? "sudo docker run -d \\" : "docker run -d \\",
     "  --name agent-compose-node \\",
     "  --restart always \\",
     "  -v /var/run/docker.sock:/var/run/docker.sock \\",
@@ -192,7 +200,7 @@ function composeEnvBlock(
  * 同样的事；这里给「高级 / 离线部署」手动复刻：下载两个 Go 二进制 + Dockerfile +
  * entrypoint，再 `docker build`。管理节点与子执行节点共用这一份镜像。
  */
-function dockerBuildCommands(origin: string, image: string): string {
+function dockerBuildCommands(origin: string, image: string, sudo = false): string {
   const base = origin || "<服务端地址>"
   const img = image || DEFAULT_NODE_IMAGE
   return [
@@ -204,7 +212,7 @@ function dockerBuildCommands(origin: string, image: string): string {
     `curl -fsSL ${base}/api/v1/public/nodes/docker/Dockerfile -o Dockerfile`,
     `curl -fsSL ${base}/api/v1/public/nodes/docker/entrypoint.sh -o entrypoint.sh`,
     `chmod +x node-execution agent-compose-node-management entrypoint.sh`,
-    `docker build -t ${img} .`,
+    `${sudo ? "sudo " : ""}docker build -t ${img} .`,
   ].join("\n")
 }
 
@@ -221,6 +229,56 @@ const COMPOSE_YML = [
 ].join("\n")
 
 /**
+ * 高级折叠区：通栏标题卡片 + 展开时自动把内容滚入弹窗可视范围。
+ *
+ * 之前贴近弹窗底部时点开折叠，新撑开的内容底部会被滚动区裁在页脚上方之外
+ * （「点击之后挡住另外的内容」的根因——Radix Collapsible 不自动滚入视口，
+ * 用户得再手动滚一下才看全）。这里在 onOpenChange 展开后用 scrollIntoView
+ * nearest 把内容刚好带进可见区，两个高级块共用，后续新增的高级块也直接复用。
+ */
+function AdvancedSection({
+  title,
+  children,
+}: {
+  title: string
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const contentRef = useRef<HTMLDivElement>(null)
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) return
+        // 内容撑开后下一帧再滚入视口（此时高度已确定）。
+        requestAnimationFrame(() => {
+          contentRef.current?.scrollIntoView({ block: "nearest" })
+        })
+      }}
+      className="group overflow-hidden rounded-lg border"
+    >
+      <CollapsibleTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="flex w-full items-center justify-between gap-2 rounded-none px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted/50"
+        >
+          <span className="flex items-center gap-1.5">
+            <ChevronsUpDown className="size-3.5" />
+            {title}
+          </span>
+          <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 group-data-[state=open]:rotate-180" />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent ref={contentRef} className="flex flex-col gap-3 border-t px-3 py-3">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/**
  * Docker「高级 / 手动部署」折叠块：本地构建镜像 + 手动 docker run + docker-compose。
  *
  * 主区已给一键命令（curl | bash，自动 build+run）；这里给需要离线 / 自定义部署的人一份
@@ -233,6 +291,7 @@ function DockerAdvancedBlock({
   secretVal,
   role,
   image,
+  sudo = false,
 }: {
   origin: string
   server: string
@@ -240,43 +299,37 @@ function DockerAdvancedBlock({
   secretVal: string
   role: string
   image: string
+  sudo?: boolean
 }) {
   return (
-    <Collapsible>
-      <CollapsibleTrigger asChild>
-        <Button variant="ghost" size="sm" className="w-fit gap-1.5 px-2 text-xs text-muted-foreground">
-          <ChevronsUpDown className="size-3.5" />
-          高级：手动构建与部署
-        </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="flex flex-col gap-3 pt-2">
-        <div className="flex flex-col gap-1.5">
-          <p className="text-xs text-muted-foreground">
-            一键命令会自动完成以下步骤。离线 / 自定义部署时可手动执行。
-          </p>
-          <p className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">① 首次：在宿主机本地构建镜像</span>
-            （管理节点与其子执行节点共用，不从公共仓库拉取）：
-          </p>
-          <CopyField label="" value={dockerBuildCommands(origin, image)} />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <p className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">② 用 docker run 启动</span>：
-          </p>
-          <CopyField label="" value={dockerRunCmd(server, nodeIdVal, secretVal, role, image)} />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <p className="text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">② 或改用 docker-compose</span>：新建目录，
-            写入 <code>.env</code> 与 <code>docker-compose.yml</code>，再{" "}
-            <code>docker compose up -d</code>（先完成 ① 构建镜像）：
-          </p>
-          <CopyField label=".env" value={composeEnvBlock(server, nodeIdVal, secretVal, role, image)} />
-          <CopyField label="docker-compose.yml" value={COMPOSE_YML} />
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
+    <AdvancedSection title="高级：手动构建与部署">
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs text-muted-foreground">
+          一键命令会自动完成以下步骤。离线 / 自定义部署时可手动执行。
+        </p>
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">① 首次：在宿主机本地构建镜像</span>
+          （管理节点与其子执行节点共用，不从公共仓库拉取）：
+        </p>
+        <CopyField label="① 本地构建镜像" value={dockerBuildCommands(origin, image, sudo)} />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">② 用 docker run 启动</span>：
+        </p>
+        <CopyField label="② docker run 启动" value={dockerRunCmd(server, nodeIdVal, secretVal, role, image, sudo)} />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">③ 或改用 docker-compose</span>：新建目录，
+          写入 <code>.env</code> 与 <code>docker-compose.yml</code>，再{" "}
+          <code>{sudo ? "sudo docker compose up -d" : "docker compose up -d"}</code>
+          （先完成 ① 构建镜像）：
+        </p>
+        <CopyField label=".env" value={composeEnvBlock(server, nodeIdVal, secretVal, role, image)} />
+        <CopyField label="docker-compose.yml" value={COMPOSE_YML} />
+      </div>
+    </AdvancedSection>
   )
 }
 
@@ -347,6 +400,7 @@ export function useNodeBinaries(open: boolean) {
   return { binaries, loading, downloadingName, onDownloadBinary }
 }
 
+/** 「安装包」tab 内容：全部平台的 agent-compose 运行程序手动下载列表。 */
 function BinaryDownloads({
   binaries,
   loading,
@@ -359,61 +413,53 @@ function BinaryDownloads({
   onDownloadBinary: (name: string) => void
 }) {
   return (
-    <Collapsible>
-      <CollapsibleTrigger asChild>
-        <Button variant="ghost" size="sm" className="w-fit gap-1.5 px-2 text-xs text-muted-foreground">
-          <ChevronsUpDown className="size-3.5" />
-          高级：手动下载运行程序
-        </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">
-        <p className="mb-2 text-xs text-muted-foreground">
-          一键命令会自动下载运行程序；仅在离线安装或自定义部署时需要手动获取对应平台的{" "}
-          <code>agent-compose</code> 运行程序。
-        </p>
-        {loading ? (
-          <div className="flex h-12 items-center justify-center">
-            <Spinner />
-          </div>
-        ) : binaries.length === 0 ? (
-          <div className="rounded border border-dashed px-3 py-2 text-xs text-muted-foreground">
-            未配置节点运行程序目录。请将 agent-compose 的 dist 构建产物放到服务端的节点程序目录后刷新。
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1.5">
-            {binaries.map((b) => {
-              const platform =
-                b.os || b.arch
-                  ? `${OS_LABEL[b.os] || b.os || "?"} / ${ARCH_LABEL[b.arch] || b.arch || "?"}`
-                  : "校验文件"
-              return (
-                <div
-                  key={b.name}
-                  className="flex items-center justify-between gap-2 rounded border px-2.5 py-1.5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-mono text-xs">{b.name}</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {platform}
-                      {b.size ? ` · ${formatBytes(b.size)}` : ""}
-                    </div>
+    <div className="flex flex-col gap-2">
+      <p className="text-xs text-muted-foreground">
+        一键命令会自动下载对应平台的运行程序；离线安装或自定义部署时可在此手动获取
+        全部平台的 <code>agent-compose</code> 运行程序。
+      </p>
+      {loading ? (
+        <div className="flex h-12 items-center justify-center">
+          <Spinner />
+        </div>
+      ) : binaries.length === 0 ? (
+        <div className="rounded border border-dashed px-3 py-2 text-xs text-muted-foreground">
+          未配置节点运行程序目录。请将 agent-compose 的 dist 构建产物放到服务端的节点程序目录后刷新。
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {binaries.map((b) => {
+            const platform =
+              b.os || b.arch
+                ? `${OS_LABEL[b.os] || b.os || "?"} / ${ARCH_LABEL[b.arch] || b.arch || "?"}`
+                : "校验文件"
+            return (
+              <div
+                key={b.name}
+                className="flex items-center justify-between gap-2 rounded border px-2.5 py-1.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-mono text-xs">{b.name}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {platform}
+                    {b.size ? ` · ${formatBytes(b.size)}` : ""}
                   </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={downloadingName === b.name}
-                    onClick={() => onDownloadBinary(b.name)}
-                  >
-                    {downloadingName === b.name ? <Spinner /> : <Download />}
-                    下载
-                  </Button>
                 </div>
-              )
-            })}
-          </div>
-        )}
-      </CollapsibleContent>
-    </Collapsible>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={downloadingName === b.name}
+                  onClick={() => onDownloadBinary(b.name)}
+                >
+                  {downloadingName === b.name ? <Spinner /> : <Download />}
+                  下载
+                </Button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -450,12 +496,26 @@ export function NodeInstallGuide({
   const nodeIdVal = nodeId || "<node_id>"
   const secretVal = secret || "<secret>"
   const image = (agentImage || "").trim() || DEFAULT_NODE_IMAGE
-  const oneClick = oneClickCommand(origin, nodeId)
-  const dockerOneClick = oneClickCommand(origin, nodeId, "docker")
+  // sudo 提权（默认开）：docker 方式访问 docker.sock 必须有 root，否则 build 镜像时就报
+  // 「permission denied … docker API」；standalone 装在当前用户目录，不需要时可关闭。
+  const [useSudo, setUseSudo] = useState(true)
+  const oneClick = oneClickCommand(origin, nodeId, undefined, useSudo)
+  const dockerOneClick = oneClickCommand(origin, nodeId, "docker", useSudo)
   const oneClickBat = oneClickBatCommand(origin, nodeId)
   const oneClickBatPowerShell = oneClickBatPowerShellCommand(origin, nodeId)
 
   const bin = useNodeBinaries(true)
+
+  // 安装方式区挂载时滚入弹窗可见区——入驻弹窗刚打开时内容比可视区高，一键命令
+  // 和两个高级入口本来沉在最底、被 footer 上方的滚动区边界"挡住够不着"。打开即滚到
+  // 这块，用户立刻看到一键命令与折叠入口，不用先瞎滚。
+  const installMethodsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const id = window.requestAnimationFrame(() => {
+      installMethodsRef.current?.scrollIntoView({ block: "start" })
+    })
+    return () => window.cancelAnimationFrame(id)
+  }, [])
 
   return (
     <div className="flex flex-col gap-4">
@@ -501,13 +561,31 @@ export function NodeInstallGuide({
         <CopyField label="otpauth URI（可选，可扫入验证器）" value={otpauthUri} />
       ) : null}
 
-      <div className="flex flex-col gap-3">
+      <div ref={installMethodsRef} className="flex flex-col gap-3">
         <Label>安装方式（按平台选择）</Label>
+        <div className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm font-medium leading-none">sudo 提权执行</span>
+            <span className="text-xs text-muted-foreground">
+              Docker 方式需 root 访问 /var/run/docker.sock，默认开启以避免「permission denied … docker API」报错；
+              standalone 方式装在当前用户目录，无需提权时可关闭。Windows 命令不受影响。
+            </span>
+          </div>
+          <Switch
+            checked={useSudo}
+            onCheckedChange={setUseSudo}
+            aria-label="sudo 提权执行"
+          />
+        </div>
         {isManagement ? (
           // 管理节点客户端：只支持容器化。
-          <Tabs defaultValue="docker">
+          <Tabs
+            defaultValue="docker"
+            onValueChange={() => installMethodsRef.current?.scrollIntoView({ block: "start" })}
+          >
             <TabsList>
               <TabsTrigger value="docker">Docker</TabsTrigger>
+              <TabsTrigger value="binaries">安装包</TabsTrigger>
             </TabsList>
             <TabsContent value="docker" className="flex flex-col gap-3 pt-3">
               <p className="text-xs text-muted-foreground">
@@ -526,17 +604,30 @@ export function NodeInstallGuide({
                 secretVal={secretVal}
                 role="management"
                 image={image}
+                sudo={useSudo}
+              />
+            </TabsContent>
+            <TabsContent value="binaries" className="pt-3">
+              <BinaryDownloads
+                binaries={bin.binaries}
+                loading={bin.loading}
+                downloadingName={bin.downloadingName}
+                onDownloadBinary={(n) => void bin.onDownloadBinary(n)}
               />
             </TabsContent>
           </Tabs>
         ) : (
-          // 执行节点：一键命令覆盖三大平台，另给 Docker。
-          <Tabs defaultValue="linux">
+          // 执行节点：一键命令覆盖三大平台，另给 Docker 与安装包下载。
+          <Tabs
+            defaultValue="linux"
+            onValueChange={() => installMethodsRef.current?.scrollIntoView({ block: "start" })}
+          >
             <TabsList>
               <TabsTrigger value="linux">Linux</TabsTrigger>
               <TabsTrigger value="macos">macOS</TabsTrigger>
               <TabsTrigger value="windows">Windows</TabsTrigger>
               <TabsTrigger value="docker">Docker</TabsTrigger>
+              <TabsTrigger value="binaries">安装包</TabsTrigger>
             </TabsList>
             <TabsContent value="linux" className="pt-3">
               <OneClickBlock
@@ -586,18 +677,20 @@ export function NodeInstallGuide({
                 secretVal={secretVal}
                 role="execution"
                 image={image}
+                sudo={useSudo}
+              />
+            </TabsContent>
+            <TabsContent value="binaries" className="pt-3">
+              <BinaryDownloads
+                binaries={bin.binaries}
+                loading={bin.loading}
+                downloadingName={bin.downloadingName}
+                onDownloadBinary={(n) => void bin.onDownloadBinary(n)}
               />
             </TabsContent>
           </Tabs>
         )}
       </div>
-
-      <BinaryDownloads
-        binaries={bin.binaries}
-        loading={bin.loading}
-        downloadingName={bin.downloadingName}
-        onDownloadBinary={(n) => void bin.onDownloadBinary(n)}
-      />
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import React from "react"
 import { Copy, Plus, Save, ShieldCheck, TestTube2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -119,8 +120,11 @@ export default function TeamManagerOIDC() {
 
   const copy = async (value?: string) => {
     if (!value) return
-    await navigator.clipboard.writeText(value)
-    toast.success(t("managerOidc.toast.copied"))
+    if (await copyToClipboard(value)) {
+      toast.success(t("managerOidc.toast.copied"))
+    } else {
+      toast.error("复制失败，请手动选择")
+    }
   }
 
   const openCreate = () => {

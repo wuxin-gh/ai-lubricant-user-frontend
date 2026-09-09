@@ -285,6 +285,39 @@ export async function installNodeEditor(
   return response.data
 }
 
+/** InstallHostTool 返回：节点装完 Node.js 后回报的 node/npm 版本；xcode 检测则回报
+ *  探测到的 xcodebuild 版本（服务端已折进 capabilities，无需重启节点即刷新标签）。 */
+export interface InstallHostToolResult {
+  node_id: string
+  tool: string
+  target_version: string
+  node_version: string
+  npm_version: string
+  /** xcode 检测成功时节点探测到的 xcodebuild 版本；nodejs / 旧版节点为空。 */
+  xcodebuild_version: string
+}
+
+/**
+ * POST /api/v1/admin/nodes/{nodeId}/host-tools/{tool}/install —— 在线安装宿主工具。
+ *
+ * nodejs：节点下载官方归档解压到自管目录（无需 root）并回报探测版本；服务端把
+ * node_version/npm_version 折进 capabilities，前端轮询 listNodes 即可见。
+ * 下载+解压可能数分钟，超时给足。
+ * xcode：检测型——节点只探测 xcodebuild（App Store 专供无法自动安装），未装时
+ * ack 错误原样携带「为什么不能自动装 + 手动步骤」，前端 toast 展示。
+ */
+export async function installNodeHostTool(
+  nodeId: string,
+  tool: "nodejs" | "xcode" = "nodejs",
+): Promise<InstallHostToolResult> {
+  const response = await request.post<InstallHostToolResult>(
+    `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/host-tools/${encodeURIComponent(tool)}/install`,
+    undefined,
+    { timeout: 620000 },
+  )
+  return response.data
+}
+
 /** POST /api/v1/admin/nodes/{nodeId}/editors/{editor}/upgrade —— 在线升级编辑器 CLI */
 export async function upgradeNodeEditor(
   nodeId: string,

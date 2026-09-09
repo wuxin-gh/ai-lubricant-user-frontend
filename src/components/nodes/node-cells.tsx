@@ -2,10 +2,11 @@
  * 节点列表的单元格与徽标——管理端与用户侧共用。
  *
  * 全部只认 {@link NodeView}，所以两侧接口形状的差异在适配器就摊平了。三种"没内容
- * 可显示"的原因分开表达，不能混成一个短横：
+ * 可显示"的原因分开表达：
  * - `displayOnly`：用户未被授权该节点，不该让他从这里推断出机器信息 → 「未授权查看」
- * - `isPassive`：纯分组容器，压根没有客户端会上报 → 「无客户端」
- * - 字段缺失：节点还没上报（旧版本或探测失败）→ 「尚未上报」
+ * - `isPassive`：纯分组容器，压根没有客户端会上报 → 列留空（节点名旁已有「不可管理」
+ *   徽标说明身份，列里再放「无客户端」占位文字是冗余）
+ * - 字段缺失：节点还没上报（旧版本或探测失败）→ 「尚未上报」（可操作信息，保留）
  */
 import { Badge } from "@/components/ui/badge"
 import {
@@ -15,14 +16,6 @@ import {
   STATUS_META,
 } from "@/pages/manager/platform/nodes/types"
 import { preferredNodeIP, type NodeView } from "./node-view"
-
-/** 容量占用标签：「会话 n/m」；未配置容量时按实际占用退化，全空返回 ""。 */
-export function nodeCapacityLabel(view: NodeView): string {
-  const maxSessions = view.capacity?.max_sessions || 0
-  const active = view.activeSessions || 0
-  if (maxSessions > 0) return `会话 ${active}/${maxSessions}`
-  return active > 0 ? `会话 ${active}` : ""
-}
 
 /** 编辑器占用标签：「编辑器 n」；无绑定返回 ""。 */
 export function nodeEditorOccupancyLabel(view: NodeView): string {
@@ -40,7 +33,7 @@ export function MachineFactCell({
 }) {
   if (!view) return null
   if (view.displayOnly) return <span className="text-xs text-muted-foreground">未授权查看</span>
-  if (view.isPassive) return <span className="text-xs text-muted-foreground">无客户端</span>
+  if (view.isPassive) return null
   const row = machineFactRows(view.capabilities).find((item) => item.key === fact)
   return (
     <span className={row?.reported ? "text-xs whitespace-normal" : "text-xs text-muted-foreground"}>
@@ -49,11 +42,11 @@ export function MachineFactCell({
   )
 }
 
-/** 节点客户端版本列（编辑器版本只在详情里展开）。 */
+/** 节点客户端版本列（编辑器版本只在详情里展开）。纯分组容器无客户端，留空。 */
 export function VersionCell({ view }: { view: NodeView | null }) {
   if (!view) return null
   if (view.displayOnly) return <span className="text-xs text-muted-foreground">未授权查看</span>
-  if (view.isPassive) return <span className="text-xs text-muted-foreground">无客户端</span>
+  if (view.isPassive) return null
   const version = (view.capabilities?.client_version || "").trim()
   if (!version) return <span className="text-xs text-muted-foreground">尚未上报</span>
   return <span className="font-mono text-xs break-all">v{version.replace(/^v/i, "")}</span>
@@ -85,14 +78,15 @@ export function EditorsCell({
  * 状态徽标。只显示一个结论：
  * 未授权 / 无客户端 / 未审批·不可用优先；只有审批通过的节点才显示在线态，此时不再
  * 显示「可用」——能上线就代表可用。「心跳超时」与「离线」分开：连接还在但心跳不新鲜
- * 是另一种故障，混成「离线」会让人误判成节点掉了。
+ * 是另一种故障，混成「离线」会让人误判成节点掉了。纯分组容器（passive）无在线态，
+ * 留空——节点名旁已有「不可管理」徽标说明。
  */
 export function NodeStatusBadge({ view }: { view: NodeView }) {
   if (view.displayOnly) {
     return <span className="text-xs text-muted-foreground">仅用于归属展示</span>
   }
   if (view.isPassive) {
-    return <span className="text-xs text-muted-foreground">即用 · 无需安装</span>
+    return null
   }
   if (view.status === "approved") {
     const stale = view.connected && !view.online
@@ -119,26 +113,27 @@ export function NodeStatusBadge({ view }: { view: NodeView }) {
   )
 }
 
-/** 名称 + 角色徽标 + 机器信息副行 + 容量占用。系统/CPU/内存/版本走各自独立列。 */
+/** 名称 + 角色徽标 + 机器信息副行 + 编辑器占用。系统/CPU/内存/版本走各自独立列。 */
 export function NodeCell({
   view,
   kindLabel,
   badgeClass,
   subTag,
+  extraTag,
   align = "center",
 }: {
   view: NodeView
   kindLabel: string
   badgeClass: string
   subTag?: { label: string; className: string }
+  /** 名称行末尾追加的徽标（树表用它显示子节点计数），无则不渲染。 */
+  extraTag?: { label: string; className: string }
   align?: "center" | "start"
 }) {
   const machineLine = machineInfoLine(view.capabilities)
   const ip = preferredNodeIP(view.capabilities)
-  // 仅归属展示的管理节点不暴露容量/占用——用户未被授权它本身。
-  const occupancyTags = view.displayOnly
-    ? []
-    : [nodeCapacityLabel(view), nodeEditorOccupancyLabel(view)].filter(Boolean)
+  // 仅归属展示的管理节点不暴露占用——用户未被授权它本身。
+  const occupancyTags = view.displayOnly ? [] : [nodeEditorOccupancyLabel(view)].filter(Boolean)
   const alignClass = align === "center" ? "items-center text-center" : "items-start text-left"
   return (
     <div className={`flex min-w-0 flex-col gap-1 ${alignClass}`}>
@@ -150,6 +145,11 @@ export function NodeCell({
         {subTag ? (
           <Badge variant="secondary" className={subTag.className}>
             {subTag.label}
+          </Badge>
+        ) : null}
+        {extraTag ? (
+          <Badge variant="secondary" className={extraTag.className}>
+            {extraTag.label}
           </Badge>
         ) : null}
       </div>

@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
 import {
-  AlertTriangle, Clock, FileText, Play, Plus, RefreshCw, ShieldCheck, Terminal, Trash2,
+  AlertTriangle, Clock, FileText, History, Play, Plus, RefreshCw, ShieldCheck, Terminal, Trash2,
 } from "lucide-react"
 
 import { cn } from "@/lib/utils"
@@ -32,13 +32,16 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { AgentMessageBubble, agentMessagesToDisplay, type AgentDisplayMessage } from "@/components/console/agent/agent-message-list"
 import {
-  approveScheduledTaskScript, createScheduledTask, deleteScheduledTask, getScheduledTask,
-  listChatModels, listScheduledTasks, listUsableKeys, runScheduledTaskNow, toggleScheduledTask,
+  approveScheduledTaskScript, createScheduledTask, deleteScheduledTask, getConversation,
+  getScheduledTask, getScheduledTaskRun, listChatModels, listScheduledTaskRuns, listScheduledTasks,
+  listUsableKeys, runScheduledTaskNow, toggleScheduledTask,
   updateScheduledTask,
   type AvailableModel, type RuntimeKeyItem,
   type ScheduledTaskDetail, type ScheduledTaskKind, type ScheduledTaskListItem,
-  type ScheduledTaskOnError, type ScheduledTaskScriptType,
+  type ScheduledTaskOnError, type ScheduledTaskRunDetail, type ScheduledTaskRunListItem,
+  type ScheduledTaskRunStatus, type ScheduledTaskRunTrigger, type ScheduledTaskScriptType,
 } from "@/api/agentClient"
 
 /** approved_hash 为空 = 待授权（脚本任务拒跑）；prompt 任务无需授权。 */
@@ -123,6 +126,14 @@ export function ScheduledTasksDialog({ open, onOpenChange, agentId, agentName }:
   // 任务级模型覆盖用的候选：Key 列表进弹框时拉一次，模型跟着所选 Key 变。
   const [usableKeys, setUsableKeys] = useState<RuntimeKeyItem[]>([])
   const [taskModels, setTaskModels] = useState<AvailableModel[]>([])
+  // 右栏模式：task = 任务详情/编辑（原有）；runs = 当前任务的执行记录（列表+详情同页）。
+  const [rightMode, setRightMode] = useState<"task" | "runs">("task")
+  const [runs, setRuns] = useState<ScheduledTaskRunListItem[]>([])
+  const [runsLoading, setRunsLoading] = useState(false)
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
+  const [runDetail, setRunDetail] = useState<ScheduledTaskRunDetail | null>(null)
+  const [runMessages, setRunMessages] = useState<AgentDisplayMessage[]>([])
+  const [runDetailLoading, setRunDetailLoading] = useState(false)
 
   const selectedId = isNew ? null : detail?.id ?? null
   const hasSelection = isNew || detail !== null
@@ -160,6 +171,12 @@ export function ScheduledTasksDialog({ open, onOpenChange, agentId, agentName }:
     setDetail(null)
     setIsNew(false)
     setForm(emptyForm())
+    // 执行记录相关状态一并复位：弹框重开总是回到任务详情视图。
+    setRightMode("task")
+    setRuns([])
+    setSelectedRunId(null)
+    setRunDetail(null)
+    setRunMessages([])
     void refresh()
     listUsableKeys().then(setUsableKeys).catch(() => setUsableKeys([]))
   }, [open, refresh])
@@ -192,10 +209,63 @@ export function ScheduledTasksDialog({ open, onOpenChange, agentId, agentName }:
     setForm(emptyForm())
   }, [])
 
+  /** 拉某任务的执行记录列表。 */
+  const loadRuns = useCallback(async (jobId: number) => {
+    setRunsLoading(true)
+    setSelectedRunId(null)
+    setRunDetail(null)
+    setRunMessages([])
+    try {
+      setRuns(await listScheduledTaskRuns(jobId))
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "加载执行记录失败")
+    } finally {
+      setRunsLoading(false)
+    }
+  }, [])
+
+  /** 选中一条执行记录 → 拉详情；有对话 id 再拉消息转展示态（AgentMessageBubble 渲染）。 */
+  const selectRun = useCallback(async (jobId: number, run: ScheduledTaskRunListItem) => {
+    setSelectedRunId(run.id)
+    setRunDetail(null)
+    setRunMessages([])
+    setRunDetailLoading(true)
+    try {
+      const detail = await getScheduledTaskRun(jobId, run.id)
+      setRunDetail(detail)
+      if (detail.conversation_id) {
+        const { messages } = await getConversation(detail.conversation_id)
+        setRunMessages(agentMessagesToDisplay(messages))
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "加载执行详情失败")
+    } finally {
+      setRunDetailLoading(false)
+    }
+  }, [])
+
+  /** 进执行记录视图：需要有已落库的当前任务（isNew 草稿没有 runs 可看）。 */
+  const enterRunsMode = useCallback(() => {
+    if (selectedId == null) return
+    setRightMode("runs")
+    void loadRuns(selectedId)
+  }, [selectedId, loadRuns])
+
+  /** 回任务详情视图。 */
+  const exitRunsMode = useCallback(() => setRightMode("task"), [])
+
   const selectTask = useCallback(async (task: ScheduledTaskListItem) => {
     setIsNew(false)
+    // 执行记录视图下切任务：runs 跟着切到新任务（详情/选中一并清空）。
+    if (rightMode === "runs") {
+      setDetail(null)
+      setSelectedRunId(null)
+      setRunDetail(null)
+      setRunMessages([])
+      void loadRuns(task.id)
+    }
     await reloadDetail(task.id)
-  }, [reloadDetail])
+  }, [reloadDetail, rightMode, loadRuns])
 
   const handleSave = useCallback(async () => {
     if (!form.name.trim() || !form.cron_expression.trim()) {
@@ -326,22 +396,42 @@ export function ScheduledTasksDialog({ open, onOpenChange, agentId, agentName }:
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="flex h-[85vh] max-h-[90vh] w-[96vw] max-w-[min(96vw,1200px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(96vw,1200px)]">
-          {/* pr-14 给右上角关闭按钮（DialogContent 的 absolute top-4 right-4）留位，
-              否则刷新按钮会和它叠在一起。 */}
-          <DialogHeader className="flex-row items-center justify-between gap-2 border-b px-5 py-4 pr-14">
-            <div className="flex min-w-0 items-center gap-2">
-              <Clock className="size-5 shrink-0 text-primary" />
-              <div className="min-w-0">
-                <DialogTitle className="truncate text-base">{title}</DialogTitle>
-                <DialogDescription className="truncate text-xs">
-                  到点自动执行。提示词任务交给 Agent 跑；脚本任务直接运行代码，报错时触发 AI 诊断。脚本需授权后才会执行。
-                </DialogDescription>
+            {/* pr-14 给右上角关闭按钮（DialogContent 的 absolute top-4 right-4）留位，
+                否则刷新按钮会和它叠在一起。 */}
+            <DialogHeader className="flex-row items-center justify-between gap-2 border-b px-5 py-4 pr-14">
+              <div className="flex min-w-0 items-center gap-2">
+                <Clock className="size-5 shrink-0 text-primary" />
+                <div className="min-w-0">
+                  <DialogTitle className="truncate text-base">{title}</DialogTitle>
+                  <DialogDescription className="truncate text-xs">
+                    到点自动执行。提示词任务交给 Agent 跑；脚本任务直接运行代码，报错时触发 AI 诊断。脚本需授权后才会执行。
+                  </DialogDescription>
+                </div>
               </div>
-            </div>
-            <Button variant="outline" size="sm" className="shrink-0" onClick={() => void refresh()} disabled={loading}>
-              <RefreshCw className={cn("size-4", loading && "animate-spin")} /> 刷新
-            </Button>
-          </DialogHeader>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  variant={rightMode === "runs" ? "default" : "outline"}
+                  size="sm"
+                  onClick={rightMode === "task" ? enterRunsMode : exitRunsMode}
+                  disabled={rightMode === "task" && (isNew || selectedId == null)}
+                  title={rightMode === "task" ? "查看当前任务的执行记录" : "返回任务详情"}
+                >
+                  <History className="size-4" />
+                  {rightMode === "task" ? "查看执行记录" : "查看任务详情"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    void refresh()
+                    if (rightMode === "runs" && selectedId != null) void loadRuns(selectedId)
+                  }}
+                  disabled={loading || runsLoading}
+                >
+                  <RefreshCw className={cn("size-4", (loading || runsLoading) && "animate-spin")} /> 刷新
+                </Button>
+              </div>
+            </DialogHeader>
 
           <div className="flex min-h-0 flex-1">
             {/* 左栏：任务列表 */}
@@ -400,13 +490,25 @@ export function ScheduledTasksDialog({ open, onOpenChange, agentId, agentName }:
               </ScrollArea>
             </div>
 
-            {/* 右栏：详情/编辑 */}
+            {/* 右栏：详情/编辑，或执行记录（列表+详情同页）。 */}
             <div className="flex min-w-0 flex-1 flex-col">
               {!hasSelection ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
                   <Clock className="size-10 opacity-40" />
                   <p>选择左侧任务查看详情，或新建一个。</p>
                 </div>
+              ) : rightMode === "runs" && selectedId != null ? (
+                <TaskRunsPane
+                  jobId={selectedId}
+                  taskName={detail?.name || form.name || "任务"}
+                  runs={runs}
+                  loading={runsLoading}
+                  selectedRunId={selectedRunId}
+                  runDetail={runDetail}
+                  runMessages={runMessages}
+                  runDetailLoading={runDetailLoading}
+                  onSelectRun={(run) => void selectRun(selectedId, run)}
+                />
               ) : (
                 <TaskDetailPane
                   form={form}
@@ -731,5 +833,190 @@ function RunResultSection({ detail }: { detail: ScheduledTaskDetail }) {
         </div>
       )}
     </div>
+  )
+}
+
+// ==================== 执行记录（列表 + 详情同页） ====================
+
+function runTriggerLabel(trigger: ScheduledTaskRunTrigger): string {
+  if (trigger === "heal") return "自愈"
+  if (trigger === "manual") return "手动"
+  return "调度"
+}
+
+function runStatusLabel(status: ScheduledTaskRunStatus): string {
+  switch (status) {
+    case "completed": return "成功"
+    case "failed": return "失败"
+    case "blocked": return "未授权拦截"
+    case "aborted": return "中止"
+    default: return "进行中"
+  }
+}
+
+function RunStatusBadge({ status }: { status: ScheduledTaskRunStatus }) {
+  const cls =
+    status === "completed"
+      ? "border-emerald-500/50 text-emerald-600 dark:text-emerald-400"
+      : status === "failed"
+        ? "border-destructive/50 text-destructive"
+        : status === "running"
+          ? "text-muted-foreground"
+          : "border-amber-500/50 text-amber-600 dark:text-amber-400"
+  return <Badge variant="outline" className={cn("shrink-0 text-[10px]", cls)}>{runStatusLabel(status)}</Badge>
+}
+
+function PreBlock({ label, text, tone }: { label: string; text: string; tone?: "destructive" }) {
+  return (
+    <div className="grid gap-1">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <pre className={cn(
+        "max-h-64 overflow-auto rounded bg-background p-2 text-xs whitespace-pre-wrap",
+        tone === "destructive" && "text-destructive",
+      )}>{text}</pre>
+    </div>
+  )
+}
+
+interface TaskRunsPaneProps {
+  jobId: number
+  taskName: string
+  runs: ScheduledTaskRunListItem[]
+  loading: boolean
+  selectedRunId: number | null
+  runDetail: ScheduledTaskRunDetail | null
+  runMessages: AgentDisplayMessage[]
+  runDetailLoading: boolean
+  onSelectRun: (run: ScheduledTaskRunListItem) => void
+}
+
+/** 执行记录视图：上方紧凑列表（每行一条执行），下方选中执行的详情。
+
+ * 脚本执行显示 stdout/stderr/exit_code；提示词/自愈执行回放当轮 Agent 对话
+ * （conversation_id → 既有 /conversations 接口 → AgentMessageBubble，只读）。 */
+function TaskRunsPane({
+  taskName, runs, loading, selectedRunId, runDetail, runMessages, runDetailLoading, onSelectRun,
+}: TaskRunsPaneProps) {
+  const isPromptLike = (r: { task_kind: string; triggered_by: string }) =>
+    r.task_kind === "prompt" || r.triggered_by === "heal"
+  return (
+    <>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b px-6 py-3">
+        <div className="min-w-0">
+          <div className="truncate font-medium">执行记录 · {taskName}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            最近 {runs.length || "—"} 次执行；脚本显示输出，提示词/自愈回放 Agent 对话。
+          </div>
+        </div>
+      </div>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-3 px-6 py-4">
+          {/* 执行列表 */}
+          {loading && runs.length === 0 ? (
+            <div className="flex h-24 items-center justify-center"><Spinner /></div>
+          ) : runs.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+              <History className="size-8 opacity-40" />
+              <p>还没有执行记录。到点自动执行或点「立即运行」后这里会出现记录。</p>
+            </div>
+          ) : (
+            <div className="flex max-h-64 flex-col gap-1 overflow-y-auto rounded-md border">
+              {runs.map((run) => (
+                <button
+                  key={run.id}
+                  onClick={() => onSelectRun(run)}
+                  className={cn(
+                    "flex flex-wrap items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent",
+                    selectedRunId === run.id && "bg-accent",
+                  )}
+                >
+                  <span className="shrink-0 font-mono text-muted-foreground">
+                    {new Date(run.run_at).toLocaleString()}
+                  </span>
+                  <RunStatusBadge status={run.status} />
+                  <Badge variant="outline" className="shrink-0 text-[10px]">{runTriggerLabel(run.triggered_by)}</Badge>
+                  {run.exit_code != null && (
+                    <span className={cn("shrink-0", run.exit_code === 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")}>
+                      exit {run.exit_code}
+                    </span>
+                  )}
+                  {run.duration_ms != null && (
+                    <span className="shrink-0 text-muted-foreground">{run.duration_ms}ms</span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">{run.result_snippet || "—"}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* 选中执行详情 */}
+          {runDetailLoading ? (
+            <div className="flex h-24 items-center justify-center"><Spinner /></div>
+          ) : runDetail ? (
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-3 rounded-lg border bg-muted/30 p-3 text-xs sm:grid-cols-4">
+                <div>
+                  <div className="text-muted-foreground">运行时间</div>
+                  <div>{new Date(runDetail.run_at).toLocaleString()}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">触发方式</div>
+                  <div>{runTriggerLabel(runDetail.triggered_by)}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">状态</div>
+                  <div className="mt-0.5"><RunStatusBadge status={runDetail.status} /></div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground">耗时</div>
+                  <div>{runDetail.duration_ms != null ? `${runDetail.duration_ms}ms` : "—"}</div>
+                </div>
+              </div>
+
+              {/* 脚本执行：输出流 */}
+              {!isPromptLike(runDetail) && (
+                <>
+                  {runDetail.exit_code != null && (
+                    <div className="text-xs">
+                      退出码：<span className={runDetail.exit_code === 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}>{runDetail.exit_code}</span>
+                    </div>
+                  )}
+                  {runDetail.stdout && <PreBlock label="stdout" text={runDetail.stdout} />}
+                  {runDetail.stderr && <PreBlock label="stderr" text={runDetail.stderr} tone="destructive" />}
+                </>
+              )}
+
+              {/* 提示词/自愈执行：回放 Agent 对话 */}
+              {isPromptLike(runDetail) && (
+                runDetail.conversation_id ? (
+                  runMessages.length > 0 ? (
+                    <div className="flex flex-col gap-2">
+                      {runMessages.map((m) => (
+                        <AgentMessageBubble key={m.id} message={m} />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex h-20 items-center justify-center text-muted-foreground"><Spinner /></div>
+                  )
+                ) : (
+                  <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+                    对话未记录（执行时对话存储未启用，或为旧版本执行）。
+                  </div>
+                )
+              )}
+
+              {runDetail.result_text && <PreBlock label="result" text={runDetail.result_text} />}
+              {runDetail.error && <PreBlock label="error" text={runDetail.error} tone="destructive" />}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-2 py-6 text-center text-sm text-muted-foreground">
+              <History className="size-8 opacity-40" />
+              <p>点击上方任意一条记录查看详情。</p>
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+    </>
   )
 }

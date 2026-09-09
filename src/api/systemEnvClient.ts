@@ -16,10 +16,21 @@ export interface SystemEnvEntry {
   kind: "skill" | "plugin" | "mcp"
   name: string
   version: string
-  /** 来自哪个 provider 的发现路径；provider-neutral 的 .agents 树与 MCP 为空。 */
+  /**
+   * 来自哪个 provider 的发现路径（声明方）：.claude/skills→claude、
+   * .agents 树→空（无单一属主）、claude 插件→claude、MCP→声明它的那份编辑器
+   * 配置（~/.mcp.json 也是 claude 的项目级配置）。
+   */
   provider: string
+  /**
+   * 会加载这条资源的编辑器集合（节点上报的事实，与运行时读取范围一致）。
+   * 一条资源被多个编辑器读到就列多个——控制台按它分组编辑器 tab。
+   */
+  readers: string[]
   /** 相对 HOME 的路径，用来向用户解释这条资源来自哪里。 */
   path: string
+  /** 技能 SKILL.md frontmatter / 插件 manifest 里的描述；MCP 无，恒空。 */
+  description: string
   /** true = 平台装的（可卸载）；false = 节点操作者自有（只读，可归档入库）。 */
   platform_managed: boolean
   /** 已归档进平台资源库时指向那条引用，用于展示「已入库」。 */

@@ -2,17 +2,17 @@ import { useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Spinner } from "@/components/ui/spinner"
-import { fetchMarketIndex, fetchMarketManifest, type MarketModule } from "@/api/marketplaceRaw"
+import { fetchMarketIndex, fetchMarketManifest } from "@/api/marketplaceRaw"
 
 /**
- * 市场版本历史弹框：node-versions / mobile-versions 共用。
+ * 市场版本历史弹框：node-versions / mobile-versions / device-control-versions 共用。
  *
  * index 里每条即一个版本（item.id = 版本号）；打开时并行拉全部 manifest 补全版本说明
  * 与更新时间——版本数量少（发行历史通常几十条内），且前端 marketplaceRaw 已有 3 秒
  * 去重缓存，管理端打开两次也几乎不重复打网络。
  */
 
-type VersionModule = "node-versions" | "mobile-versions"
+type VersionModule = "node-versions" | "mobile-versions" | "device-control-versions"
 
 interface HistoryRow {
   version: string
@@ -63,9 +63,9 @@ export function VersionHistoryDialog({
     setRows([])
     void (async () => {
       try {
-        const items = await fetchMarketIndex(module as MarketModule)
+        const items = await fetchMarketIndex(module)
         const manifests = await Promise.allSettled(
-          items.map((it) => fetchMarketManifest(module as MarketModule, it.id)),
+          items.map((it) => fetchMarketManifest(module, it.id)),
         )
         const next: HistoryRow[] = []
         items.forEach((item, i) => {
@@ -76,7 +76,9 @@ export function VersionHistoryDialog({
             version: String(manifest?.version || item.latest_version || item.id),
             test: item.test_version === true,
             updatedAt: String(extra.updated_at || ""),
-            notes: String(extra.version_notes || extra.release_notes || ""),
+            // manifest 拉取失败时回落 index summary（服务端写入时取 version_notes 首行），
+            // 保证每条历史都有描述可看。
+            notes: String(extra.version_notes || extra.release_notes || item.summary || ""),
           })
         })
         next.sort(compareVersionDesc)

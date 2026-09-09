@@ -31,7 +31,10 @@ import {
   claimIosDevice,
   listIosSigningProfiles,
   createIosSigningProfile,
+  updateIosSigningProfile,
   deleteIosSigningProfile,
+  loginAppleId,
+  verifyAppleId2fa,
   startIosWdaJob,
   getIosWdaJobStatus,
   cancelIosWdaJob,
@@ -107,6 +110,7 @@ import {
 import { IconBrandAndroid, IconBrandApple, IconBrowser } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import { copyToClipboard } from "@/utils/clipboard"
 
 /** 资源/工具类型图标：lucide 与 tabler 混用，这里只约定「接受 className」。 */
 type ToolIcon = React.ComponentType<{ className?: string }>
@@ -131,11 +135,23 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
+/** ISO 时间 → 「x 秒/分钟/小时/天前」；解析失败返回空串。 */
+function formatRelativeTime(iso: string): string {
+  const ts = new Date(iso).getTime()
+  if (!Number.isFinite(ts)) return ""
+  const diff = Math.max(0, Date.now() - ts)
+  if (diff < 60_000) return "刚刚"
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`
+  if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
+
 async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
+  if (await copyToClipboard(text)) {
     toast.success("已复制")
-  } catch {
+  } else {
     toast.error("复制失败，请手动选择")
   }
 }
@@ -249,6 +265,16 @@ export function UserToolsPage() {
   useEffect(() => {
     void reloadActive()
   }, [reloadActive])
+
+  // 设备在线状态随 WS 连接实时变化：设备 tab 激活时轮询刷新，不切换页面也能
+  // 看到上线/掉线/上报信息更新。轮询失败静默（网络抖动不打断页面）。
+  useEffect(() => {
+    if (activeKind !== "android" && activeKind !== "ios") return
+    const timer = setInterval(() => {
+      void reloadDevices().catch(() => {})
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [activeKind, reloadDevices])
 
   const detailClient = clients.find((client) => client.id === detailClientId) || null
   const detailDevice = [...androidDevices, ...iosDevices].find((device) => device.id === detailDeviceId) || null
@@ -387,6 +413,7 @@ export function UserToolsPage() {
         </section>
       ) : activeKind === "android" ? (
         <section className="flex flex-col gap-3">
+          <DeviceControlVersionBar />
           {loading ? <ResourceLoading /> : (
             <DeviceResourceList
               devices={androidDevices}
@@ -397,6 +424,7 @@ export function UserToolsPage() {
         </section>
       ) : (
         <section className="flex flex-col gap-3">
+          <DeviceControlVersionBar />
           {loading ? <ResourceLoading /> : (
             <DeviceResourceList
               devices={iosDevices}
@@ -672,6 +700,31 @@ function CdpClientList({ clients, onOpen, onDelete }: {
   )
 }
 
+// 控制 App（被控端）当前市场版本条：在设备 tab 顶部展示市场发布的最新安装包版本号，
+// 与每张设备卡片上「App vX」徽章（手机 register 上报的已装版本）对照——一眼看出
+// "市场最新" vs "手机已装"是否一致。手机没连上时卡片徽章为空（没数据可上报）。
+function DeviceControlVersionBar() {
+  const [release, setRelease] = useState<DeviceControlAppRelease | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    setLoaded(false)
+    void getDeviceControlAppRelease()
+      .then(setRelease)
+      .finally(() => setLoaded(true))
+  }, [])
+  if (!loaded) return null
+  const v = release?.android?.version || release?.version || ""
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+      <Badge variant="outline" className="text-[10px]">控制 App 市场版本</Badge>
+      <span className="font-medium text-foreground">{v ? `v${v}` : "市场未发布"}</span>
+      <span className="text-muted-foreground/70">
+        · 手机已装版本显示在每张设备卡片的「App vX」徽章（手机连上后才上报）
+      </span>
+    </div>
+  )
+}
+
 function DeviceResourceList({ devices, onOpen, onDelete }: {
   devices: DeviceResource[]
   onOpen: (device: DeviceResource) => void
@@ -684,9 +737,13 @@ function DeviceResourceList({ devices, onOpen, onDelete }: {
     <ResourceCardGrid>
       {devices.map((device) => {
         const info = device.device_info || {}
-        const model = typeof info.model === "string" ? info.model : device.device_id
+        const model = typeof info.model === "string" && info.model ? info.model : device.device_id
         const enabled = device.enabled ?? true
         const ios = device.platform === "ios"
+        // 上报信息：app 版本 / 系统 / 无障碍开关（app register 时上报）。
+        const appVersion = typeof info.app_version === "string" ? info.app_version : ""
+        const osVersion = typeof info.os_version === "string" ? info.os_version : ""
+        const accEnabled = typeof info.accessibility_enabled === "boolean" ? info.accessibility_enabled : null
         return (
           <ResourceCard
             key={device.id}
@@ -700,10 +757,20 @@ function DeviceResourceList({ devices, onOpen, onDelete }: {
                 <Badge variant={device.online && enabled ? "default" : "secondary"}>
                   {!enabled ? "已解除配对" : device.online ? "在线" : "离线"}
                 </Badge>
+                {!ios && accEnabled === false && (
+                  <Badge variant="destructive">无障碍未开</Badge>
+                )}
+                {!ios && appVersion && (
+                  <Badge variant="secondary" className="text-[10px]">App v{appVersion}</Badge>
+                )}
               </>
             }
             subtitle={model}
-            meta={device.node ? `宿主节点 ${device.node.name}` : device.device_id.slice(0, 12)}
+            meta={
+              [osVersion ? `Android ${osVersion}` : "", device.node ? `宿主节点 ${device.node.name}` : ""]
+                .filter(Boolean)
+                .join(" · ") || device.device_id.slice(0, 12)
+            }
             actions={
               <>
                 <Button variant="outline" size="sm" onClick={() => onOpen(device)}>
@@ -975,16 +1042,24 @@ function DeviceDetailDialog({
     }
   }
 
-  // device_info 里可展示的字段：型号 / 系统 / 分辨率等由设备端上报，键不固定，
-  // 挑常见几个，其余不展开（避免把整个 JSON 糊在弹框里）。
+  // device_info 由设备端 register 帧上报（app 版本 / 系统 / 机型 / 无障碍开关 /
+  // 上次错误）；online/last_seen 等实时字段由服务端补齐。键不固定，挑常见几个展示。
   const info = device?.device_info || {}
-  const infoRows: [string, string][] = [
-    ["型号", typeof info.model === "string" ? info.model : ""],
-    ["系统", typeof info.os_version === "string" ? info.os_version : ""],
+  const accEnabled = typeof info.accessibility_enabled === "boolean" ? info.accessibility_enabled : null
+  const lastError = typeof info.last_error === "string" ? info.last_error : ""
+  // last_seen_at：在线时是心跳刷新的实时点，离线时是断连时刻（服务端落库）。
+  const lastSeenAt = typeof device?.last_seen_at === "string" ? device.last_seen_at : ""
+  const lastSeenText = lastSeenAt ? formatRelativeTime(lastSeenAt) : ""
+  const infoRows: [string, string][] = ([
+    ["型号", [info.manufacturer, info.model].filter((v) => typeof v === "string" && v).join(" ")],
+    ["App 版本", typeof info.app_version === "string" ? info.app_version : ""],
+    ["系统", typeof info.os_version === "string" ? `Android ${info.os_version}` : ""],
     ["分辨率", typeof info.screen === "string" ? info.screen : ""],
+    ["无障碍服务", accEnabled === null ? "" : accEnabled ? "已开启" : "未开启（远程控制不可用）"],
     ["设备 ID", device?.device_id || ""],
     ["宿主节点", device?.node?.name || ""],
-  ]
+    ["最后在线", online ? "刚刚" : lastSeenText],
+  ] as [string, string][]).filter(([, value]) => value.trim().length > 0)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -996,6 +1071,7 @@ function DeviceDetailDialog({
             <Badge variant={online && enabled ? "default" : "secondary"}>
               {!enabled ? "已解除配对" : online ? "在线" : "离线"}
             </Badge>
+            {!ios && accEnabled === false && <Badge variant="destructive">无障碍未开</Badge>}
             <span className="text-xs text-muted-foreground">
               {device?.token_hint ? `token ${device.token_hint}` : "token 已撤销"}
             </span>
@@ -1043,7 +1119,12 @@ function DeviceDetailDialog({
               {infoRows.filter(([, value]) => value).map(([label, value]) => (
                 <div key={label} className="flex min-w-0 items-center justify-between gap-3 text-xs">
                   <span className="shrink-0 text-muted-foreground">{label}</span>
-                  <span className="min-w-0 truncate font-medium" title={value}>{value}</span>
+                  <span
+                    className={`min-w-0 truncate font-medium ${label === "无障碍服务" && accEnabled === false ? "text-destructive" : ""}`}
+                    title={value}
+                  >
+                    {value}
+                  </span>
                 </div>
               ))}
               {device?.capabilities?.length ? (
@@ -1059,6 +1140,14 @@ function DeviceDetailDialog({
               )}
             </div>
           </div>
+
+          {!ios && lastError && (
+            <div className="flex flex-col gap-1 rounded-lg border border-destructive/25 bg-destructive/5 p-3">
+              <div className="text-sm font-medium">上次错误</div>
+              <p className="text-xs leading-5 text-destructive">{lastError}</p>
+              <p className="text-xs text-muted-foreground">由设备端最近一次断开/重连时上报</p>
+            </div>
+          )}
 
           {ios && device?.data?.ios && (
             <IosWdaPanel device={device} onChanged={() => onOpenChange(false)} />
@@ -1118,6 +1207,14 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
   const [signingProfiles, setSigningProfiles] = useState<IosSigningProfile[]>([])
   const [wdaMarketVersion, setWdaMarketVersion] = useState<string>("")
   const [selectedProfileId, setSelectedProfileId] = useState<number | null>(null)
+  // 当前选中签名配置的 kind（派生自 selectedProfileId，不另存 state）：
+  //  asc/p12 用户填 bundle id；apple_id 服务端按团队域作用域自动派生，输入框隐藏。
+  // 免费签名（自备 P12）的描述文件只覆盖使用者自己创建的 App ID，须填自己的
+  // bundle id；付费（ASC / P12）保持默认。仅 prepare 用，renew/重装由服务端从
+  // prepare 落库的绑定回退（不传空串默认，避免回落官方 id 覆盖用户自己的）。
+  const selectedProfile = signingProfiles.find((p) => p.id === selectedProfileId) || null
+  const selectedProfileKind = selectedProfile?.kind
+  const [wdaBundleId, setWdaBundleId] = useState("com.facebook.WebDriverAgentRunner.xctrunner")
   const [jobRunning, setJobRunning] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [jobSnapshot, setJobSnapshot] = useState<IosWdaJobSnapshot | null>(null)
@@ -1220,7 +1317,10 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
         device_id: device.device_id,
         action,
         signing_profile_id: action === "prepare" ? selectedProfileId! : undefined,
-        wda_bundle_id: "com.facebook.WebDriverAgentRunner.xctrunner",
+        // 仅 prepare 传 bundle id；renew/重装传空串，服务端从 prepare 落库的
+        // 绑定回退（页面刷新后输入框重置为默认值，但设备装的是用户自己的 id）。
+        // apple_id 免传：服务端按团队域作用域自动派生（base.TEAMID）。
+        wda_bundle_id: action === "prepare" && selectedProfileKind !== "apple_id" ? wdaBundleId.trim() : "",
         xctest_config_name: "",
       })
       setCurrentJobId(job_id)
@@ -1317,14 +1417,42 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
                   <div className="p-2 text-xs text-muted-foreground">暂无签名配置</div>
                 ) : (
                   signingProfiles.map((p) => (
-                    <SelectItem key={p.id} value={p.id.toString()}>
-                      {p.name} ({p.kind === "asc" ? "ASC p8" : "P12"})
+                    <SelectItem key={p.id} value={p.id.toString()} disabled={p.status === "expired"}>
+                      {p.name} ({p.kind === "asc" ? "ASC p8" : p.kind === "apple_id" ? "Apple ID" : "P12"}
+                      {p.kind === "apple_id"
+                        ? p.status === "expired" ? " · 需重新登录" : " · 登录有效"
+                        : p.status === "expired" ? " · 已过期" : p.status === "expiring" ? " · 即将过期" : ""})
                     </SelectItem>
                   ))
                 )}
               </SelectContent>
             </Select>
           </div>
+
+          {selectedProfileKind === "apple_id" ? (
+            <div className="flex flex-col gap-1.5">
+              <Label>WDA Bundle ID</Label>
+              <div className="text-xs text-muted-foreground">
+                Apple ID 免费签名由服务端按团队域作用域自动派生 App ID
+                （官方 id + 团队后缀），无需填写；登录有效即可全自动准备/续期
+                （免费证书 7 天过期，自动续签刷新）。
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <Label>WDA Bundle ID</Label>
+              <Input
+                value={wdaBundleId}
+                onChange={(e) => setWdaBundleId(e.target.value)}
+                placeholder="com.facebook.WebDriverAgentRunner.xctrunner"
+              />
+              <div className="text-xs text-muted-foreground">
+                ASC / P12 付费证书保持默认即可；免费签名（自备 P12）须填你在 Xcode 里
+                创建的 App ID（如 com.你的名字.WebDriverAgentRunner），须与描述文件
+                匹配。仅首次「准备 WDA」生效，续期/重装自动沿用。
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <Label>WDA 产物</Label>
@@ -1370,6 +1498,41 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
 // iOS 签名配置管理对话框
 // =============================================================================
 
+function formatProfileDate(value?: string | null): string {
+  if (!value) return "-"
+  return new Date(value).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
+}
+
+function signingStatusBadge(p: IosSigningProfile) {
+  if (p.kind === "asc" && (!p.status || p.status === "valid")) {
+    return <Badge variant="outline" className="border-green-600 text-green-600">长期有效</Badge>
+  }
+  if (p.kind === "apple_id") {
+    // status="expired" = 会话过期（需重新登录），非描述文件到期；其余即登录有效。
+    return p.status === "expired"
+      ? <Badge variant="destructive">需重新登录</Badge>
+      : <Badge variant="outline" className="border-green-600 text-green-600">登录有效</Badge>
+  }
+  switch (p.status) {
+    case "expired":
+      return <Badge variant="destructive">已过期</Badge>
+    case "expiring":
+      return <Badge variant="outline" className="border-yellow-500 text-yellow-600">即将过期</Badge>
+    case "unknown":
+      return <Badge variant="secondary">状态未知</Badge>
+    default:
+      return <Badge variant="outline" className="border-green-600 text-green-600">可用</Badge>
+  }
+}
+
+type SigningProfileView = "list" | "form" | "detail"
+
 function IosSigningProfileDialog({
   open,
   onOpenChange,
@@ -1381,9 +1544,13 @@ function IosSigningProfileDialog({
 }) {
   const [profiles, setProfiles] = useState<IosSigningProfile[]>([])
   const [loading, setLoading] = useState(false)
-  const [creating, setCreating] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [view, setView] = useState<SigningProfileView>("list")
+  // form 态：editing 非空 = 编辑（原地换材料/改名）；null = 新建。
+  const [editing, setEditing] = useState<IosSigningProfile | null>(null)
+  const [detail, setDetail] = useState<IosSigningProfile | null>(null)
   const [name, setName] = useState("")
-  const [kind, setKind] = useState<"asc" | "p12">("asc")
+  const [kind, setKind] = useState<"asc" | "p12" | "apple_id">("apple_id")
 
   // ASC fields
   const [p8Key, setP8Key] = useState("")
@@ -1396,8 +1563,20 @@ function IosSigningProfileDialog({
   const [p12Password, setP12Password] = useState("")
   const [mobileprovisionFile, setMobileprovisionFile] = useState<File | null>(null)
 
+  // Apple ID fields（两步登录状态机：login → 2FA code）
+  const [appleEmail, setAppleEmail] = useState("")
+  const [applePassword, setApplePassword] = useState("")
+  const [appleCode, setAppleCode] = useState("")
+  const [appleLoginToken, setAppleLoginToken] = useState<string | null>(null)
+
   useEffect(() => {
-    if (open) void loadProfiles()
+    if (open) {
+      setView("list")
+      setEditing(null)
+      setDetail(null)
+      resetForm()
+      void loadProfiles()
+    }
   }, [open])
 
   const loadProfiles = async () => {
@@ -1412,46 +1591,168 @@ function IosSigningProfileDialog({
     }
   }
 
-  const createProfile = async () => {
+  const openForm = (profile: IosSigningProfile | null) => {
+    setEditing(profile)
+    if (profile) {
+      setName(profile.name)
+      setKind(profile.kind)
+      setP8Key("")
+      setKeyId("")
+      setIssuerId("")
+      setTeamId("")
+      setP12File(null)
+      setP12Password("")
+      setMobileprovisionFile(null)
+      // Apple ID 编辑 = 重新登录：预填邮箱，密码/验证码留空。
+      setAppleEmail(profile.kind === "apple_id" ? "" : "")
+      setApplePassword("")
+      setAppleCode("")
+      setAppleLoginToken(null)
+    } else {
+      resetForm()
+    }
+    setView("form")
+  }
+
+  // ── Apple ID 两步登录（不走 submitForm：材料由 Apple 侧签发，无「材料字段」）──
+  // 密码随 2FA 重发：服务端 complete_2fa 内部要重新认证（绝不缓存密码）。
+  const submitAppleLogin = async () => {
+    if (!appleEmail.trim() || !applePassword) {
+      toast.error("请输入 Apple ID 邮箱与密码")
+      return
+    }
+    setSaving(true)
+    try {
+      const result = await loginAppleId({
+        name: name.trim() || undefined,
+        email: appleEmail.trim(),
+        password: applePassword,
+        profile_id: editing?.id,
+      })
+      if (result.status === "2fa_required") {
+        setAppleLoginToken(result.login_token || null)
+        toast.info("验证码已发送到你的 Apple 设备，请输入")
+      } else {
+        toast.success(editing ? "重新登录成功，配置已更新" : "登录成功，已创建签名配置")
+        resetForm()
+        setEditing(null)
+        setView("list")
+        void loadProfiles()
+        onChanged()
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Apple ID 登录失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const submitApple2fa = async () => {
+    if (!appleLoginToken) {
+      toast.error("登录会话已失效，请返回重新登录")
+      return
+    }
+    if (!appleCode.trim()) {
+      toast.error("请输入设备上收到的验证码")
+      return
+    }
+    if (!applePassword) {
+      toast.error("请再次输入 Apple ID 密码（完成验证需要）")
+      return
+    }
+    setSaving(true)
+    try {
+      await verifyAppleId2fa({
+        login_token: appleLoginToken,
+        email: appleEmail.trim(),
+        password: applePassword,
+        code: appleCode.trim(),
+        profile_id: editing?.id,
+      })
+      toast.success(editing ? "重新登录成功，配置已更新" : "登录成功，已创建签名配置")
+      resetForm()
+      setEditing(null)
+      setView("list")
+      void loadProfiles()
+      onChanged()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "验证失败，请重新登录")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const submitForm = async () => {
     if (!name.trim()) {
       toast.error("请输入配置名称")
       return
     }
 
-    let secretData: Record<string, unknown> = {}
+    let secretData: Record<string, unknown> | null = null
 
-    if (kind === "asc") {
-      if (!p8Key || !keyId || !issuerId || !teamId) {
-        toast.error("ASC 配置需填写所有字段")
-        return
+    if (editing) {
+      // 编辑态：材料全空 = 只改名（保留现有材料）；任一提供 = 整包替换（需齐全）。
+      if (kind === "asc") {
+        if (p8Key || keyId || issuerId || teamId) {
+          if (!p8Key || !keyId || !issuerId || !teamId) {
+            toast.error("更换 ASC 材料需填写所有字段")
+            return
+          }
+          secretData = { p8_key: p8Key, key_id: keyId, issuer_id: issuerId, team_id: teamId }
+        }
+      } else if (p12File || mobileprovisionFile) {
+        if (!p12File || !mobileprovisionFile) {
+          toast.error("更换 P12 材料需同时上传证书和 mobileprovision")
+          return
+        }
+        secretData = {
+          p12_base64: await fileToBase64(p12File),
+          p12_password: p12Password,
+          mobileprovision_base64: await fileToBase64(mobileprovisionFile),
+        }
       }
-      secretData = { p8_key: p8Key, key_id: keyId, issuer_id: issuerId, team_id: teamId }
     } else {
-      if (!p12File || !mobileprovisionFile) {
-        toast.error("P12 配置需上传证书和 mobileprovision")
-        return
-      }
-
-      const p12Base64 = await fileToBase64(p12File)
-      const mobileprovisionBase64 = await fileToBase64(mobileprovisionFile)
-      secretData = {
-        p12_base64: p12Base64,
-        p12_password: p12Password,
-        mobileprovision_base64: mobileprovisionBase64,
+      // 新建：材料必须齐全。
+      if (kind === "asc") {
+        if (!p8Key || !keyId || !issuerId || !teamId) {
+          toast.error("ASC 配置需填写所有字段")
+          return
+        }
+        secretData = { p8_key: p8Key, key_id: keyId, issuer_id: issuerId, team_id: teamId }
+      } else {
+        if (!p12File || !mobileprovisionFile) {
+          toast.error("P12 配置需上传证书和 mobileprovision")
+          return
+        }
+        secretData = {
+          p12_base64: await fileToBase64(p12File),
+          p12_password: p12Password,
+          mobileprovision_base64: await fileToBase64(mobileprovisionFile),
+        }
       }
     }
 
-    setCreating(true)
+    setSaving(true)
     try {
-      await createIosSigningProfile({ name: name.trim(), kind, secret_data: secretData })
-      toast.success("签名配置已创建")
+      if (editing) {
+        await updateIosSigningProfile(editing.id, {
+          name: name.trim(),
+          ...(secretData ? { secret_data: secretData } : {}),
+        })
+        toast.success("签名配置已更新")
+      } else {
+        await createIosSigningProfile({ name: name.trim(), kind, secret_data: secretData! })
+        toast.success("签名配置已创建")
+      }
+      setEditing(null)
       resetForm()
+      setView("list")
       void loadProfiles()
       onChanged()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "创建失败")
+      toast.error(e instanceof Error ? e.message : "保存失败")
     } finally {
-      setCreating(false)
+      setSaving(false)
     }
   }
 
@@ -1466,9 +1767,15 @@ function IosSigningProfileDialog({
     }
   }
 
+  const deleteFromDetail = async (id: number) => {
+    await deleteProfile(id)
+    setDetail(null)
+    setView("list")
+  }
+
   const resetForm = () => {
     setName("")
-    setKind("asc")
+    setKind("apple_id")
     setP8Key("")
     setKeyId("")
     setIssuerId("")
@@ -1476,6 +1783,10 @@ function IosSigningProfileDialog({
     setP12File(null)
     setP12Password("")
     setMobileprovisionFile(null)
+    setAppleEmail("")
+    setApplePassword("")
+    setAppleCode("")
+    setAppleLoginToken(null)
   }
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -1490,134 +1801,322 @@ function IosSigningProfileDialog({
     })
   }
 
+  const kindDescription =
+    kind === "asc"
+      ? "需 Apple Developer Program 付费账号（约 ¥688/年）。p8 密钥在 App Store Connect → 用户和访问 → 集成 中创建（需账户持有人权限）。签名与续期全程自动，材料长期有效。"
+      : kind === "apple_id"
+        ? "用你的 Apple ID（免费，无需付费账号、无需 Mac）：登录一次即自动申请证书、注册设备并签名，含 7 天自动续期。需已开启双重认证并在受信设备上收验证码。"
+        : "自备签名证书（P12 + 描述文件）。免费 Apple ID 证书 7 天过期、到期需重新导出并在此更换；付费开发者证书约 1 年。用此配置时 WDA Bundle ID 须填证书覆盖的 App ID。"
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] w-[92vw] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>签名配置管理</DialogTitle>
-          <DialogDescription>上传 App Store Connect API Key 或 P12 证书用于 WDA 自动签名</DialogDescription>
-        </DialogHeader>
+        {view === "list" ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>签名配置管理</DialogTitle>
+              <DialogDescription>管理 WDA 签名方式，列表中展示创建时间与材料有效性状态</DialogDescription>
+            </DialogHeader>
 
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-3 rounded-lg border p-3">
-            <div className="text-sm font-medium">创建新配置</div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label>配置名称</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：我的 ASC Key" />
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label>签名方式</Label>
-              <Select value={kind} onValueChange={(v) => setKind(v as "asc" | "p12")}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="asc">App Store Connect API (推荐)</SelectItem>
-                  <SelectItem value="p12">P12 证书 + mobileprovision</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {kind === "asc" ? (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label>p8 Key (私钥内容)</Label>
-                  <Textarea
-                    value={p8Key}
-                    onChange={(e) => setP8Key(e.target.value)}
-                    placeholder="-----BEGIN PRIVATE KEY-----&#10;..."
-                    rows={4}
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1.5">
-                    <Label>Key ID</Label>
-                    <Input value={keyId} onChange={(e) => setKeyId(e.target.value)} placeholder="AB12CD34EF" />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <Label>Issuer ID</Label>
-                    <Input value={issuerId} onChange={(e) => setIssuerId(e.target.value)} placeholder="12345678-..." />
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label>Team ID</Label>
-                  <Input value={teamId} onChange={(e) => setTeamId(e.target.value)} placeholder="ABCDE12345" />
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label>P12 证书文件</Label>
-                  <Input
-                    type="file"
-                    accept=".p12"
-                    onChange={(e) => setP12File(e.target.files?.[0] || null)}
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label>P12 密码（可选）</Label>
-                  <Input
-                    type="password"
-                    value={p12Password}
-                    onChange={(e) => setP12Password(e.target.value)}
-                    placeholder="留空表示无密码"
-                  />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label>mobileprovision 文件</Label>
-                  <Input
-                    type="file"
-                    accept=".mobileprovision"
-                    onChange={(e) => setMobileprovisionFile(e.target.files?.[0] || null)}
-                  />
-                </div>
-              </>
-            )}
-
-            <Button onClick={() => void createProfile()} disabled={creating}>
-              {creating ? <Spinner className="size-4" /> : <Plus className="size-4" />}
-              创建
-            </Button>
-          </div>
-
-          <div className="flex flex-col gap-2 rounded-lg border p-3">
-            <div className="text-sm font-medium">已有配置</div>
-            {loading ? (
-              <div className="flex items-center justify-center p-4">
-                <Spinner className="size-5" />
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium">已有配置（{profiles.length}）</div>
+                <Button size="sm" onClick={() => openForm(null)}>
+                  <Plus className="size-4" />
+                  添加签名配置
+                </Button>
               </div>
-            ) : profiles.length === 0 ? (
-              <p className="p-4 text-center text-xs text-muted-foreground">暂无签名配置</p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {profiles.map((p) => (
-                  <div key={p.id} className="flex items-center justify-between rounded border bg-muted/20 p-2">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">{p.name}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {p.kind === "asc" ? "ASC API Key" : "P12 证书"} · 创建于{" "}
-                        {new Date(p.created_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric" })}
+
+              {loading ? (
+                <div className="flex items-center justify-center p-4">
+                  <Spinner className="size-5" />
+                </div>
+              ) : profiles.length === 0 ? (
+                <div className="flex flex-col items-center gap-2 rounded-lg border p-6">
+                  <p className="text-center text-xs text-muted-foreground">
+                    暂无签名配置，先添加一个才能「准备 WDA」
+                  </p>
+                  <Button size="sm" variant="outline" onClick={() => openForm(null)}>
+                    <Plus className="size-4" />
+                    立即添加
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {profiles.map((p) => (
+                    <div key={p.id} className="flex items-center gap-2 rounded border bg-muted/20 p-2">
+                      <div
+                        className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2"
+                        onClick={() => {
+                          setDetail(p)
+                          setView("detail")
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">{p.name}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {p.kind === "asc" ? "ASC API Key" : p.kind === "apple_id" ? "Apple ID" : "P12 证书"} · 创建于{" "}
+                            {formatProfileDate(p.created_at)}
+                          </div>
+                        </div>
+                        {signingStatusBadge(p)}
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={() => void deleteProfile(p.id)}>
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                完成
+              </Button>
+            </DialogFooter>
+          </>
+        ) : view === "form" ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>{editing ? "编辑签名配置" : "添加签名配置"}</DialogTitle>
+              <DialogDescription>
+                {editing
+                  ? "材料留空 = 保留现有材料、只改名；上传新材料 = 原地替换（配置 id 不变）"
+                  : "Apple ID 登录（免费全自动）或上传 App Store Connect API Key / P12 证书"}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col gap-3">
+              <Button variant="ghost" size="sm" className="w-fit" onClick={() => setView("list")}>
+                <ArrowLeft className="size-4" />
+                返回列表
+              </Button>
+
+              <div className="flex flex-col gap-3 rounded-lg border p-3">
+                <div className="flex flex-col gap-1.5">
+                  <Label>配置名称</Label>
+                  <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：我的 ASC Key" />
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <Label>签名方式</Label>
+                  <Select value={kind} onValueChange={(v) => setKind(v as "asc" | "p12" | "apple_id")} disabled={!!editing}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="apple_id">Apple ID 免费签名（推荐，全自动）</SelectItem>
+                      <SelectItem value="asc">App Store Connect API（付费）</SelectItem>
+                      <SelectItem value="p12">P12 证书 + mobileprovision（自备）</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <div className="rounded border bg-muted/30 p-2 text-xs leading-5 text-muted-foreground">
+                    {kindDescription}
+                  </div>
+                </div>
+
+                {kind === "apple_id" ? (
+                  <>
+                    {editing && (
+                      <p className="text-xs text-muted-foreground">
+                        重新登录会保留已签发的证书与设备注册（配置 id 不变，设备绑定不断）。
+                      </p>
+                    )}
+                    {!appleLoginToken ? (
+                      <>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>Apple ID（邮箱）</Label>
+                          <Input
+                            type="email"
+                            value={appleEmail}
+                            onChange={(e) => setAppleEmail(e.target.value)}
+                            placeholder="user@icloud.com"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>密码</Label>
+                          <Input
+                            type="password"
+                            value={applePassword}
+                            onChange={(e) => setApplePassword(e.target.value)}
+                            placeholder="Apple ID 密码（只用于登录，不会保存）"
+                          />
+                        </div>
+                        <Button onClick={() => void submitAppleLogin()} disabled={saving}>
+                          {saving ? <Spinner className="size-4" /> : null}
+                          {editing ? "重新登录" : "登录"}
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="rounded border border-blue-500/40 bg-blue-500/5 p-2 text-xs leading-5 text-muted-foreground">
+                          验证码已推送到你的 Apple 受信设备（iPhone/Mac 弹窗），输入显示的
+                          6 位码完成登录。没收到？返回重新登录可再次触发推送。
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>验证码</Label>
+                          <Input
+                            inputMode="numeric"
+                            value={appleCode}
+                            onChange={(e) => setAppleCode(e.target.value)}
+                            placeholder="6 位验证码"
+                          />
+                        </div>
+                        <Button onClick={() => void submitApple2fa()} disabled={saving}>
+                          {saving ? <Spinner className="size-4" /> : null}
+                          完成登录
+                        </Button>
+                        <Button variant="ghost" size="sm" className="w-fit" onClick={() => setAppleLoginToken(null)}>
+                          返回重新登录
+                        </Button>
+                      </>
+                    )}
+                  </>
+                ) : kind === "asc" ? (
+                  <>
+                    <div className="flex flex-col gap-1.5">
+                      <Label>p8 Key（私钥内容）{editing ? "（留空保留现有）" : ""}</Label>
+                      <Textarea
+                        value={p8Key}
+                        onChange={(e) => setP8Key(e.target.value)}
+                        placeholder="-----BEGIN PRIVATE KEY-----&#10;..."
+                        rows={4}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1.5">
+                        <Label>Key ID</Label>
+                        <Input value={keyId} onChange={(e) => setKeyId(e.target.value)} placeholder="AB12CD34EF" />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label>Issuer ID</Label>
+                        <Input value={issuerId} onChange={(e) => setIssuerId(e.target.value)} placeholder="12345678-..." />
                       </div>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => void deleteProfile(p.id)}
-                    >
-                      <Trash2 className="size-4" />
+                    <div className="flex flex-col gap-1.5">
+                      <Label>Team ID</Label>
+                      <Input value={teamId} onChange={(e) => setTeamId(e.target.value)} placeholder="ABCDE12345" />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex flex-col gap-1.5">
+                      <Label>P12 证书文件{editing ? "（留空保留现有）" : ""}</Label>
+                      <Input
+                        type="file"
+                        accept=".p12"
+                        onChange={(e) => setP12File(e.target.files?.[0] || null)}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <Label>P12 密码（可选）</Label>
+                      <Input
+                        type="password"
+                        value={p12Password}
+                        onChange={(e) => setP12Password(e.target.value)}
+                        placeholder="留空表示无密码"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <Label>mobileprovision 文件{editing ? "（留空保留现有）" : ""}</Label>
+                      <Input
+                        type="file"
+                        accept=".mobileprovision"
+                        onChange={(e) => setMobileprovisionFile(e.target.files?.[0] || null)}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {kind !== "apple_id" && (
+                  <Button onClick={() => void submitForm()} disabled={saving}>
+                    {saving ? <Spinner className="size-4" /> : null}
+                    {editing ? "保存" : "创建"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <DialogTitle>签名配置详情</DialogTitle>
+              <DialogDescription>配置信息与材料有效性状态</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex flex-col gap-3">
+              <Button variant="ghost" size="sm" className="w-fit" onClick={() => setView("list")}>
+                <ArrowLeft className="size-4" />
+                返回列表
+              </Button>
+
+              {detail && (
+                <div className="flex flex-col gap-3 rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-medium">{detail.name}</div>
+                    {signingStatusBadge(detail)}
+                  </div>
+
+                  <div className="flex flex-col gap-1.5 text-xs">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">类型</span>
+                      <span>{detail.kind === "asc" ? "App Store Connect API Key" : detail.kind === "apple_id" ? "Apple ID 免费签名" : "P12 证书 + mobileprovision"}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">创建时间</span>
+                      <span>{formatProfileDate(detail.created_at)}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">Team ID</span>
+                      <span>{detail.team_id || "-"}</span>
+                    </div>
+                    {detail.kind === "apple_id" && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-muted-foreground">描述文件到期</span>
+                        <span>{detail.expires_at ? formatProfileDate(detail.expires_at) : "-"}</span>
+                      </div>
+                    )}
+                    {detail.kind === "p12" && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-muted-foreground">描述文件</span>
+                        <span className="truncate">{detail.profile_name || "-"}</span>
+                      </div>
+                    )}
+                    {detail.kind === "p12" && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-muted-foreground">到期时间</span>
+                        <span>{detail.expires_at ? formatProfileDate(detail.expires_at) : "-"}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {detail.kind === "apple_id" && (
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {detail.status === "expired"
+                        ? "登录会话已过期，自动续签已暂停——点下方「重新登录」即可恢复（设备绑定不受影响）。"
+                        : "免费证书 7 天过期由自动续签刷新，无需手动操作；若登录会话过期会在此标红。"}
+                    </p>
+                  )}
+                  {detail.kind === "p12" && (
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {detail.status === "expired"
+                        ? "材料已过期，请在下方原地更换新证书——否则 WDA 签名/续期将持续失败。"
+                        : "材料到期后在此原地更换即可，使用它的设备无缝续用（配置 id 不变）。"}
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => openForm(detail)}>
+                      {detail.kind === "apple_id" ? "重新登录 / 改名" : "更换材料 / 编辑"}
+                    </Button>
+                    <Button size="sm" variant="destructive" onClick={() => void deleteFromDetail(detail.id)}>
+                      删除
                     </Button>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            完成
-          </Button>
-        </DialogFooter>
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   )
@@ -1915,6 +2414,31 @@ function AndroidSetupGuide({
 // 添加设备弹框：Android（装控制 App + 配对码）与 iOS（宿主节点 + USB 扫描认领）两条
 // 完全不同的接入方案，平台由顶部工具页签决定（哪个 Tab 的「添加」按钮进来就走哪条）。
 // =============================================================================
+
+/** 设备 device_info 里的字符串字段（model / os_version / ...），空安全。 */
+function strInfo(device: DeviceResource | null, key: string): string {
+  const v = device?.device_info?.[key]
+  return typeof v === "string" ? v : ""
+}
+
+/** 内网地址：App 配对时上报的 lan_ips 数组，渲染成一行。 */
+function lanIpsInfo(device: DeviceResource | null): string {
+  const raw = device?.device_info?.lan_ips
+  if (Array.isArray(raw) && raw.length > 0) return raw.filter((x) => typeof x === "string").join(" / ")
+  return ""
+}
+
+/** 配对成功面板里的一个信息格子：有值才渲染。 */
+function DeviceInfoField({ label, value, className }: { label: string; value: string; className?: string }) {
+  if (!value) return null
+  return (
+    <div className={className ? `min-w-0 ${className}` : "min-w-0"}>
+      <span className="text-muted-foreground">{label}：</span>
+      <span className="break-all font-medium">{value}</span>
+    </div>
+  )
+}
+
 function AddDeviceDialog({
   open,
   onOpenChange,
@@ -1957,9 +2481,14 @@ function AddDeviceDialog({
   // 已知设备快照：配对码发出后轮询，出现新 device_id 即配对成功。
   const [knownIds, setKnownIds] = useState<Set<string>>(new Set())
   const [pairedName, setPairedName] = useState<string | null>(null)
+  // 配对成功那一刻的设备记录：手机信息（型号/系统/App 版本/内网 IP）在配对请求里
+  // 已随 device_info 落库，直接取来展示——不必等 WS register 上来。
+  const [pairedDevice, setPairedDevice] = useState<DeviceResource | null>(null)
 
   const origin = typeof window !== "undefined" ? window.location.origin : ""
-  const serverAddr = `${origin}/mcp/device-control`
+  // 用户在 App 内只需填服务器地址（不带路径）：App 自己固定拼 /mcp/device-control 的
+  // 请求路径（pair + ws），这里展示/复制的也就是纯地址，杜绝路径不一致导致连不上。
+  const serverAddr = origin
   const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(origin)
 
   // Load iOS hosts when platform is iOS
@@ -2047,6 +2576,7 @@ function AddDeviceDialog({
         const fresh = devices.find((d) => !knownIds.has(d.device_id))
         if (fresh && !stop) {
           setPairedName(fresh.name || fresh.device_id.slice(0, 12))
+          setPairedDevice(fresh)
           onPaired()
           toast.success(`已连接：${fresh.name || fresh.device_id.slice(0, 12)}`)
         }
@@ -2062,7 +2592,10 @@ function AddDeviceDialog({
   }, [open, code, knownIds, pairedName, onPaired])
 
   const copy = (text: string, msg: string) => {
-    void navigator.clipboard.writeText(text).then(() => toast.success(msg))
+    void copyToClipboard(text).then((ok) => {
+      if (ok) toast.success(msg)
+      else toast.error("复制失败，请手动选择")
+    })
   }
 
   const reset = () => {
@@ -2070,10 +2603,20 @@ function AddDeviceDialog({
     setCode(null)
     setTtl(0)
     setPairedName(null)
+    setPairedDevice(null)
+    setKnownIds(new Set())
     setIosHostId("")
     setIosDiscoveredDevices([])
     setIosClaimedDeviceId(null)
   }
+
+  // 每次打开都回到全新表单：radix 的 onOpenChange 只在点遮罩/ESC 时触发，
+  // 「完成」按钮和 iOS 认领成功路径直接调 onOpenChange prop，旧数据会残留到
+  // 下一次打开（表现为「要再点一次生成配对码」）。这里以 open 为准在打开时重置。
+  useEffect(() => {
+    if (open) reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   return (
     <Dialog
@@ -2107,6 +2650,11 @@ function AddDeviceDialog({
                       这点与 Android（装控制 App + 配对码）的方案不同。WDA 由宿主节点在
                       接入后的「准备 WDA」步骤自动下载、重签并安装到手机；宿主节点
                       Windows/Linux/Mac 均可，无需 Mac 或 Xcode。
+                    </p>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      接入后先在设备列表「准备 WDA」里配置签名方式：Apple ID 免费
+                      全自动（推荐，登录一次即可、含 7 天自动续期）、付费 App Store Connect
+                      API Key（全自动）或自备 P12 证书（免费 Apple ID 证书 7 天过期）。
                     </p>
                   </TutorialStep>
 
@@ -2209,11 +2757,36 @@ function AddDeviceDialog({
           ) : code ? (
             <div className="flex flex-col gap-4">
               {pairedName ? (
-                <div className="flex items-start gap-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-                  <Smartphone className="mt-0.5 size-5 shrink-0 text-primary" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">设备已连接</div>
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">{pairedName}</div>
+                <div className="flex flex-col gap-3 rounded-md border border-primary/40 bg-primary/5 p-3">
+                  <div className="flex items-start gap-3">
+                    <Smartphone className="mt-0.5 size-5 shrink-0 text-primary" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium">设备已连接</div>
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">{pairedName}</div>
+                    </div>
+                    <Badge variant="outline" className="shrink-0">{pairedDevice?.online ? "在线" : "连接中"}</Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 border-t pt-3 text-xs">
+                    <DeviceInfoField label="型号" value={strInfo(pairedDevice, "model")} />
+                    <DeviceInfoField label="系统" value={strInfo(pairedDevice, "os_version")} />
+                    <DeviceInfoField label="厂商" value={strInfo(pairedDevice, "manufacturer")} />
+                    <DeviceInfoField label="App 版本" value={strInfo(pairedDevice, "app_version")} />
+                    <DeviceInfoField
+                      label="内网地址"
+                      value={lanIpsInfo(pairedDevice)}
+                      className="col-span-2"
+                    />
+                    <DeviceInfoField
+                      label="无障碍"
+                      value={
+                        pairedDevice?.device_info?.accessibility_enabled === true
+                          ? "已开启"
+                          : pairedDevice?.device_info?.accessibility_enabled === false
+                            ? "未开启（连上后无法远程操作）"
+                            : ""
+                      }
+                      className="col-span-2"
+                    />
                   </div>
                 </div>
               ) : (
@@ -2233,10 +2806,11 @@ function AddDeviceDialog({
                     <Copy className="size-4" />
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">配对码大小写不敏感，App 内输入小写也可以。</p>
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <Label>服务器地址（App 内填写）</Label>
+                <Label>服务器地址（App 内只需填这个地址，无需填路径）</Label>
                 <div className="flex items-center gap-2">
                   <code className="min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-xs">
                     {serverAddr}
@@ -2245,6 +2819,9 @@ function AddDeviceDialog({
                     <Copy className="size-4" />
                   </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  App 会自动拼接请求路径；地址填错时 App 会提示「未能在该地址找到设备控制服务端」。
+                </p>
                 {isLoopback && (
                   <p className="text-xs text-destructive">
                     这是本机回环地址，手机连不上。请把 localhost 换成电脑的局域网 IP，并确保手机与电脑在同一网络。

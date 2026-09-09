@@ -100,7 +100,7 @@ export default function ProjectOverviewPage() {
     <div className="flex flex-col gap-4 h-full w-full min-h-0">
       <ProjectInfo project={project} onRefresh={fetchProject} />
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full flex-1 min-h-0 flex flex-col overflow-hidden">
-        <TabsList>
+        <TabsList className="gap-1.5">
           <TabsTrigger value="description">{t("projectOverview.tabs.description")}</TabsTrigger>
           <TabsTrigger value="info">{t("projectOverview.tabs.info")}</TabsTrigger>
           <TabsTrigger value="issues">{t("projectOverview.tabs.issues")}</TabsTrigger>

@@ -51,6 +51,10 @@ export interface MessageComposerProps<T = never> {
   onSwitchModel?: (model: string) => void
   /** 模型菜单尾部的「添加模型…」入口。 */
   onAddModel?: () => void
+  /** 要求发送前必须先选模型：多模型可选而当前为空时，发送会被拦截并提示，
+   * 触发按钮也会变成琥珀色的「请选择模型」。仅任务对话等需要明确每轮模型
+   * 的场景启用；普通会话允许空模型走默认值，不受影响。 */
+  requireModel?: boolean
 
   leadingActions?: ReactNode
   leftActions?: ReactNode
@@ -84,6 +88,7 @@ export default function MessageComposer<T = never>({
   modelOptions = [],
   onSwitchModel,
   onAddModel,
+  requireModel = false,
   leadingActions,
   leftActions,
   beforeModelActions,
@@ -106,6 +111,9 @@ export default function MessageComposer<T = never>({
   const hasUnreadyAttachment = attachments.some((item) => item.status !== "uploaded")
   const uploaded = attachments.flatMap((item) => item.status === "uploaded" && item.result !== undefined ? [item.result] : [])
   const canSend = !disabled && !loading && !submitting && !hasUnreadyAttachment && (Boolean(value.trim()) || uploaded.length > 0)
+  // 模型缺选：要求选模型而当前没选（多模型可选、快照为空）。发送前拦截，
+  // 触发按钮同步变琥珀色「请选择模型」，两个可见信号指向同一个动作。
+  const modelMissing = requireModel && !modelValue
   const filteredModels = modelOptions.filter((option) => {
     const query = modelSearch.trim().toLowerCase()
     if (!query) return true
@@ -159,6 +167,12 @@ export default function MessageComposer<T = never>({
 
   async function submit() {
     if (!canSend) return
+    // 多模型可选却没选时先让用户挑模型：runtime 空快照会拿默认模型跑，
+    // 但对话里追不回这轮用的什么，事后无法回溯——所以这里硬拦一道。
+    if (modelMissing) {
+      toast.warning("请先选择一个模型再发送")
+      return
+    }
     const currentValue = value
     const currentQueue = attachments
     const currentAttachments = uploaded
@@ -241,8 +255,8 @@ export default function MessageComposer<T = never>({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 {/* min-w 保底宽度：放不下时靠 truncate 收缩而不是把整行顶出容器。 */}
-                <button type="button" className="inline-flex h-7 min-w-[120px] max-w-[210px] items-center gap-1 rounded-full px-2 text-xs text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50" title="切换模型，下一轮消息生效">
-                  <span className="truncate">{modelValue || "选择模型"}</span>
+                <button type="button" className={cn("inline-flex h-7 min-w-[120px] max-w-[210px] items-center gap-1 rounded-full px-2 text-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50", modelMissing ? "text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/40" : "text-muted-foreground hover:text-foreground")} title={modelMissing ? "请先选择一个模型" : "切换模型，下一轮消息生效"}>
+                  <span className="truncate">{modelMissing ? "请选择模型" : modelValue || "选择模型"}</span>
                   <IconChevronDown className="size-3 shrink-0 opacity-60" />
                 </button>
               </DropdownMenuTrigger>

@@ -33,10 +33,14 @@ import {
   type ResourceMirror,
 } from "@/api/resourceMirrors"
 import {
+  createReferenceFromGithubV2,
   createResourceReference,
+  deleteReferenceV2,
   deleteResourceReference,
+  listReferencesV2,
   listResourceReferences,
   type ResourceReference,
+  type ResourceReferenceV2,
   type ResourceType,
 } from "@/api/resourceReferences"
 import {
@@ -46,7 +50,10 @@ import {
 } from "@/components/marketplace/LeaderboardMarketCards"
 import type { LeaderboardDiscoverItem } from "@/api/marketplaceRaw"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import type { ParsedResource } from "@/lib/agent-resources-api"
+import { GithubRecognizeImporter, type GithubConfirmPayload } from "@/components/manager/GithubRecognizeImporter"
+import type { GithubRecognizeResult } from "@/api/githubRecognition"
 
 type View = "local" | "market"
 
@@ -117,6 +124,8 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   const [detailLoading, setDetailLoading] = useState(false)
   const [onlyReferenced, setOnlyReferenced] = useState(false)
   const [references, setReferences] = useState<ResourceReference[]>([])
+  // 新表引用（统一资源池）：GitHub 识别走 from-github-v2 落 resources + references。
+  const [v2Refs, setV2Refs] = useState<ResourceReferenceV2[]>([])
   const [referencing, setReferencing] = useState<string | null>(null)
   // 榜单条目安装中（按榜单 id），防重复点击。
   const [boardInstalling, setBoardInstalling] = useState<number | null>(null)
@@ -125,7 +134,7 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   const [mirrors, setMirrors] = useState<ResourceMirror[]>([])
   const [mirroring, setMirroring] = useState<string | null>(null) // 正在镜像的 market_id
   const [localEditing, setLocalEditing] = useState<LocalItem | null | undefined>(undefined)
-  const [importSource, setImportSource] = useState<"upload" | "url">("upload")
+  const [importSource, setImportSource] = useState<"upload" | "url" | "github">("upload")
   const [importFile, setImportFile] = useState<File | null>(null)
   const [importUrl, setImportUrl] = useState("")
   const [localName, setLocalName] = useState("")
@@ -154,17 +163,20 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
     async (flush = false) => {
       setLoading(true)
       try {
-        const [local, market, referenced] = await Promise.all([
+        const [local, market, referenced, v2] = await Promise.all([
           fetchLocal().catch(() => [] as LocalItem[]),
           fetchMarketIndex(module, flush).catch(() => [] as MarketItem[]),
           userMode
             ? Promise.resolve([] as ResourceReference[])
             : listResourceReferences(resourceType).catch(() => [] as ResourceReference[]),
+          // 新表引用（统一资源池）：管理端与用户端都可见（team 授权口径）。
+          listReferencesV2(resourceType).catch(() => [] as ResourceReferenceV2[]),
         ])
         await loadMirrors()
         setLocalItems(local)
         setMarketItems(market)
         setReferences(referenced)
+        setV2Refs(v2)
       } finally {
         setLoading(false)
       }
@@ -249,6 +261,10 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
     [references],
   )
 
+  // GitHub 识别建成的新表引用（from-github-v2 → resources + resource_references）。
+  // 资源中心直接展示：集合带 skill 列表 + 重新识别刷新 entries。
+  const ownedReferences = useMemo(() => v2Refs, [v2Refs])
+
   const current: Array<MarketItem | LocalItem> = view === "local" ? localItems : marketItems
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -295,13 +311,23 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
     if (!localCrud) return
     const repo = item.repo_full_name
     const install = (item.install_spec || {}) as {
-      skill?: { ref?: string; entries?: Array<{ name?: string; path?: string; entry?: string; editors?: string[] }> },
+      skill?: { ref?: string; download_url?: string; entries?: Array<{ name?: string; path?: string; entry?: string; editors?: string[] }> },
       plugin?: { download_url?: string },
     }
     const short = item.display_name || repo.split("/").pop() || repo
     setBoardInstalling(item.id)
     try {
       if (module === "skills") {
+        // agentscope 这类直连下载源：一个 zip 一个 skill，download_url 直接喂导入器，
+        // 走后端 finder 取 SKILL.md（不是 GitHub 仓库，拼 github archive 会 404）。
+        if (install.skill?.download_url) {
+          await localCrud.importUrl(install.skill.download_url, {
+            name: item.name || short, description: item.description || "", enabled: true,
+          })
+          toast.success(`已安装${noun}「${short}」`)
+          await load()
+          return
+        }
         const ref = install.skill?.ref || "main"
         const url = `https://github.com/${repo}/archive/refs/heads/${ref}.zip`
         const entries = (install.skill?.entries || []).filter((e) => {
@@ -382,7 +408,11 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
         toast.error(`取镜像引用失败，已复制原始来源 spec: ${e?.message}`)
       }
     }
-    void navigator.clipboard?.writeText(JSON.stringify(spec, null, 2))
+    const copied = await copyToClipboard(JSON.stringify(spec, null, 2))
+    if (!copied) {
+      toast.error("复制失败，请手动选择")
+      return
+    }
     toast.success(
       mirrored
         ? `已复制 ${specLabel}（指向服务端镜像）；在编辑器资源中勾选即可使用`
@@ -517,6 +547,97 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
       toast.error(error instanceof Error ? error.message : "删除失败")
     }
   }
+
+  // ── 从 GitHub 识别 → 引用 / 安装 ──────────────────────────────────────────
+  // 引用：服务端再探一次取坐标建 ResourceReference（github_clone，服务器零拷贝）。
+  // 安装：按 install_spec 拼 archive zip URL，走既有的 import/url 下载入库（拷贝、digest 钉死）。
+  // 集合（type=skills）：引用/安装都作用于整个集合——引用建带 entries 全量清单的集合
+  // 引用；安装=钉 commit 的集合引用（服务端镜像存档后续补）。子技能挑选在任务期做。
+  // 引用模式走 v2（先落池 resources 再建引用）；安装模式维持本地入库链路不变。
+  const onGithubConfirm = async (result: GithubRecognizeResult, payload: GithubConfirmPayload) => {
+    if (payload.mode === "reference" || payload.type === "skills") {
+      // v2 引用：服务端重探 → resources upsert（按 repo 去重）→ resource_references FK。
+      const pinned = payload.mode === "install" || payload.pinCommit
+      await createReferenceFromGithubV2({
+        repo: result.repo_full_name,
+        ref: result.ref,
+        kind: payload.type as "skills" | "skill" | "plugin",
+        name: payload.name,
+        display_name: payload.name,
+        description: payload.description,
+        entry_index: payload.entryIndex,
+        ...(pinned && result.head_sha ? { pin_commit: result.head_sha } : {}),
+      })
+      const verb = payload.mode === "reference" ? "已引用" : "已安装"
+      toast.success(
+        payload.type === "skills"
+          ? `${verb}技能集「${payload.name}」含 ${result.skill_entries.length} 个 skill（GitHub 直连）`
+          : `${verb}${noun}「${payload.name}」（GitHub 直连，服务器不存字节）`,
+      )
+      setLocalEditing(undefined)
+      await load()
+      return
+    }
+    if (payload.type === "plugin") {
+      if (!localCrud) return
+      const install = result.install_spec || {}
+      const raw = install.plugin?.download_url
+        || `https://github.com/${result.repo_full_name}/archive/refs/heads/${result.ref || "main"}.zip`
+      await localCrud.importUrl(raw.replace(/\.tar\.gz$/, ".zip"), {
+        name: payload.name, description: payload.description, enabled: true,
+      })
+      toast.success(`已安装${noun}「${payload.name}」`)
+      setLocalEditing(undefined)
+      await load()
+      return
+    }
+    // type=skill：单条目安装按 zip + skill_md_path 入本地库（引用模式已在上方 v2 分支处理）。
+    const entryIndex = payload.entryIndex ?? 0
+    if (!localCrud) return
+    const install = result.install_spec || {}
+    const entries = (install.skill?.entries || []) as Array<{
+      name?: string; path?: string; entry?: string; editors?: string[]
+    }>
+    const entry = entries[Math.min(entryIndex, entries.length - 1)] ?? entries[0]
+    const url = `https://github.com/${result.repo_full_name}/archive/refs/heads/${result.ref || "main"}.zip`
+    const path = (entry?.path || "").replace(/^\/+|\/+$/g, "")
+    const skillMdPath = path ? `${path}/${entry?.entry || "SKILL.md"}` : (entry?.entry || "SKILL.md")
+    await localCrud.importUrl(url, {
+      name: payload.name, description: payload.description, enabled: true, skill_md_path: skillMdPath,
+    })
+    toast.success(`已安装${noun}「${payload.name}」`)
+    setLocalEditing(undefined)
+    await load()
+  }
+
+  // 集合「重新识别」：重探仓库刷新 entries（仓库新增 skill 自动纳入）。repo 从
+  // source_data 还原，按同 repo upsert 同一行（pool + reference 同步刷新）。
+  const refreshCollection = async (reference: ResourceReferenceV2) => {
+    const res = reference.resource
+    const repo = String(res.source_data?.repo_full_name || "")
+    if (!repo || !repo.includes("/")) {
+      toast.error("该引用不是 GitHub 识别建成的，无法重新识别")
+      return
+    }
+    setReferencing(reference.id)
+    try {
+      await createReferenceFromGithubV2({
+        repo,
+        ref: String(res.resource_data?.ref || ""),
+        kind: "skills",
+        name: res.name,
+        display_name: res.display_name,
+        description: res.description || "",
+      })
+      toast.success(`已重新识别「${res.name}」`)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重新识别失败")
+    } finally {
+      setReferencing(null)
+    }
+  }
+
 
   return (
     <div className="flex flex-col gap-4">
@@ -690,6 +811,71 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
         </div>
       )}
 
+      {/* GitHub 识别建成的引用（新表，含技能集合）：资源中心直接展示，集合带 skill 列表
+          + 重新识别（重探仓库刷新 entries，仓库新增技能自动纳入）。 */}
+      {ownedReferences.length > 0 ? (
+        <div className="space-y-2">
+          <div className="text-sm font-medium">GitHub 引用（{ownedReferences.length}）</div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {ownedReferences.map((reference) => {
+              const res = reference.resource
+              const entries = Array.isArray(res.resource_data?.entries) ? res.resource_data.entries : []
+              const isCollection = res.resource_type === "skills" && entries.length > 0
+              const dataRef = String(res.resource_data?.ref || "")
+              return (
+                <Card key={reference.id} size="sm" className="shadow-none">
+                  <CardContent className="flex h-full flex-col p-4">
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <span className="truncate text-sm font-medium">{reference.display_name || res.display_name || res.name}</span>
+                      {isCollection ? (
+                        <Badge variant="secondary" className="shrink-0 text-[10px]">技能集 · {entries.length}</Badge>
+                      ) : (
+                        <Badge variant="outline" className="shrink-0 text-[10px]">GitHub</Badge>
+                      )}
+                    </div>
+                    {dataRef || reference.version ? (
+                      <div className="text-[11px] text-muted-foreground">
+                        {reference.version && reference.version !== dataRef
+                          ? `${dataRef} @ ${reference.version.slice(0, 7)}`
+                          : dataRef || reference.version}
+                      </div>
+                    ) : null}
+                    {reference.description || res.description ? (
+                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                        {reference.description || res.description}
+                      </p>
+                    ) : null}
+                    {isCollection ? (
+                      <details className="mt-2 text-xs">
+                        <summary className="cursor-pointer text-muted-foreground">展开 skill 列表（{entries.length}）</summary>
+                        <div className="mt-1 max-h-32 space-y-0.5 overflow-y-auto text-muted-foreground">
+                          {entries.map((entry: { name?: string; path?: string; entry?: string }, i: number) => (
+                            <div key={i} className="truncate">
+                              <span className="text-foreground">{entry.name}</span>
+                              <span className="ml-2 font-mono">{entry.path}/{entry.entry}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
+                    <div className="mt-auto flex flex-wrap gap-2 pt-2">
+                      <Button size="sm" variant="outline" disabled={referencing === reference.id} onClick={() => void deleteReferenceV2(reference.id).then(() => load()).catch((e) => toast.error(e?.message || "取消引用失败"))}>
+                        取消引用
+                      </Button>
+                      {isCollection ? (
+                        <Button size="sm" disabled={referencing === reference.id} onClick={() => void refreshCollection(reference)}>
+                          {referencing === reference.id ? "识别中..." : "重新识别"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </CardContent>
+                </Card>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
+
       <Dialog open={localEditing !== undefined} onOpenChange={(open) => { if (!open) { setLocalEditing(undefined); setParsedMeta(null); setParseStep("input") } }}>
         <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader><DialogTitle>{localEditing ? `编辑${noun}` : `导入${noun}`}</DialogTitle></DialogHeader>
@@ -700,10 +886,11 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                   type="single"
                   variant="outline"
                   value={importSource}
-                  onValueChange={(value) => { if (value) setImportSource(value as "upload" | "url") }}
+                  onValueChange={(value) => { if (value) setImportSource(value as "upload" | "url" | "github") }}
                 >
                   <ToggleGroupItem value="upload">上传文件</ToggleGroupItem>
                   <ToggleGroupItem value="url">下载链接</ToggleGroupItem>
+                  <ToggleGroupItem value="github">GitHub 仓库识别</ToggleGroupItem>
                 </ToggleGroup>
                 {importSource === "upload" ? (
                   <div className="space-y-1.5">
@@ -719,21 +906,29 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                         : "仅支持含 package.json 和有效 entry 的 ZIP 插件包。先识别再确认导入。"}
                     </p>
                   </div>
-                ) : (
+                ) : importSource === "url" ? (
                   <div className="space-y-1.5">
                     <Label>下载链接</Label>
                     <Input value={importUrl} onChange={(event) => setImportUrl(event.target.value)} placeholder="https://example.com/resource.zip" />
                     <p className="text-xs text-muted-foreground">服务端会限制协议、重定向、大小，下载后解析识别。</p>
                   </div>
+                ) : (
+                  <GithubRecognizeImporter
+                    domain={resourceType}
+                    onConfirm={(result, payload) => onGithubConfirm(result, payload)}
+                    onCancel={() => { setLocalEditing(undefined); setParsedMeta(null); setParseStep("input") }}
+                  />
                 )}
-                <div className="flex justify-end">
-                  <Button
-                    disabled={parsing || (importSource === "upload" && !importFile) || (importSource === "url" && !importUrl.trim())}
-                    onClick={() => void parseAndPreview()}
-                  >
-                    {parsing ? "识别中..." : "识别"}
-                  </Button>
-                </div>
+                {importSource !== "github" && (
+                  <div className="flex justify-end">
+                    <Button
+                      disabled={parsing || (importSource === "upload" && !importFile) || (importSource === "url" && !importUrl.trim())}
+                      onClick={() => void parseAndPreview()}
+                    >
+                      {parsing ? "识别中..." : "识别"}
+                    </Button>
+                  </div>
+                )}
               </>
             )}
             {!localEditing && parseStep === "confirm" && parsedMeta ? (

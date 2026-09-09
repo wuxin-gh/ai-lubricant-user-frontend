@@ -114,10 +114,15 @@ export interface McpUserParam {
 }
 
 export interface McpUserAuthorizationResource {
-  resource_kind: "service" | "builtin_instance";
+  // 后端实际下发 "service" | "builtin_resource"（旧类型写 builtin_instance 是漂移）。
+  resource_kind: "service" | "builtin_resource" | "builtin_instance";
   resource_id: number;
   resource_type: string;
   name: string;
+  /** service 项：执行器 kind；stdio=true 时前端标灰禁用（管理端端点暂未下发）。 */
+  kind?: string;
+  stdio?: boolean;
+  required_param?: string;
   children: Array<{ child_kind: string; child_id: number; name: string }>;
 }
 
@@ -692,10 +697,9 @@ export async function setServiceUsers(id: number, userIds: number[]): Promise<Mc
   return data;
 }
 
-export async function setServiceAuthEnabled(id: number, authEnabled: boolean): Promise<{ service_id: number; auth_enabled: boolean }> {
-  const { data } = await request.put(`/mcp/services/${id}/auth`, { auth_enabled: authEnabled });
-  return data;
-}
+// 说明：服务级「关闭鉴权」已移除——所有 MCP 服务一律要求 token（后端
+// PUT /mcp/services/{id}/auth 对 auth_enabled=false 一律 409），不再提供
+// 该 API 的前端封装。
 
 // ==================== Manifest / 附件 / 热重载 / 客户端快照 ====================
 

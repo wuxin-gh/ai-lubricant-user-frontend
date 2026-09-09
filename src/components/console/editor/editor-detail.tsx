@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { ArrowLeft, Ban, Copy, KeyRound, Pencil, Play, RefreshCw, Trash2, X } from "lucide-react"
 import { IconChevronDown, IconDeviceDesktop, IconFolder, IconInfoCircle, IconList, IconPlayerStop, IconRestore, IconRobot, IconTerminal2 } from "@tabler/icons-react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 
 import {
   AlertDialog,
@@ -386,8 +387,11 @@ export default function EditorDetail({
   async function copySessionKey(session: EditorSession) {
     const key = newlyIssuedKey && newlyIssuedKey.sessionId === session.id ? newlyIssuedKey.key : null
     if (!key) return toast.info("出于安全原因，密钥只在创建/轮换响应中返回一次")
-    await navigator.clipboard.writeText(key)
-    toast.success("已复制任务 API Key")
+    if (await copyToClipboard(key)) {
+      toast.success("已复制任务 API Key")
+    } else {
+      toast.error("复制失败，请手动选择")
+    }
   }
 
   async function rotateSessionKey(session: EditorSession) {

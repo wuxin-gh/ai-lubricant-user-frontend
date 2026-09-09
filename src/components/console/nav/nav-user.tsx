@@ -43,8 +43,6 @@ import { useTranslation } from "react-i18next"
 import { UserAvatar } from "@/components/common/user-avatar"
 import { AboutDialog } from "@/components/common/about-dialog"
 
-const MONKEYCODE_REPOSITORY_URL = "https://github.com/chaitin/monkeycode"
-
 /**
  * 侧栏底部的用户块：头像 + 名字 + 账号菜单（改名/头像/密码/退出）+ 通知 + 管理后台。
  *
@@ -82,8 +80,6 @@ export default function NavUser({ className }: { className?: string }) {
 
   // 离线版版本信息收进头像菜单（原侧栏 footer 版本块移除）。
   const currentVersion = serverConfig?.current_version || t("consoleShell.sidebar.unknownVersion")
-  const latestVersion = serverConfig?.latest_version || ""
-  const hasUpdate = Boolean(serverConfig?.current_version && latestVersion && serverConfig.current_version !== latestVersion)
 
   // 未读通知数：用户侧通知中心（/console/notifications）的红点数据源。
   const loadUnreadCount = useCallback(async () => {
@@ -286,14 +282,7 @@ export default function NavUser({ className }: { className?: string }) {
                   <DropdownMenuSeparator />
                   <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-muted-foreground">
                     <span>{t("consoleShell.sidebar.currentVersion")}</span>
-                    <span className="flex items-center gap-1.5">
-                      <span className="font-medium text-foreground">{currentVersion}</span>
-                      {hasUpdate && (
-                        <a href={MONKEYCODE_REPOSITORY_URL} target="_blank" rel="noreferrer" className="rounded bg-primary/10 px-1.5 py-0.5 text-primary">
-                          {t("consoleShell.sidebar.update")}
-                        </a>
-                      )}
-                    </span>
+                    <span className="font-medium text-foreground">{currentVersion}</span>
                   </div>
                 </>
               )}

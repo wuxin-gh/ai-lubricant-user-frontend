@@ -4,7 +4,6 @@
 // 节点在会话启动时不再直连 GitHub，改从我们服务端拉。收益：预下载、跨会话共享缓存、
 // 不依赖外网、可鉴权。
 //
-// 走 monkeycode 风格的 {code,message,data} 信封（见 project-monkeycode-routes-web-resp-envelope）。
 
 export type MirrorModule = "skills" | "plugins"
 

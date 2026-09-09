@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@/components/ui/field"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import TerminalConnectionDialog from "@/components/console/terminal-connection-dialog"
 import { VmPortForwardDialog } from "@/components/console/vm/vm-port-forward"
@@ -106,11 +107,10 @@ export default function TerminalPage() {
       url: getSharedUrl(),
       password: assistPassword,
     })
-    
-    try {
-      await navigator.clipboard.writeText(connectionInfo)
+
+    if (await copyToClipboard(connectionInfo)) {
       toast.success(t("consoleTerminal.assist.copySuccess"))
-    } catch {
+    } else {
       toast.error(t("consoleTerminal.assist.copyFailed"))
     }
   }

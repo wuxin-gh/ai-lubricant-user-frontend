@@ -52,6 +52,41 @@ export type MarketplaceStatus = {
 
 const BASE = "/api/v1/marketplace"
 
+/**
+ * 解析后端错误体——两种信封都认：
+ *  - FastAPI 原生：`{detail: "..."}`（字符串）或 `{detail: {...}}`（对象，如 manifest
+ *    校验带 errors，或 RequestValidationError 的 detail 数组）；
+ *  - 全局 OpenAI 风格信封：`{error: {message, type, code}}`（main.openai_http_exception_handler
+ *    把所有 HTTPException 转成这个形状，没有 detail 字段）。
+ * 只看 detail 时信封错误会丢真实消息、只剩「HTTP xxx」。
+ */
+function adminErrorMessage(body: any, status: number): string {
+  const detail = body?.detail
+  if (typeof detail === "string") return detail
+  if (detail && typeof detail === "object") {
+    const errs = Array.isArray(detail.errors) && detail.errors.length > 0
+      ? detail.errors.map((e: unknown) => typeof e === "string" ? e : JSON.stringify(e)).join("；")
+      : ""
+    let head: string
+    if (typeof detail.error === "object" && typeof detail.error?.message === "string") head = detail.error.message
+    else if (typeof detail.error === "string") head = detail.error
+    else if (typeof detail.message === "string") head = detail.message
+    else head = JSON.stringify(detail)
+    return errs ? `${head}：${errs}` : head
+  }
+  if (typeof body?.error?.message === "string") return body.error.message
+  if (typeof body?.message === "string") return body.message
+  return `HTTP ${status}`
+}
+
+/**
+ * 上传 job 已被服务端清掉（进程重启或超 30 分钟过期）。前端据此改走整包重传，
+ * 用本组件仍持有的表单与文件重新 POST，而不是把用户卡在失败态让他重开弹框。
+ */
+export class UploadJobGoneError extends Error {
+  constructor(message: string) { super(message); this.name = "UploadJobGoneError" }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, {
     ...init,
@@ -61,19 +96,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text()
   let body: any = null
   try { body = text ? JSON.parse(text) : null } catch { body = null }
-  if (!response.ok) {
-    const detail = body?.detail
-    if (typeof detail === "object") {
-      // 后端 manifest 校验失败返回 {error, errors:[...]}，把 errors 也带出去，
-      // 否则调用方只看到 "manifest 校验失败" 这种空话，看不到具体哪个字段错了。
-      const errs = Array.isArray(detail.errors) && detail.errors.length > 0
-        ? detail.errors.map((e: unknown) => typeof e === "string" ? e : JSON.stringify(e)).join("；")
-        : ""
-      const head = detail.error || detail.message || JSON.stringify(detail)
-      throw new Error(errs ? `${head}：${errs}` : head)
-    }
-    throw new Error(detail || body?.message || `HTTP ${response.status}`)
-  }
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body as T
 }
 
@@ -142,9 +165,9 @@ export function deleteMarketplaceItem(module: MarketplaceModule, id: string, har
 
 export type MarketplacePublishJob = {
   id: number
-  module: MarketplaceModule
+  module: MarketplaceModule | "leaderboard"
   item_id: string
-  action: "upsert" | "delete" | "refresh"
+  action: "upsert" | "delete" | "refresh" | "publish"
   status: "pending" | "pushing" | "failed"
   attempts: number
   last_error: string
@@ -160,8 +183,9 @@ export type MarketplacePublishJobs = {
   counts: PublishCounts
 }
 
-/** 发布队列面板：只列 pending/pushing/failed，done 历史不拉。 */
-export function getMarketplacePublishJobs(module?: MarketplaceModule): Promise<MarketplacePublishJobs> {
+/** 发布队列面板：只列 pending/pushing/failed，done 历史不拉。module 可传
+ *  'leaderboard' 只看榜单推送（外部榜单发布复用同一 outbox 队列）。 */
+export function getMarketplacePublishJobs(module?: MarketplaceModule | "leaderboard"): Promise<MarketplacePublishJobs> {
   return request(`/admin/publish-jobs${module ? `?module=${encodeURIComponent(module)}` : ""}`)
 }
 
@@ -262,7 +286,7 @@ export function uploadNodeVersion(form: FormData, onProgress?: UploadProgress): 
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body?.job_id ? { job_id: body.job_id } : reject(new Error("服务器未返回 job_id")))
       } else {
-        const detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body?.detail || body || `HTTP ${xhr.status}`)
+        const detail = adminErrorMessage(body, xhr.status)
         reject(new Error(detail))
       }
     }
@@ -296,19 +320,21 @@ export interface UploadJob {
   }>
 }
 
-/** GET /admin/node-versions/upload/{jobId} —— 轮询第②阶段进度。 */
+/** GET /admin/node-versions/upload/{jobId} —— 轮询第②阶段进度。job 已清（404）抛 UploadJobGoneError。 */
 export async function getNodeVersionUploadJob(jobId: string): Promise<UploadJob> {
   const response = await fetch(`${BASE}/admin/node-versions/upload/${encodeURIComponent(jobId)}`, { credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body as UploadJob
 }
 
-/** POST /admin/node-versions/upload/{jobId}/retry —— 只补传 failed 文件。 */
+/** POST /admin/node-versions/upload/{jobId}/retry —— 只补传 failed 文件。job 已清（404）抛 UploadJobGoneError。 */
 export async function retryNodeVersionUpload(jobId: string): Promise<{ retried: boolean }> {
   const response = await fetch(`${BASE}/admin/node-versions/upload/${encodeURIComponent(jobId)}/retry`, { method: "POST", credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body
 }
 
@@ -332,7 +358,7 @@ export function uploadMobileVersion(form: FormData, onProgress?: UploadProgress)
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body?.job_id ? { job_id: body.job_id } : reject(new Error("服务器未返回 job_id")))
       } else {
-        const detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body?.detail || body || `HTTP ${xhr.status}`)
+        const detail = adminErrorMessage(body, xhr.status)
         reject(new Error(detail))
       }
     }
@@ -341,19 +367,21 @@ export function uploadMobileVersion(form: FormData, onProgress?: UploadProgress)
   })
 }
 
-/** GET /admin/mobile-versions/upload/{jobId} —— 轮询第②阶段进度。 */
+/** GET /admin/mobile-versions/upload/{jobId} —— 轮询第②阶段进度。job 已清（404）抛 UploadJobGoneError。 */
 export async function getMobileVersionUploadJob(jobId: string): Promise<UploadJob> {
   const response = await fetch(`${BASE}/admin/mobile-versions/upload/${encodeURIComponent(jobId)}`, { credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body as UploadJob
 }
 
-/** POST /admin/mobile-versions/upload/{jobId}/retry —— 只补传 failed 文件。 */
+/** POST /admin/mobile-versions/upload/{jobId}/retry —— 只补传 failed 文件。job 已清（404）抛 UploadJobGoneError。 */
 export async function retryMobileVersionUpload(jobId: string): Promise<{ retried: boolean }> {
   const response = await fetch(`${BASE}/admin/mobile-versions/upload/${encodeURIComponent(jobId)}/retry`, { method: "POST", credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body
 }
 
@@ -378,7 +406,7 @@ export function uploadDeviceControlVersion(form: FormData, onProgress?: UploadPr
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body?.job_id ? { job_id: body.job_id } : reject(new Error("服务器未返回 job_id")))
       } else {
-        const detail = typeof body?.detail === "string" ? body.detail : JSON.stringify(body?.detail || body || `HTTP ${xhr.status}`)
+        const detail = adminErrorMessage(body, xhr.status)
         reject(new Error(detail))
       }
     }
@@ -387,19 +415,21 @@ export function uploadDeviceControlVersion(form: FormData, onProgress?: UploadPr
   })
 }
 
-/** GET /admin/device-control-versions/upload/{jobId} —— 轮询第②阶段进度。 */
+/** GET /admin/device-control-versions/upload/{jobId} —— 轮询第②阶段进度。job 已清（404）抛 UploadJobGoneError。 */
 export async function getDeviceControlVersionUploadJob(jobId: string): Promise<UploadJob> {
   const response = await fetch(`${BASE}/admin/device-control-versions/upload/${encodeURIComponent(jobId)}`, { credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body as UploadJob
 }
 
-/** POST /admin/device-control-versions/upload/{jobId}/retry —— 只补传 failed 文件。 */
+/** POST /admin/device-control-versions/upload/{jobId}/retry —— 只补传 failed 文件。job 已清（404）抛 UploadJobGoneError。 */
 export async function retryDeviceControlVersionUpload(jobId: string): Promise<{ retried: boolean }> {
   const response = await fetch(`${BASE}/admin/device-control-versions/upload/${encodeURIComponent(jobId)}/retry`, { method: "POST", credentials: "include" })
   const body = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(typeof body?.detail === "string" ? body.detail : `HTTP ${response.status}`)
+  if (response.status === 404) throw new UploadJobGoneError(adminErrorMessage(body, response.status))
+  if (!response.ok) throw new Error(adminErrorMessage(body, response.status))
   return body
 }
 
@@ -481,17 +511,19 @@ export interface LeaderboardStatus {
   repo: string
   boards: string[]
   launch_agent_id: number
-  last_sync: { ran_at: string; ok: boolean | null; detail: string }
+  /** 上次同步结果 + 实时进度 + 执行日志（重启后由后端回落 DB 执行记录）。 */
+  last_sync: SourceSyncStatus
   draft_count: number
   published_count: number
 }
 
+/** 榜单推送（异步队列）的入队响应：202 立即返回，worker 校验门禁后翻 published；
+ * 失败进发布队列面板（module=leaderboard）的 failed 列表，可手动重试。 */
 export interface LeaderboardPublishResult {
-  published: number[]
+  queued: number[]
   skipped: number[]
-  failed: Array<{ id: number; error: string }>
   requested: number
-  count: number
+  detail?: string
 }
 
 export function fetchLeaderboardItems(params: {
@@ -526,12 +558,13 @@ export function fetchLeaderboardStatus(): Promise<LeaderboardStatus> {
   return request<LeaderboardStatus>("/admin/leaderboard/status")
 }
 
-/** 手动触发一次同步。仍只写草稿,不发布任何条目。 */
-export function triggerLeaderboardSync(): Promise<unknown> {
+/** 手动触发一次同步（后台异步执行，立即返回 {started:true}；已在跑→409）。仍只写草稿,不发布任何条目。 */
+export function triggerLeaderboardSync(): Promise<{ started?: boolean; detail?: string }> {
   return request("/admin/leaderboard/sync", { method: "POST" })
 }
 
-/** 管理员编辑资源字段（与市场资源同一套）+ 安装配置 + 状态。 */
+/** 管理员编辑资源字段（与市场资源同一套）+ 安装配置。**不含发布**——发布是独立的
+ *  推送动作（publishLeaderboardItems 入队）；patch 传 status 会被服务端忽略。 */
 export function updateLeaderboardItem(
   itemId: number,
   patch: {
@@ -553,16 +586,20 @@ export function updateLeaderboardItem(
     tags?: string[]
     /** 排序（资源中心索引）。数字=固定位置；null=排最后按热度。 */
     sort_order?: number | null
-    /** 状态：published 时服务端执行发布校验（分类兜底）。 */
-    status?: "draft" | "published" | "hidden"
-    /** 旧字段（兼容旧客户端，新代码不传）。 */
-    labels?: string[]
-    rank?: number | null
   },
 ): Promise<LeaderboardItem> {
   return request(`/admin/leaderboard/items/${itemId}`, { method: "PATCH", body: JSON.stringify(patch) })
 }
 
+/** 按所选类型重跑探针并重派生安装配置（编辑弹框「重新识别」）。type 空=自动判定。 */
+export function reprobeLeaderboardItem(itemId: number, type?: string): Promise<LeaderboardItem> {
+  return request(`/admin/leaderboard/items/${itemId}/reprobe`, {
+    method: "POST",
+    body: JSON.stringify(type ? { type } : {}),
+  })
+}
+
+/** 推送发布：入队即返回（202），pending/failed 在发布队列（module=leaderboard）可见。 */
 export function publishLeaderboardItems(ids: number[]): Promise<LeaderboardPublishResult> {
   return request<LeaderboardPublishResult>("/admin/leaderboard/publish", {
     method: "POST",
@@ -574,43 +611,17 @@ export function unpublishLeaderboardItems(ids: number[]): Promise<{ unpublished:
   return request("/admin/leaderboard/unpublish", { method: "POST", body: JSON.stringify({ ids }) })
 }
 
+/** 批量硬删除候选池条目（含已发布行，用户侧立即不可见）。破坏性，不可恢复。 */
+export function deleteLeaderboardItems(ids: number[]): Promise<{ deleted: number[]; count: number }> {
+  return request("/admin/leaderboard/delete", { method: "POST", body: JSON.stringify({ ids }) })
+}
+
 /** 手动添加 GitHub 项目为榜单草稿；后端自动拉仓库元数据并预分类。 */
 export function createLeaderboardItem(repo: string): Promise<LeaderboardItem> {
   return request("/admin/leaderboard/items", {
     method: "POST",
     body: JSON.stringify({ repo }),
   })
-}
-
-/** 批量识别仓库信息：所有分类补描述/子分类/标签，MCP 顺带补启动方式。
- *  agent_id/model 来自弹框下拉；未传则用市场配置的专用 agent 及其绑定模型。 */
-export function batchRecognizeLeaderboardRepoInfo(
-  ids: number[],
-  options: { agentId?: number; model?: string } = {},
-): Promise<{
-  results: Array<{ id: number; repo_full_name: string; ok: boolean; description?: string; error?: string }>
-  count: number
-}> {
-  return request("/admin/leaderboard/recognize-repo-info", {
-    method: "POST",
-    body: JSON.stringify({ ids, agent_id: options.agentId, model: options.model }),
-  })
-}
-
-/** 兼容旧调用：批量补启动方式（内部已升级为仓库信息识别）。 */
-export function batchFillLeaderboardLaunchSpecs(ids: number[]): Promise<{
-  results: Array<{ id: number; repo_full_name: string; ok: boolean; error?: string }>
-  count: number
-}> {
-  return request("/admin/leaderboard/fill-launch-specs", {
-    method: "POST",
-    body: JSON.stringify({ ids }),
-  })
-}
-
-/** 让配置的专用 agent 去补这条 MCP 的启动方式。产出是草稿,需人工确认再发布。 */
-export function fillLeaderboardLaunchSpec(itemId: number): Promise<unknown> {
-  return request(`/admin/leaderboard/items/${itemId}/fill-launch-spec`, { method: "POST" })
 }
 
 /** 重新验证一条条目的 launch_spec（可选 install_spec），写回 verified/failed。幂等。 */
@@ -624,8 +635,12 @@ export function verifyLeaderboardItem(
   })
 }
 
-/** agency-agents 提示词源同步报告：转换/校验/导入结果。 */
+/** agency-agents 提示词源同步报告：转换/校验/导入结果。
+ *  同步路由是后台异步执行——POST 立即返回 ``{started: true, detail}``，
+ *  完整报告通过 last-sync 端点轮询获取。 */
 export interface AgencyAgentsSyncReport {
+  /** 后台异步路由的立即返回形态 */
+  started?: boolean
   converted: number
   failed: Array<{ path: string; id?: string; errors: string[] }>
   skipped: Array<{ path: string; reason: string }>
@@ -636,6 +651,7 @@ export interface AgencyAgentsSyncReport {
   written?: number
   import_failed?: Array<Record<string, unknown>>
   detail: string
+  logs?: Array<{ ts: string; phase: string; detail: string }>
 }
 
 /** 手动同步 agency-agents 提示词源到 prompts 模块（merge）。默认 pinned commit。
@@ -656,17 +672,42 @@ export function syncAgencyAgents(
   })
 }
 
-/** 上次 agency-agents 同步结果（ran_at / ok / detail）。 */
-export function fetchAgencyAgentsLastSync(): Promise<{ ran_at: string; ok: boolean | null; detail: string }> {
-  return request("/admin/marketplace/agency-agents/last-sync")
+/** 同步任务实时进度（后台执行中由 last-sync 端点附带返回）。 */
+export interface SourceSyncProgress {
+  running: boolean
+  phase: string
+  current: number
+  total: number
+  current_item: string
 }
 
-/** agentscope 技能源同步报告。 */
+/** last-sync 端点返回：上次结果 + 实时进度 + 执行日志。 */
+export interface SourceSyncStatus {
+  ran_at: string
+  ok: boolean | null
+  detail: string
+  progress?: SourceSyncProgress
+  logs?: Array<{ ts: string; phase: string; detail: string }>
+}
+
+/** 上次 agency-agents 同步结果（ran_at / ok / detail + 进度 + 日志）。chinese=true 查中文源端点。 */
+export function fetchAgencyAgentsLastSync(chinese = false): Promise<SourceSyncStatus> {
+  return request(
+    chinese
+      ? "/admin/marketplace/agency-agents-zh/last-sync"
+      : "/admin/marketplace/agency-agents/last-sync",
+  )
+}
+
+/** agentscope 技能源同步报告。同步路由后台异步执行——POST 立即返回 ``{started, detail}``。 */
 export interface AgentscopeSyncReport {
+  /** 后台异步路由的立即返回形态 */
+  started?: boolean
   converted: number
   failed: Array<{ id?: string; code?: string; errors: string[] }>
   ran_at: string
   detail: string
+  logs?: Array<{ ts: string; phase: string; detail: string }>
 }
 
 /** 手动同步 agentscope 技能源到 skills 模块。公开 API，无需鉴权。 */
@@ -675,7 +716,7 @@ export function syncAgentscope(): Promise<AgentscopeSyncReport> {
 }
 
 /** 上次 agentscope 同步结果。 */
-export function fetchAgentscopeLastSync(): Promise<{ ran_at: string; ok: boolean | null; detail: string }> {
+export function fetchAgentscopeLastSync(): Promise<SourceSyncStatus> {
   return request("/admin/marketplace/agentscope/last-sync")
 }
 

@@ -121,12 +121,43 @@ export interface McpPrincipalParam {
   created_at?: string | null
 }
 
+/**
+ * principal 的统一授权行（mcp_grants 表）。
+ * - grant_key='service' → grant_value=mcp_services.id（服务授权）
+ * - grant_key=cdp_client_id/mail_account_id/device_id 等 → grant_value=builtin_tool_resources.id（实例绑定）
+ * 一个 principal 可同时有 service 行与 param 行；同一 grant_key 可多行（多实例绑定）。
+ */
+export interface McpGrant {
+  grant_key: string
+  grant_value: string
+  created_at?: string | null
+}
+
+/** authorization/options 下发的 param 类型目录（替代前端硬编码 PARAM_KINDS）。 */
+export interface McpAuthorizationParamKind {
+  key: string
+  label: string
+  resource_type: string
+}
+
 export interface McpAuthorizationResource {
-  resource_kind: "service" | "builtin_instance"
+  // service 项为 "service"；内置资源实例为 "builtin_resource"。放宽为 string 以兼容旧来源。
+  resource_kind: string
   resource_id: number
-  resource_type: "service" | "cdp" | "mail" | "device"
+  resource_type: string
   name: string
-  children: Array<{ child_kind: "cdp_client" | "mail_account" | "mail_address" | "device" | "tool_method"; child_id: number; name: string }>
+  url?: string
+  description?: string
+  tool_count?: number
+  transport?: string
+  /** service 项来源（builtin=内置/admin=平台/upstream=个人），用于卡片徽章。 */
+  source?: string
+  /** service 项：执行器 kind（stdio/sse/…）；stdio=true 时前端标灰禁用（执行器未实装）。 */
+  kind?: string
+  stdio?: boolean
+  /** service 项：声明所需 param key（cdp_client_id 等），用于关联实例区。 */
+  required_param?: string
+  children: Array<{ child_kind: string; child_id: number; name: string }>
 }
 
 const principalFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -181,7 +212,20 @@ export function replaceMcpPrincipalParams(id: number, params: McpPrincipalParam[
   return principalFetch(`/${id}/params`, { method: "PUT", body: JSON.stringify({ params }) })
 }
 
-export function listMcpAuthorizationOptions(): Promise<{ resources: McpAuthorizationResource[] }> {
+/** 统一授权（mcp_grants）：service 行 + param 行一次读写。新前端一律走这组，替代 /params。 */
+export function listMcpPrincipalGrants(id: number): Promise<{ grants: McpGrant[] }> {
+  return principalFetch(`/${id}/grants`)
+}
+
+export function replaceMcpPrincipalGrants(id: number, grants: McpGrant[]): Promise<{ grants: McpGrant[] }> {
+  return principalFetch(`/${id}/grants`, { method: "PUT", body: JSON.stringify({ grants }) })
+}
+
+export function listMcpAuthorizationOptions(): Promise<{
+  resources: McpAuthorizationResource[]
+  /** param 类型目录（key/label/resource_type）；旧后端未下发时前端按空目录处理。 */
+  param_kinds?: McpAuthorizationParamKind[]
+}> {
   return principalFetch("/authorization/options")
 }
 

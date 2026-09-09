@@ -12,6 +12,7 @@ import {
   getNodeVersionUploadJob,
   retryNodeVersionUpload,
   uploadNodeVersion,
+  UploadJobGoneError,
   type UploadJob,
 } from "@/api/marketplaceAdmin"
 
@@ -104,7 +105,17 @@ export function NodeVersionEditor({ open, onOpenChange, item, onSave }: {
       try {
         const latest = await getNodeVersionUploadJob(id)
         setJob(latest)
-      } catch { /* 轮询失败不致命，下个 tick 再试 */ }
+      } catch (error) {
+        if (error instanceof UploadJobGoneError) {
+          // job 被服务端清掉（重启或超 30 分钟过期），不会再有进展：落到失败态，
+          // retry 按钮会改走整包重传。避免一直「处理中…」把弹框卡死。
+          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+          setJob((prev) => prev && prev.job_id === id
+            ? { ...prev, status: "failed", error: "上传任务不存在或已过期（服务端可能已重启），点「重试失败项」用已提交的数据重新上传" }
+            : prev)
+        }
+        // 其他错误（网络抖动等）：下个 tick 再试，不致命。
+      }
     }, 2000)
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -186,6 +197,14 @@ export function NodeVersionEditor({ open, onOpenChange, item, onSave }: {
       const latest = await getNodeVersionUploadJob(job.job_id)
       setJob(latest)
     } catch (error) {
+      if (error instanceof UploadJobGoneError) {
+        // 任务已被服务端清掉（重启/过期）：用本组件仍持有的文件从头重传，而不是
+        // 把用户卡在失败态让他重开弹框。服务端对同版本重传幂等
+        // （upload_release_asset 同名先删后传）。
+        toast.info("上传任务已过期，正在用已提交的数据重新上传…")
+        await submit()
+        return
+      }
       toast.error(error instanceof Error ? error.message : String(error))
     } finally {
       setRetrying(false)
@@ -202,12 +221,16 @@ export function NodeVersionEditor({ open, onOpenChange, item, onSave }: {
 
   const existingAssets: any[] = useMemo(() => (Array.isArray(item?.assets) ? item!.assets : []), [item])
 
+  // 转传活跃中（未失败未完成）才锁弹框；failed 允许关闭——用户可选择放弃本次，
+  // 不然卡死在「处理中…」只能刷新页面。
+  const jobActive = !!job && job.status !== "failed" && job.status !== "done"
+
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent
       className="sm:max-w-3xl max-h-[90vh] overflow-y-auto"
-      // 上传中/转传中：点遮罩或按 ESC 都不关——防止误触丢进度。
-      onInteractOutside={(e) => { if (uploading || job) e.preventDefault() }}
-      onEscapeKeyDown={(e) => { if (uploading || job) e.preventDefault() }}
+      // 上传中/转传活跃中：点遮罩或按 ESC 都不关——防止误触丢进度。
+      onInteractOutside={(e) => { if (uploading || jobActive) e.preventDefault() }}
+      onEscapeKeyDown={(e) => { if (uploading || jobActive) e.preventDefault() }}
     >
       <DialogHeader>
         <DialogTitle>{item ? "编辑版本信息" : "上传新版本"}</DialogTitle>
@@ -372,9 +395,9 @@ export function NodeVersionEditor({ open, onOpenChange, item, onSave }: {
         )}
 
         <div className="flex justify-end gap-2 border-t pt-4">
-          <Button variant="outline" disabled={uploading || !!job} onClick={() => onOpenChange(false)}>取消</Button>
-          <Button disabled={uploading || !!job || !canSubmit} onClick={() => void submit()}>
-            {uploading ? "上传中..." : job ? "处理中..." : item ? "保存" : "上传并发布"}
+          <Button variant="outline" disabled={uploading || jobActive} onClick={() => onOpenChange(false)}>取消</Button>
+          <Button disabled={uploading || jobActive || !canSubmit} onClick={() => void submit()}>
+            {uploading ? "上传中..." : jobActive ? "处理中..." : item ? "保存" : "上传并发布"}
           </Button>
         </div>
       </div>

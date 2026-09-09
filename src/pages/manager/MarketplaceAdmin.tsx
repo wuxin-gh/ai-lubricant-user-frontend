@@ -19,6 +19,7 @@ import { LeaderboardShell } from "@/components/marketplace/LeaderboardShell"
 import { LeaderboardConfigPanel } from "@/components/marketplace/LeaderboardConfigPanel"
 import { AgencyAgentsPanel } from "@/components/marketplace/AgencyAgentsPanel"
 import { AgentscopePanel } from "@/components/marketplace/AgentscopePanel"
+import { CommunityConfigPanel } from "@/components/marketplace/CommunityConfigPanel"
 import { MarketplaceEditDialog, type EditMode } from "@/components/marketplace/MarketplaceEditDialog"
 import { UnifiedProviderModal } from "./platform/Channels"
 import { Progress } from "@/components/ui/progress"
@@ -50,15 +51,16 @@ import { toast } from "sonner"
 
 /**
  * 父级 tab 的取值。除了六个 manifest 模块，还有两个不落目录的特殊 tab：
- * ``leaderboard``（候选池）与 ``leaderboard-config``（配置：内含 Agent-Leaderboard
- * 与 agency-agents 两个子 tab）。
- * 这两个不走 ``fetchMarketplaceCatalog``，各自组件自己拉数据。
+ * ``leaderboard``（外部榜单）与 ``community``（社区运营）。
+ * 外部榜单内部再分二级「榜单 / 配置」——配置里是 Agent-Leaderboard 与
+ * agency-agents 等导入面板，社区运营即技术交流群 + 社区通知配置。
+ * 这两个父级 tab 不走 ``fetchMarketplaceCatalog``，各自组件自己拉数据。
  */
-type ModuleTab = MarketplaceModule | "leaderboard" | "leaderboard-config"
+type ModuleTab = MarketplaceModule | "leaderboard" | "community"
 
-/** 目录类 tab 判定：这两个特殊 tab 不拉目录、不吃新建/导出等工具栏动作。 */
+/** 目录类 tab 判定：特殊 tab 不拉目录、不吃新建/导出等工具栏动作。 */
 function isCatalogModule(tab: ModuleTab): tab is MarketplaceModule {
-  return tab !== "leaderboard" && tab !== "leaderboard-config"
+  return tab !== "leaderboard" && tab !== "community"
 }
 
 /**
@@ -91,6 +93,8 @@ export default function MarketplaceAdmin() {
   // 内容模块（MCP/插件/Skill/提示词）的 CRUD 已收口到资源中心，这里只管渠道模板/
   // 节点版本/移动端版本/外部榜单。默认落在榜单——它是这页的主工作区。
   const [module, setModule] = useState<ModuleTab>("leaderboard")
+  // 外部榜单父级 tab 内部的二级视图：「榜单」列表 vs「配置」面板。
+  const [leaderboardSub, setLeaderboardSub] = useState<"list" | "config">("list")
   const [items, setItems] = useState<MarketplaceItem[]>([])
   const [moduleCounts, setModuleCounts] = useState<Partial<Record<MarketplaceModule, number>>>({})
   // PG 保存后 GitHub 异步发布：工具栏实时显示全局 pending/pushing/failed，失败可手动重试。
@@ -158,8 +162,8 @@ export default function MarketplaceAdmin() {
   }, [])
 
   const load = useCallback(async () => {
-    // 榜单候选池/配置走独立的 store/接口，不读 GitHub 目录——这里的 fetchMarketplaceCatalog
-    // 对 "leaderboard" / "leaderboard-config" 无意义。各自面板自己拉数据。
+    // 榜单/社区运营走独立的 store/接口，不读 GitHub 目录——这里的 fetchMarketplaceCatalog
+    // 对 "leaderboard" / "community" 无意义。各自面板自己拉数据。
     if (!isCatalogModule(module)) {
       setLoading(false)
       return
@@ -505,7 +509,7 @@ export default function MarketplaceAdmin() {
               <TabsTrigger value="mobile-versions">移动端 ({moduleCounts["mobile-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="device-control-versions">设备控制 App ({moduleCounts["device-control-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="leaderboard">外部榜单</TabsTrigger>
-              <TabsTrigger value="leaderboard-config">配置</TabsTrigger>
+              <TabsTrigger value="community">社区运营</TabsTrigger>
             </TabsList>
             {/* 候选池/配置自带工具条，公共工具条（搜索/导入/导出/新建）对它无意义。 */}
             <div className={`flex gap-2 ${isCatalogModule(module) ? "" : "hidden"}`}>
@@ -540,26 +544,39 @@ export default function MarketplaceAdmin() {
         </Tabs>
 
         {module === "leaderboard" ? (
-          <LeaderboardShell onGoConfig={() => setModule("leaderboard-config")} />
-        ) : module === "leaderboard-config" ? (
-          <Tabs defaultValue="agent-leaderboard" className="w-full">
-            <TabsList>
-              <TabsTrigger value="agent-leaderboard">Agent-Leaderboard</TabsTrigger>
-              <TabsTrigger value="agency-agents">agency-agents</TabsTrigger>
-              <TabsTrigger value="agency-agents-zh">agency-agents-zh</TabsTrigger>
-              <TabsTrigger value="agentscope">agentscope</TabsTrigger>
-            </TabsList>
-            <TabsContent value="agent-leaderboard"><LeaderboardConfigPanel /></TabsContent>
-            <TabsContent value="agency-agents">
-              <AgencyAgentsPanel source={{ key: "agency_agents", title: "agency-agents", repo: "msitarzewski/agency-agents", description: "270+ 个角色扮演型 agent 提示词合集，自带 frontmatter + divisions.json，确定性转换直连 merge 进 prompts 模块。" }} />
-            </TabsContent>
-            <TabsContent value="agency-agents-zh">
-              <AgencyAgentsPanel source={{ key: "agency_agents_zh", title: "agency-agents-zh", repo: "jnMetaCode/agency-agents-zh", description: "agency-agents 中文社区版，同款结构化清单，转换口径与英文版一致。", chinese: true }} />
-            </TabsContent>
-            <TabsContent value="agentscope">
-              <AgentscopePanel />
-            </TabsContent>
-          </Tabs>
+          <div className="space-y-4">
+            {/* 外部榜单的二级视图：榜单列表 / 同步与导入配置。 */}
+            <Tabs value={leaderboardSub} onValueChange={(v) => setLeaderboardSub(v as "list" | "config")}>
+              <TabsList>
+                <TabsTrigger value="list">榜单</TabsTrigger>
+                <TabsTrigger value="config">配置</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            {leaderboardSub === "config" ? (
+              <Tabs defaultValue="agent-leaderboard" className="w-full">
+                <TabsList>
+                  <TabsTrigger value="agent-leaderboard">Agent-Leaderboard</TabsTrigger>
+                  <TabsTrigger value="agency-agents">agency-agents</TabsTrigger>
+                  <TabsTrigger value="agency-agents-zh">agency-agents-zh</TabsTrigger>
+                  <TabsTrigger value="agentscope">agentscope</TabsTrigger>
+                </TabsList>
+                <TabsContent value="agent-leaderboard"><LeaderboardConfigPanel /></TabsContent>
+                <TabsContent value="agency-agents">
+                  <AgencyAgentsPanel source={{ key: "agency_agents", title: "agency-agents", repo: "msitarzewski/agency-agents", description: "270+ 个角色扮演型 agent 提示词合集，自带 frontmatter + divisions.json，确定性转换直连 merge 进 prompts 模块。" }} />
+                </TabsContent>
+                <TabsContent value="agency-agents-zh">
+                  <AgencyAgentsPanel source={{ key: "agency_agents_zh", title: "agency-agents-zh", repo: "jnMetaCode/agency-agents-zh", description: "agency-agents 中文社区版，同款结构化清单，转换口径与英文版一致。", chinese: true }} />
+                </TabsContent>
+                <TabsContent value="agentscope">
+                  <AgentscopePanel />
+                </TabsContent>
+              </Tabs>
+            ) : (
+              <LeaderboardShell onGoConfig={() => setLeaderboardSub("config")} />
+            )}
+          </div>
+        ) : module === "community" ? (
+          <CommunityConfigPanel />
         ) : (
           <>
             {loading && <Spinner />}

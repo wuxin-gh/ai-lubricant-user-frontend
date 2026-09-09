@@ -9,7 +9,7 @@
  *
  * 「本机自有」的条目可以归档入库——打包上传成平台资源，其他节点/共用环境就能复用。
  */
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 import { Archive, Download, RefreshCw, Trash2 } from "lucide-react"
 
@@ -41,6 +41,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 const KIND_SECTIONS = [
   { kind: "skill", label: "技能", installable: true },
@@ -60,6 +61,44 @@ function touchedLabel(entry: SystemEnvTouched): string {
   }
 }
 
+/** provider key → tab 标签。 */
+function editorLabel(value: string): string {
+  switch (value) {
+    case "claude": return "Claude"
+    case "codex": return "Codex"
+    case "gemini": return "Gemini"
+    case "opencode": return "OpenCode"
+    default: return value
+  }
+}
+
+/** 把 provider 翻成用户能认的编辑器名。provider 是"发现路径的声明方"，与 tab
+ * 归属（readers）是两回事：一条 .agents 树里的资源 provider 为空，但每个读它的
+ * 编辑器 tab 都会显示它。 */
+function providerTag(entry: SystemEnvEntry): string | null {
+  if (entry.provider === "claude") return "Claude"
+  if (entry.provider === "codex") return "Codex"
+  if (entry.provider === "gemini") return "Gemini"
+  if (entry.provider === "opencode") return "OpenCode"
+  return null
+}
+
+/** 编辑器 tab 的固定顺序。 */
+const EDITOR_ORDER = ["claude", "codex", "gemini", "opencode"] as const
+
+/** 一个条目是否被某编辑器读到——节点上报的 readers 说了算（它拥有扫描目标与
+ * 运行时读取规则这两份事实），前端不做任何 kind 推断。 */
+function readByEditor(entry: SystemEnvEntry, editor: string): boolean {
+  return entry.readers.includes(editor)
+}
+
+/** claude 插件的清单名是 "name@marketplace"——拆开展示，名字在前、来源市场做副标。 */
+function splitPluginName(name: string): { name: string; market?: string } {
+  const idx = name.lastIndexOf("@")
+  if (idx <= 0) return { name }
+  return { name: name.slice(0, idx), market: name.slice(idx + 1) }
+}
+
 export interface SystemEnvPanelProps {
   nodeId: string
 }
@@ -70,6 +109,12 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
   const [busy, setBusy] = useState<string | null>(null)
   const [installKind, setInstallKind] = useState<SystemEnvFileKind | null>(null)
   const [removeTarget, setRemoveTarget] = useState<SystemEnvEntry | null>(null)
+  // 首次打开面板时若节点在线、已开启、却从未扫描过，自动扫一次——否则用户面对
+  // 一张空表以为「服务器没数据」。用 ref 卡住只触发一次，避免刷新失败后每次
+  // 重渲染都重试刷屏；换节点时随 mount 重置（父组件按 nodeId key 重新挂载）。
+  const autoScannedRef = useRef(false)
+  // 编辑器 tab 当前选中项；默认落在第一个有资源的编辑器（见下方 activeEditor）。
+  const [editorFilter, setEditorFilter] = useState<string>("")
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -96,6 +141,16 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
       setBusy(null)
     }
   }
+
+  // 首次拿到快照后：在线 + 已开启 + 从未扫描 → 自动扫一次，把节点本机的真实
+  // 资源拉到服务端。后续再打开只读快照（便宜），用户仍可手动点刷新。
+  useEffect(() => {
+    if (autoScannedRef.current || !detail) return
+    if (detail.system_env_enabled && detail.online && !detail.last_reported_at) {
+      autoScannedRef.current = true
+      void doRefresh()
+    }
+  }, [detail])
 
   const doInstall = async (kind: SystemEnvFileKind, resourceId: string, overwrite: boolean) => {
     setBusy(`install:${resourceId}`)
@@ -150,6 +205,26 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
     () => Object.values(detail?.resources || {}).reduce((sum, rows) => sum + rows.length, 0),
     [detail],
   )
+  // 编辑器 tab：从清单里实际有资源的编辑器动态收集（固定顺序在前），没有资源的
+  // 编辑器不出现空 tab。归属完全按节点上报的 readers——一条被多个编辑器读的资源
+  // （.agents 树、镜像进 .claude/skills 的平台技能）计入每个读者。
+  const editors = useMemo(() => {
+    const rows = Object.values(detail?.resources || {}).flat()
+    return EDITOR_ORDER.filter((editor) => rows.some((entry) => readByEditor(entry, editor)))
+      .map((editor) => ({
+        value: editor,
+        count: rows.filter((entry) => readByEditor(entry, editor)).length,
+        label: editorLabel(editor),
+      }))
+  }, [detail])
+
+  // 首次自动扫描进行中：空表不是「没有」，是「还没扫完」，文案要区分开。
+  const firstScan = busy === "refresh" && !detail?.last_reported_at
+  // 当前生效的编辑器：手动选的失效（刷新后该编辑器已无资源）则回落到第一个有
+  // 资源的编辑器；一个都没有时为 ""，按未过滤渲染空表。
+  const activeEditor = editors.some((item) => item.value === editorFilter)
+    ? editorFilter
+    : editors[0]?.value || ""
 
   if (loading) {
     return <div className="flex h-32 items-center justify-center"><Spinner /></div>
@@ -181,7 +256,9 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium">节点本机环境（系统内置档实际会用到的资源）</span>
           <span className="text-xs text-muted-foreground">
-            共 {total} 项
+            {activeEditor
+              ? `${editorLabel(activeEditor)} 可见的资源共 ${editors.find((item) => item.value === activeEditor)?.count ?? 0} 项`
+              : `共 ${total} 项`}
             {detail?.last_reported_at ? ` · 最近扫描 ${new Date(detail.last_reported_at).toLocaleString()}` : " · 尚未扫描"}
             {detail && !detail.online ? " · 节点当前离线" : ""}
           </span>
@@ -197,8 +274,25 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
         </Button>
       </div>
 
+      {editors.length > 0 && (
+        // 编辑器 tab：一个 tab 就是一个编辑器的环境。没有「全部/共享」——.agents 树
+        // 与 ~/.mcp.json 不是独立一类，被哪些编辑器读就归进哪些编辑器的 tab。
+        <Tabs value={activeEditor} onValueChange={setEditorFilter}>
+          <TabsList aria-label="按编辑器查看环境">
+            {editors.map((editor) => (
+              <TabsTrigger key={editor.value} value={editor.value}>
+                {editor.label}（{editor.count}）
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      )}
+
       {KIND_SECTIONS.map((section) => {
-        const rows = detail?.resources?.[section.kind] || []
+        const allRows = detail?.resources?.[section.kind] || []
+        const rows = activeEditor
+          ? allRows.filter((entry) => readByEditor(entry, activeEditor))
+          : allRows
         return (
           <div key={section.kind} className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
@@ -231,58 +325,83 @@ export function SystemEnvPanel({ nodeId }: SystemEnvPanelProps) {
                   {rows.length === 0 ? (
                     <tr>
                       <td colSpan={4} className="px-3 py-3 text-xs text-muted-foreground">
-                        暂无{section.label}。点「刷新清单」让节点重新扫描。
+                        {firstScan
+                          ? `正在扫描节点本机${section.label}…`
+                          : activeEditor
+                            ? `${editorLabel(activeEditor)} 暂无${section.label}。点「刷新清单」让节点重新扫描。`
+                            : `暂无${section.label}。点「刷新清单」让节点重新扫描。`}
                       </td>
                     </tr>
                   ) : (
-                    rows.map((entry) => (
-                      <tr key={entry.id}>
-                        <td className="px-3 py-2">
-                          <div className="truncate font-medium">{entry.name}</div>
-                          {entry.path ? (
-                            <div className="truncate font-mono text-[11px] text-muted-foreground">
-                              ~/{entry.path}
+                    rows.map((entry) => {
+                      const provider = providerTag(entry)
+                      const plugin = entry.kind === "plugin" ? splitPluginName(entry.name) : { name: entry.name }
+                      return (
+                        <tr key={entry.id}>
+                          <td className="max-w-[280px] px-3 py-2">
+                            <div className="truncate font-medium">{plugin.name}</div>
+                            {plugin.market ? (
+                              <div className="truncate text-[11px] text-muted-foreground">
+                                marketplace: {plugin.market}
+                              </div>
+                            ) : null}
+                            {entry.description ? (
+                              <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                                {entry.description}
+                              </div>
+                            ) : null}
+                            {entry.path ? (
+                              <div className="truncate font-mono text-[11px] text-muted-foreground/80">
+                                ~/{entry.path}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs">
+                            {entry.version ? `v${entry.version}` : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-1">
+                              <Badge variant={entry.platform_managed ? "outline" : "secondary"}>
+                                {entry.platform_managed ? "平台已装" : "本机自有"}
+                              </Badge>
+                              {provider ? (
+                                <Badge variant="secondary" className="font-normal">
+                                  {provider}
+                                </Badge>
+                              ) : null}
                             </div>
-                          ) : null}
-                        </td>
-                        <td className="px-3 py-2 font-mono text-xs">
-                          {entry.version ? `v${entry.version}` : "—"}
-                        </td>
-                        <td className="px-3 py-2">
-                          <Badge variant={entry.platform_managed ? "outline" : "secondary"}>
-                            {entry.platform_managed ? "平台已装" : "本机自有"}
-                          </Badge>
-                        </td>
-                        <td className="px-3 py-2">
-                          {section.installable ? (
-                            entry.platform_managed ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={busy !== null || !detail?.online}
-                                onClick={() => setRemoveTarget(entry)}
-                              >
-                                <Trash2 className="size-3.5" /> 卸载
-                              </Button>
-                            ) : entry.archived_reference_id ? (
-                              <Badge variant="secondary">已入库</Badge>
+                          </td>
+                          <td className="px-3 py-2">
+                            {section.installable ? (
+                              entry.platform_managed ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={busy !== null || !detail?.online}
+                                  onClick={() => setRemoveTarget(entry)}
+                                >
+                                  <Trash2 className="size-3.5" /> 卸载
+                                </Button>
+                              ) : entry.archived_reference_id ? (
+                                <Badge variant="secondary">已入库</Badge>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={busy !== null || !detail?.online}
+                                  title="打包上传，归档为平台资源，其他节点也能安装"
+                                  onClick={() => void doArchive(entry)}
+                                >
+                                  <Archive className="size-3.5" /> 归档入库
+                                </Button>
+                              )
                             ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={busy !== null || !detail?.online}
-                                title="打包上传，归档为平台资源，其他节点也能安装"
-                                onClick={() => void doArchive(entry)}
-                              >
-                                <Archive className="size-3.5" /> 归档入库
-                              </Button>
-                            )
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })
                   )}
                 </tbody>
               </table>
@@ -350,7 +469,8 @@ function InstallResourceDialog({
 
   return (
     <Dialog open onOpenChange={(v) => (v ? undefined : onClose())}>
-      <DialogContent className="sm:max-w-lg">
+      {/* z-[90]：在创建任务弹框的「管理资源」（z-[80]）里复用本组件时，安装弹框要盖住外层。 */}
+      <DialogContent className="z-[90] sm:max-w-lg" overlayClassName="z-[90]">
         <DialogHeader><DialogTitle>安装{kindLabel}到节点本机</DialogTitle></DialogHeader>
         {loading ? (
           <div className="flex h-32 items-center justify-center"><Spinner /></div>

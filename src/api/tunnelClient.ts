@@ -1,7 +1,6 @@
 /** 内网穿透方案管理器 — 客户端 (monkeycode_compat 用户侧路由 /api/v1/users)。
  *
  * 方案池 CRUD + 绑定 CRUD(项目内 / 节点总览 / 独立)。后端见
- * monkeycode_compat/routes_tunnel.py。
  *
  * 安全提醒:每条绑定的 public_addr 即凭证,泄漏等同开放访问,使用者自负。
  */
@@ -29,6 +28,10 @@ export interface TunnelBinding {
   local_port: number
   // 用户备注,列表显示。可空。
   description?: string | null
+  // frpc 代理名覆盖(选填);null = 生成的 tunnel-<id>。
+  proxy_name?: string | null
+  // 远端端口覆盖(frpc/npc,选填);null = 从方案端口段自动分配。
+  remote_port?: number | null
   hostname?: string | null
   public_addr?: string | null
   allocated_value?: string | null
@@ -127,6 +130,10 @@ export interface BindingInput {
   subdomain?: string
   /** 用户备注,列表显示。可空。 */
   description?: string
+  /** frpc 代理名覆盖(选填,留空生成 tunnel-<id>);仅 frpc 生效。 */
+  proxy_name?: string
+  /** 远端端口覆盖(frpc/npc,选填;留空从方案端口段自动分配)。 */
+  remote_port?: number
 }
 
 export function listProjectTunnels(projectId: string): Promise<TunnelBinding[]> {

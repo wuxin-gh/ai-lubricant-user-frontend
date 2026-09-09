@@ -59,8 +59,9 @@ function stateVariant(state?: EnvResource["state"]) {
   return "secondary" as const
 }
 
-/** 一个环境详情：资源列表 + 节点清单 diff + 增删 + 同步。 */
-function EnvironmentDetail({
+/** 一个环境详情：资源列表 + 节点清单 diff + 增删 + 同步。
+ *  也被创建任务弹框的「管理资源」复用（弹框壳传 envId + onClose）。 */
+export function EnvironmentDetail({
   envId,
   onClose,
 }: {
@@ -244,7 +245,8 @@ function ResourcePickerDialog({
 
   return (
     <Dialog open onOpenChange={(v) => (v ? undefined : onClose())}>
-      <DialogContent className="sm:max-w-lg">
+      {/* z-[90]：在创建任务弹框的「管理资源」（z-[80]）里复用本组件时，添加弹框要盖住外层。 */}
+      <DialogContent className="z-[90] sm:max-w-lg" overlayClassName="z-[90]">
         <DialogHeader><DialogTitle>选择{kindLabel}</DialogTitle></DialogHeader>
         {loading ? (
           <div className="flex h-32 items-center justify-center"><Spinner /></div>
@@ -316,13 +318,16 @@ export interface EnvironmentPanelProps {
   selectedEnvId?: string
 }
 
-/** 环境管理面板主体。 */
+/** 环境管理面板主体。compact 模式（创建任务弹框）：行首多选框 + 新建旁批量删除。 */
 export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: EnvironmentPanelProps) {
   const [envs, setEnvs] = useState<TaskEnvironment[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [detailId, setDetailId] = useState<string | null>(null)
+  // compact 多选（批量删除用）：本地状态即可，不改 Props 接口。
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
 
   const refresh = async () => {
     setLoading(true)
@@ -345,6 +350,38 @@ export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: E
     } finally { setBusy(null) }
   }
 
+  /** 批量删除：只删勾选的项；无批量接口，逐条 deleteEnvironment 并行。 */
+  const doBatchDelete = async () => {
+    if (checkedIds.size === 0) return
+    if (!confirm(`删除选中的 ${checkedIds.size} 个环境？节点上的目录会一并回收。`)) return
+    setBatchDeleting(true)
+    const failed: string[] = []
+    await Promise.allSettled([...checkedIds].map(async (id) => {
+      try { await deleteEnvironment(id) } catch { failed.push(envs.find((e) => e.id === id)?.name || id) }
+    }))
+    setCheckedIds(new Set())
+    setBatchDeleting(false)
+    await refresh()
+    if (failed.length === 0) {
+      toast.success(`已删除 ${checkedIds.size} 个环境`)
+    } else {
+      toast.warning(`${checkedIds.size - failed.length} 个已删除；失败：${failed.join("、")}`)
+    }
+  }
+
+  const toggleChecked = (id: string) => {
+    setCheckedIds((cur) => {
+      const next = new Set(cur)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const allChecked = envs.length > 0 && envs.every((env) => checkedIds.has(env.id))
+  const toggleAllChecked = () => {
+    setCheckedIds((cur) => cur.size === envs.length ? new Set() : new Set(envs.map((e) => e.id)))
+  }
+
   if (detailId) {
     return (
       <div className="flex flex-col gap-3">
@@ -353,17 +390,26 @@ export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: E
     )
   }
 
+  // compact 多选表格：选择列 + 环境 + 状态；非 compact 保持原三列。
+  const colCount = compact ? 3 : 3
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted-foreground">
           共用环境（任务跑在它里面，装好的依赖/登录态跨任务复用）
         </span>
-        {!creating ? (
-          <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
-            <Plus className="size-3" /> 新建
-          </Button>
-        ) : null}
+        <div className="flex gap-1">
+          {compact && checkedIds.size > 0 ? (
+            <Button size="sm" variant="outline" disabled={batchDeleting} onClick={() => void doBatchDelete()}>
+              {batchDeleting ? <Spinner className="size-3" /> : <Trash2 className="size-3" />} 删除（{checkedIds.size}）
+            </Button>
+          ) : null}
+          {!creating ? (
+            <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
+              <Plus className="size-3" /> 新建
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       {creating ? (
@@ -378,6 +424,17 @@ export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: E
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40 text-xs text-muted-foreground">
+              {compact ? (
+                <th className="w-8 px-2 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allChecked}
+                    onChange={toggleAllChecked}
+                    aria-label="全选"
+                    className="size-3.5 accent-primary"
+                  />
+                </th>
+              ) : null}
               <th className="px-3 py-2 text-left font-medium">环境</th>
               <th className="px-3 py-2 text-left font-medium">状态</th>
               {!compact ? <th className="px-3 py-2 text-right font-medium">操作</th> : null}
@@ -385,12 +442,23 @@ export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: E
           </thead>
           <tbody className="divide-y">
             {loading ? (
-              <tr><td colSpan={compact ? 2 : 3} className="px-3 py-2 text-center text-muted-foreground">加载中…</td></tr>
+              <tr><td colSpan={colCount} className="px-3 py-2 text-center text-muted-foreground">加载中…</td></tr>
             ) : envs.length === 0 ? (
-              <tr><td colSpan={compact ? 2 : 3} className="px-3 py-2 text-center text-muted-foreground">暂无环境，新建后任务可用。</td></tr>
+              <tr><td colSpan={colCount} className="px-3 py-2 text-center text-muted-foreground">暂无环境，新建后任务可用。</td></tr>
             ) : (
               envs.map((env) => (
                 <tr key={env.id} className={selectedEnvId === env.id ? "bg-accent" : ""}>
+                  {compact ? (
+                    <td className="px-2 py-2">
+                      <input
+                        type="checkbox"
+                        checked={checkedIds.has(env.id)}
+                        onChange={() => toggleChecked(env.id)}
+                        aria-label={`选择 ${env.name}`}
+                        className="size-3.5 accent-primary"
+                      />
+                    </td>
+                  ) : null}
                   <td className="px-3 py-2">
                     <button
                       type="button"
@@ -425,7 +493,7 @@ export function EnvironmentPanel({ nodeId, compact, onSelect, selectedEnvId }: E
 
       {compact ? (
         <p className="text-[11px] text-muted-foreground">
-          资源配置和已安装清单点环境名进详情；这里只做建/选。
+          资源配置和已安装清单点环境名进详情；这里只做建/选/删。
         </p>
       ) : null}
     </div>

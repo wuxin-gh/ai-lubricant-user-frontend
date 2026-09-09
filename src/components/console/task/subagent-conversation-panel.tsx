@@ -6,6 +6,9 @@
  * 布局与主对话区完全一致：内容容器居中（mx-auto、max-w-[1400px]），
  * 同宽的内边距（px-3 / sm:px-5、pb-24）。从这里看出去，和主对话的观感一致，
  * 不会变成左边起浮、右窄的窄版对话。
+ *
+ * 顺序按时间走：先工具卡、后累积文本。content 是这个子 Agent 累积的输出，
+ * 也是它的「结果」——结果排在产生它的工具调用之后，而不是顶在最上方。
  */
 import { IconArrowLeft } from "@tabler/icons-react"
 import { Spinner } from "@/components/ui/spinner"
@@ -44,11 +47,6 @@ export function SubagentConversationPanel({
         </span>
       </div>
       <div className="mx-auto flex min-h-0 w-full max-w-[1400px] flex-1 flex-col gap-1 overflow-auto px-3 pb-6 sm:px-5">
-        {subAgent.content && (
-          <div className="whitespace-pre-wrap break-words rounded-lg bg-muted px-3 py-2 text-sm">
-            {subAgent.content}
-          </div>
-        )}
         {subAgent.toolCalls.map((toolCall, index) => {
           const key = `${subAgent.id}-tool-${index}`
           // 复用共享映射器，让 Edit/Bash 等专用渲染器命中：kind + status + 它们读的
@@ -67,6 +65,11 @@ export function SubagentConversationPanel({
           if (!mapped) return null
           return <MessageItem key={key} message={mapped} isLatest={false} />
         })}
+        {subAgent.content && (
+          <div className="whitespace-pre-wrap break-words rounded-lg bg-muted px-3 py-2 text-sm">
+            {subAgent.content}
+          </div>
+        )}
         {subAgent.summary && (
           <div className="mt-2 text-xs text-muted-foreground">小结：{subAgent.summary}</div>
         )}

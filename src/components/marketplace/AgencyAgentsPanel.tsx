@@ -2,6 +2,10 @@
  * 内容源同步面板（市场管理 → 配置 → agency-agents / agency-agents-zh tab）。
  * 每个源独立 tab：配置与同步信息在同一张卡里，一个 tab 一个保存。
  * 同步时直接拉源→转换→落库，无中间表。
+ *
+ * 同步是后台异步任务：POST 立即返回 {started:true}，前端轮询 last-sync 拿实时
+ * 进度+日志。重启后内存进度没了——面板回落配置里的 *_last_sync_at + 后端 DB
+ * 执行记录（last-sync 端点内部已做回落），打开时默认展开执行日志。
  */
 import { useCallback, useEffect, useState } from "react"
 import { RefreshCw, Save, ChevronDown, ChevronRight } from "lucide-react"
@@ -13,9 +17,10 @@ import { Label } from "@/components/ui/label"
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
-import { getMarketplaceSourceConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
-import { syncAgencyAgents, fetchAgencyAgentsLastSync } from "@/api/marketplaceAdmin"
-import { INTERVAL_OPTIONS } from "./leaderboard-labels"
+import { getMarketplaceSourceConfig, getProxyPoolTabConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
+import type { ProxyEntry } from "@/@admin-port/api/proxyPool"
+import { syncAgencyAgents, fetchAgencyAgentsLastSync, type SourceSyncStatus } from "@/api/marketplaceAdmin"
+import { INTERVAL_OPTIONS, fmtSyncAt } from "./leaderboard-labels"
 import { toast } from "sonner"
 
 export interface AgencyAgentsSourceDef {
@@ -30,33 +35,42 @@ export interface AgencyAgentsSourceDef {
 
 export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSourceDef; onSaved?: () => void }) {
   const [config, setConfig] = useState<Awaited<ReturnType<typeof getMarketplaceSourceConfig>> | null>(null)
+  const [proxies, setProxies] = useState<ProxyEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
-  const [last, setLast] = useState<{ ran_at: string; ok: boolean | null; detail: string; progress?: { running: boolean; phase: string; current: number; total: number; current_item: string }; logs?: Array<{ ts: string; phase: string; detail: string }> } | null>(null)
-  const [showLogs, setShowLogs] = useState(false)
+  const [last, setLast] = useState<SourceSyncStatus | null>(null)
+  // 打开面板默认展开执行日志（重启后靠 DB 记录也能直接看到最近一次）
+  const [showLogs, setShowLogs] = useState(true)
   const [enabled, setEnabled] = useState(false)
   const [interval, setInterval] = useState(24)
+  const [proxyId, setProxyId] = useState("")
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [src, lastSync] = await Promise.all([
+      // last-sync 必须按 source 分端点：英文/中文是两个独立的模块级状态，混查会
+      // 把另一个源的结果/进度错挂到本 tab 上。
+      const [src, lastSync, proxyResp] = await Promise.all([
         getMarketplaceSourceConfig(),
-        fetchAgencyAgentsLastSync().catch(() => null),
+        fetchAgencyAgentsLastSync(!!source.chinese).catch(() => null),
+        getProxyPoolTabConfig().catch(() => ({ proxies: [] as ProxyEntry[] })),
       ])
       setConfig(src)
       setLast(lastSync)
-      const cfg = src as Record<string, unknown>
+      setProxies(proxyResp.proxies || [])
+      // key 是 agency_agents / agency_agents_zh 前缀：按前缀取同名字段（enabled/interval/proxy/last_sync_at）
+      const cfg = src as unknown as Record<string, unknown>
       setEnabled(!!cfg[`${source.key}_enabled`])
       const iv = Number(cfg[`${source.key}_interval_hours`] || 24)
       setInterval(INTERVAL_OPTIONS.some((o) => o.value === iv) ? iv : 24)
+      setProxyId(String(cfg[`${source.key}_proxy_id`] || ""))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "加载配置失败")
     } finally {
       setLoading(false)
     }
-  }, [source.key])
+  }, [source.key, source.chinese])
 
   useEffect(() => { void load() }, [load])
 
@@ -64,31 +78,36 @@ export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSou
     setSyncing(true)
     setShowLogs(true)
     try {
-      // 同步启动后立即返回——后端在后台跑，前端轮询 last-sync 拿实时进度
+      // 后端异步执行：POST 立即返回 {started: true}，不等同步完成
+      const res = await syncAgencyAgents({
+        ref: undefined,
+        dryRun: false,
+        chinese: source.chinese,
+      })
+      if (!res.started) {
+        toast.error(res.detail || "启动同步失败")
+        return
+      }
+      // 轮询 last-sync 端点拿实时进度+日志（与同步请求同一个源的端点）
       const poll = window.setInterval(async () => {
         try {
-          const st = await fetchAgencyAgentsLastSync()
+          const st = await fetchAgencyAgentsLastSync(!!source.chinese)
           setLast(st)
-          if (!st.progress?.running) window.clearInterval(poll)
-        } catch { /* 轮询失败静默 */ }
+          // 同步完成（progress.running 变 false 且有 ran_at）
+          if (!st.progress?.running && st.ran_at) {
+            window.clearInterval(poll)
+            setSyncing(false)
+            if (st.ok === false) {
+              toast.error("同步失败", { description: st.detail })
+            } else if (st.ok === true) {
+              toast.success(st.detail || "同步完成")
+              onSaved?.()
+            }
+          }
+        } catch { /* 轮询失败静默，继续 */ }
       }, 2000)
-      try {
-        const report = await syncAgencyAgents({
-          ref: undefined,
-          dryRun: false,
-          chinese: source.chinese,
-        })
-        // 同步接口返回时（同步已完成），最后拉一次状态
-        const st = await fetchAgencyAgentsLastSync().catch(() => null)
-        setLast(st)
-        toast.success(report.detail || `同步 ${report.converted} 条`)
-        onSaved?.()
-      } finally {
-        window.clearInterval(poll)
-      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步失败")
-    } finally {
       setSyncing(false)
     }
   }
@@ -99,6 +118,7 @@ export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSou
       await updateMarketplaceSourceConfig({
         [`${source.key}_enabled`]: enabled,
         [`${source.key}_interval_hours`]: interval,
+        [`${source.key}_proxy_id`]: proxyId,
       })
       toast.success(`${source.title} 配置已保存`)
       await load()
@@ -124,9 +144,16 @@ export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSou
               <span className="text-muted-foreground">每 {interval} 小时同步</span>
               {last?.ran_at ? (
                 <span className="text-muted-foreground">
-                  上次 {last.ran_at}
+                  上次 {fmtSyncAt(last.ran_at)}
                   {last.ok === false ? <span className="text-destructive"> 失败</span> : last.ok ? <span className="text-emerald-600"> 成功</span> : null}
                   {last.detail ? <span className="ml-1">· {last.detail}</span> : null}
+                </span>
+              ) : config ? (
+                // 重启后内存没了：回落配置里持久化的上次同步时间
+                <span className="text-muted-foreground">
+                  {String((config as unknown as Record<string, string>)[`${source.key}_last_sync_at`] || "")
+                    ? `上次 ${fmtSyncAt(String((config as unknown as Record<string, string>)[`${source.key}_last_sync_at`]))}（历史记录）`
+                    : "尚未同步"}
                 </span>
               ) : <span className="text-muted-foreground">尚未同步</span>}
               {/* 同步中：实时进度条 */}
@@ -153,7 +180,7 @@ export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSou
               {syncing ? "同步中..." : "立即同步"}
             </Button>
           </div>
-          {/* 执行日志：折叠面板 */}
+          {/* 执行日志：折叠面板（默认展开；重启后回落 DB 记录仍有最近一份） */}
           {last?.logs && last.logs.length > 0 ? (
             <div className="rounded-md border">
               <button
@@ -184,13 +211,24 @@ export function AgencyAgentsPanel({ source, onSaved }: { source: AgencyAgentsSou
           <Alert><AlertDescription>{source.description}</AlertDescription></Alert>
           <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
             <Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} />
-            启用 {source.title} 同步
+            启用 {source.title} 定时同步（每 {interval} 小时自动执行）
           </label>
-          <div>
-            <Label>同步间隔</Label>
-            <NativeSelect value={String(interval)} onChange={(e) => setInterval(Number(e.target.value))} disabled={!enabled}>
-              {INTERVAL_OPTIONS.map((o) => <NativeSelectOption key={o.value} value={String(o.value)}>{o.label}</NativeSelectOption>)}
-            </NativeSelect>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <Label>同步间隔</Label>
+              <NativeSelect value={String(interval)} onChange={(e) => setInterval(Number(e.target.value))} disabled={!enabled}>
+                {INTERVAL_OPTIONS.map((o) => <NativeSelectOption key={o.value} value={String(o.value)}>{o.label}</NativeSelectOption>)}
+              </NativeSelect>
+            </div>
+            <div>
+              <Label>出网代理</Label>
+              <NativeSelect value={proxyId} onChange={(e) => setProxyId(e.target.value)}>
+                <NativeSelectOption value="">跟随全局代理（未配全局则直连）</NativeSelectOption>
+                {proxies.map((proxy) => (
+                  <NativeSelectOption key={proxy.id} value={proxy.id}>{proxy.name || proxy.id}</NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </div>
           </div>
           <div className="flex justify-end pt-1">
             <Button onClick={() => void save()} disabled={saving}>

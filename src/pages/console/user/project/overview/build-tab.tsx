@@ -43,10 +43,16 @@ function stageLabel(stage: string): string {
 }
 
 export default function ProjectBuildTab({ projectId, nodes }: { projectId: string; nodes: NodeInfo[] }) {
-  // 具备 Xcode 构建能力的节点（hostTools 探针上报的 xcodebuild_version 标签）
-  const buildNodes = useMemo(
-    () => nodes.filter((n) => !!n.capabilities?.xcodebuild_version && n.node_role === "execution"),
+  // 具备 Xcode 构建能力的节点（hostTools 探针上报的 xcodebuild_version 标签）。
+  // mac 的 node-ios（ios_host）同样承载 xcodebuild，是首选构建节点——服务端
+  // start 校验 capability + 使用权，这里只做展示过滤。
+  const darwinNodes = useMemo(
+    () => nodes.filter((n) => n.node_role === "execution" || n.node_role === "ios_host"),
     [nodes],
+  )
+  const buildNodes = useMemo(
+    () => darwinNodes.filter((n) => !!n.capabilities?.xcodebuild_version),
+    [darwinNodes],
   )
 
   const [recipeKind, setRecipeKind] = useState(RECIPES[0].value)
@@ -119,9 +125,26 @@ export default function ProjectBuildTab({ projectId, nodes }: { projectId: strin
 
   // ── 空态：没有 Xcode 节点 ─────────────────────────────────────────────
   if (!buildNodes.length) {
+    // 区分两种缺因：有 macOS 节点但缺 Xcode（指引去环境面板检测/看原因），
+    // 和根本没有 macOS 节点。node-ios（ios_host）也是合法构建节点。
+    const macWithoutXcode = darwinNodes.some((n) => !(n.capabilities?.xcodebuild_version || "").trim())
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">
-        暂无具备 Xcode 构建能力的节点（需 macOS + Xcode 的执行节点）。绑定后即可在此构建 WDA。
+        {macWithoutXcode ? (
+          <>
+            macOS 节点未检测到完整 Xcode（xcodebuild），无法构建。
+            <br />
+            Xcode 无法远程自动安装：请在该节点上从 App Store 安装完整 Xcode 后，由管理员在
+            节点详情「环境」面板点「检测 Xcode」——检测成功即刷新构建能力，无需重启节点
+            （旧版节点程序需重启一次才能上报）。
+          </>
+        ) : (
+          <>
+            暂无 macOS 节点（执行节点或 iOS 设备主机均可，需安装完整 Xcode）。
+            <br />
+            绑定后即可在此构建 WDA。
+          </>
+        )}
       </div>
     )
   }

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import dayjs from "dayjs";
 import { toast } from "sonner";
+import { copyToClipboard } from "@/utils/clipboard";
 import {
   IconCirclePlus,
   IconCopy,
@@ -230,10 +231,9 @@ export default function TeamManagerManager() {
     if (!passwordResult) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(`${passwordResult.email || ""}\t${passwordResult.password || ""}`);
+    if (await copyToClipboard(`${passwordResult.email || ""}\t${passwordResult.password || ""}`)) {
       toast.success(t("managerAdmins.toast.passwordCopied"));
-    } catch {
+    } else {
       toast.error(t("managerAdmins.toast.copyFailed"));
     }
   };

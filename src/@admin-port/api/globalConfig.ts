@@ -14,13 +14,13 @@ import type {
 // 各一级 Tab 各自一对 GET/PUT，保存只提交本 Tab 的 payload，互不覆盖。
 // 后端复用既有校验/持久化/热更新/日志 helper，仅在外层聚合。
 
-// ---------- 市场源配置（仓库地址 / 同步策略 / 代理） ----------
+// ---------- 市场源配置（同步策略 / 代理） ----------
 //
 // 资源中心「配置」Tab 与这里共用同一份配置：市场展示、渠道目录同步、节点程序版本
-// 都指向同一个 GitHub 市场仓库，所以只有一份源配置。token 不回明文，只回是否已配。
+// 都指向同一个 GitHub 市场仓库，所以只有一份源配置。仓库地址与 GitHub token 只在
+// 服务端 .env 配置（MARKETPLACE_REPO_URL / MARKETPLACE_GITHUB_TOKEN），不进这份接口。
 
 export interface MarketplaceSourceConfig {
-  repo_url: string
   github_branch: string
   modules: string
   index_name: string
@@ -28,10 +28,7 @@ export interface MarketplaceSourceConfig {
   proxy_id: string
   auto_sync_enabled: boolean
   sync_interval_minutes: number
-  /** token 是否已配置（管理端据此决定「管市场」是否可用），不回明文。 */
-  github_token_set: boolean
-  default_repo_url: string
-  /** 已生效的解析结果（owner/repo/branch/enabled/writable）。 */
+  /** 已生效的解析结果（.env / 内置默认），仓库地址看 effective.repo_url。 */
   effective: {
     repo_url: string
     owner: string
@@ -62,15 +59,21 @@ export interface MarketplaceSourceConfig {
   agency_agents_zh_ref: string
   agentscope_enabled: boolean
   agentscope_interval_hours: number
+  // 各源出网代理：留空回落 proxy_id 全局；agentscope 无此字段（恒走全局）
+  leaderboard_proxy_id: string
+  agency_agents_proxy_id: string
+  agency_agents_zh_proxy_id: string
+  // 各源最近一次同步时间（后端同步收尾写入，随配置持久化——重启不丢）
+  leaderboard_last_sync_at: string
+  agency_agents_last_sync_at: string
+  agency_agents_zh_last_sync_at: string
+  agentscope_last_sync_at: string
   default_leaderboard_repo: string
   default_leaderboard_boards: string
 }
 
 export interface MarketplaceSourceInput {
-  repo_url?: string
   proxy_id?: string
-  /** 空串=不改，null=清除；不回显明文。 */
-  github_token?: string | null
   // 外部榜单同步：只传要改的字段，未传的不动。enabled 必须显式 true 才打开。
   leaderboard_sync_enabled?: boolean
   leaderboard_sync_interval_hours?: number
@@ -78,12 +81,15 @@ export interface MarketplaceSourceInput {
   leaderboard_boards?: string
   leaderboard_launch_agent_id?: number
   leaderboard_require_verified?: boolean
+  leaderboard_proxy_id?: string
   agency_agents_enabled?: boolean
   agency_agents_interval_hours?: number
   agency_agents_ref?: string
+  agency_agents_proxy_id?: string
   agency_agents_zh_enabled?: boolean
   agency_agents_zh_interval_hours?: number
   agency_agents_zh_ref?: string
+  agency_agents_zh_proxy_id?: string
   agentscope_enabled?: boolean
   agentscope_interval_hours?: number
 }
@@ -462,4 +468,69 @@ export async function checkTokenizerVocabNow(): Promise<{ ok: boolean; items: To
     {},
   );
   return response.data;
+}
+
+// ---------- 社区运营配置（技术交流群 + 社区通知） ----------
+//
+// 存 DB 主配置 blob 的独立 community key（不进市场仓库）。管理端入口在
+// 市场管理 → 配置 → 社区运营；用户控制台弹窗读公开端点（见 api/marketplaceRaw）。
+
+export interface CommunityGroup {
+  id: string;
+  /** 群类型：wechat / feishu / dingtalk / qq / other。 */
+  type: string;
+  /** 群展示名；空则用户侧回落群类型的 i18n 标签。 */
+  label: string;
+  /** 二维码图片：data URL（管理端上传时已压 512px/WebP）。 */
+  qr_image: string;
+}
+
+export interface CommunityNoticeEntry {
+  id: string;
+  kind: "text" | "image";
+  text?: string;
+  image?: string;
+}
+
+export interface CommunityConfig {
+  groups: CommunityGroup[];
+  notice: {
+    enabled: boolean;
+    entries: CommunityNoticeEntry[];
+  };
+}
+
+/** GET /api/v1/marketplace/admin/community-config */
+export async function getCommunityConfig(): Promise<CommunityConfig> {
+  const response = await request.get<CommunityConfig>(
+    "/api/v1/marketplace/admin/community-config",
+  );
+  return normalizeCommunityConfig(response.data);
+}
+
+/** PUT /api/v1/marketplace/admin/community-config —— groups / notice 整段替换，未传的不动 */
+export async function updateCommunityConfig(
+  config: { groups?: CommunityGroup[]; notice?: CommunityConfig["notice"] },
+): Promise<CommunityConfig> {
+  const response = await request.put<{ ok: boolean } & CommunityConfig>(
+    "/api/v1/marketplace/admin/community-config",
+    config,
+  );
+  return normalizeCommunityConfig(response.data);
+}
+
+/** 服务端形状归一的兜底：字段缺失/类型不对时回空骨架，避免渲染层到处判空。 */
+function normalizeCommunityConfig(raw: unknown): CommunityConfig {
+  const data = (raw ?? {}) as Record<string, unknown>;
+  const groups = Array.isArray(data.groups)
+    ? data.groups.filter((g): g is CommunityGroup => !!g && typeof g === "object" && !!g.qr_image)
+    : [];
+  const noticeRaw = (data.notice ?? {}) as Record<string, unknown>;
+  const entries = Array.isArray(noticeRaw.entries)
+    ? noticeRaw.entries.filter((e): e is CommunityNoticeEntry => !!e && typeof e === "object")
+    : [];
+  return {
+    groups,
+    notice: { enabled: noticeRaw.enabled === true && entries.length > 0, entries },
+  };
 }

@@ -8,7 +8,7 @@ import { Markdown } from "@/components/common/markdown"
 import { isPreviewableImage, isSafeImageSource } from "@/lib/media-url"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
-import { renewAttachment, type AttachmentMediaPart } from "@/api/agentClient"
+import { renewAttachment, type AgentMessage, type AttachmentMediaPart } from "@/api/agentClient"
 import type { AgentApprovalRequest } from "./agent-stream-events"
 
 export interface AgentToolCallDisplay {
@@ -110,6 +110,38 @@ const truncate = (value: unknown, length: number) => {
   const text = typeof value === "string" ? value : JSON.stringify(value)
   if (!text) return ""
   return text.length > length ? text.slice(0, length) + "…" : text
+}
+
+/**
+ * 把落库的 AgentMessage（role=user|assistant，含 tool_calls/tool_results）转成
+ * 展示态 AgentDisplayMessage，供历史回放/定时任务执行记录详情复用。
+ *
+ * 与 agent-chat.tsx 的实时回灌共用同一份映射口径——streaming/pending 在无对应
+ * 实时流时降级为中断态，否则会永远显示「思考中…」。tool_calls 走
+ * mergeAgentToolResults 配对上 tool_results。
+ */
+export function agentMessagesToDisplay(history: AgentMessage[]): AgentDisplayMessage[] {
+  return history
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map((message) => {
+      const rawStatus = (message.status as AgentDisplayMessage["status"]) || "done"
+      const stuckStreaming = rawStatus === "streaming" || rawStatus === "pending"
+      return {
+        id: String(message.id),
+        role: message.role as "user" | "assistant",
+        content: message.content || "",
+        status: stuckStreaming ? "error" : rawStatus,
+        error: stuckStreaming ? "任务未正常结束（可能已中断或在后台继续运行，重新发送即可恢复）" : message.error || undefined,
+        model: message.model || undefined,
+        createdAt: message.created_at,
+        reasoning: message.reasoning || undefined,
+        toolCalls: mergeAgentToolResults(message.tool_calls || [], message.tool_results),
+        subagents: [],
+        approvals: [],
+        media: message.media || undefined,
+        usage: message.usage || undefined,
+      }
+    })
 }
 
 const formatMessageTime = (value?: string) => {

@@ -25,6 +25,41 @@ import {
   createProjectPrompt, deleteProjectPrompt, listProjectPrompts, updateProjectPrompt,
   type ProjectPrompt,
 } from "@/@admin-port/api/projectPrompts"
+import { useGithubRecognize } from "@/hooks/useGithubRecognize"
+import { type GithubRecognizeResult } from "@/api/githubRecognition"
+
+/** 候选提示词文件：AGENTS.md / CLAUDE.md / *.md，按目录浅序排，AGENTS.md 优先。 */
+function candidatePromptFiles(result: GithubRecognizeResult): string[] {
+  const files = result.summary.hit_files || []
+  const lower = files.map((f) => ({ f, base: f.split("/").pop()!.toLowerCase() }))
+  const isPrompt = (base: string) =>
+    base === "agents.md" || base === "claude.md" || base.endsWith(".md")
+  const ranked = lower
+    .filter((x) => isPrompt(x.base))
+    .sort((a, b) => {
+      const aw = a.base === "agents.md" ? 0 : a.base === "claude.md" ? 1 : 2
+      const bw = b.base === "agents.md" ? 0 : b.base === "claude.md" ? 1 : 2
+      return aw - bw
+    })
+  return ranked.map((x) => x.f)
+}
+
+async function fetchGithubFile(repo: string, ref: string, path: string): Promise<string> {
+  const res = await fetch("/api/v1/github/file", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, ref, path }),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const detail = body && typeof body === "object" && "detail" in body ? (body as { detail: unknown }).detail : undefined
+    throw new Error(typeof detail === "string" ? detail : `HTTP ${res.status}`)
+  }
+  const env = body as { code: number; message: string; data: { content: string } }
+  if (env.code !== 0) throw new Error(env.message || "取文件失败")
+  return env.data.content
+}
 
 const PROVIDERS = ["claude", "codex", "opencode"] as const
 
@@ -52,6 +87,45 @@ export function ProjectPrompts() {
   const [providers, setProviders] = useState<string[]>([...PROVIDERS])
   const [enabled, setEnabled] = useState(true)
   const [confirmRow, setConfirmRow] = useState<PromptRow | null>(null)
+
+  // ── 从 GitHub 识别 → 抓正文写入 content ──────────────────────────────────
+  const gh = useGithubRecognize()
+  const [ghOpen, setGhOpen] = useState(false)
+  const [ghCandidates, setGhCandidates] = useState<string[]>([])
+  const [ghPicked, setGhPicked] = useState("")
+  const [ghFetching, setGhFetching] = useState(false)
+
+  const openGithub = () => {
+    gh.reset()
+    setGhCandidates([])
+    setGhPicked("")
+    setGhOpen(true)
+  }
+
+  const ghRecognize = async () => {
+    const data = await gh.recognize()
+    if (!data) return
+    const files = candidatePromptFiles(data)
+    setGhCandidates(files)
+    setGhPicked(files[0] || "")
+  }
+
+  const ghApply = async () => {
+    if (!gh.result || !ghPicked) return
+    setGhFetching(true)
+    try {
+      const text = await fetchGithubFile(gh.result.repo_full_name, gh.result.ref, ghPicked)
+      setContent(text)
+      if (!name.trim()) setName(gh.result.repo_full_name.split("/").pop() || "")
+      setGhOpen(false)
+      toast.success(`已抓取 ${ghPicked}，请确认后保存`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "抓取失败")
+    } finally {
+      setGhFetching(false)
+    }
+  }
+
 
   const fetchData = async () => {
     setLoading(true)
@@ -211,7 +285,10 @@ export function ProjectPrompts() {
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：后端服务规范" />
             </div>
             <div className="space-y-2">
-              <Label>提示词内容（Markdown）</Label>
+              <div className="flex items-center justify-between">
+                <Label>提示词内容（Markdown）</Label>
+                <Button type="button" variant="outline" size="sm" onClick={openGithub}>从 GitHub 识别</Button>
+              </div>
               <Textarea
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
@@ -243,6 +320,55 @@ export function ProjectPrompts() {
             <Button variant="outline" onClick={() => setModalOpen(false)} disabled={saving}>取消</Button>
             <Button onClick={() => void handleSubmit()} disabled={saving}>
               {saving ? <Spinner className="size-4" /> : null} 保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={ghOpen} onOpenChange={setGhOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader><DialogTitle>从 GitHub 识别提示词</DialogTitle></DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>GitHub 仓库地址</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={gh.input}
+                  onChange={(e) => gh.setInput(e.target.value)}
+                  placeholder="owner/repo 或 https://github.com/owner/repo"
+                  onKeyDown={(e) => { if (e.key === "Enter") void ghRecognize() }}
+                />
+                <Button disabled={gh.loading} onClick={() => void ghRecognize()}>
+                  {gh.loading ? "识别中..." : "识别"}
+                </Button>
+              </div>
+            </div>
+            {gh.error ? <p className="text-sm text-destructive">{gh.error}</p> : null}
+            {gh.result ? (
+              <div className="space-y-1.5">
+                <Label>候选文件（抓取后填入正文，属「安装」：拷一次入库）</Label>
+                {ghCandidates.length ? (
+                  <select
+                    className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+                    value={ghPicked}
+                    onChange={(e) => setGhPicked(e.target.value)}
+                  >
+                    {ghCandidates.map((f) => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                ) : (
+                  <p className="text-xs text-muted-foreground">该仓库未识别到 AGENTS.md / CLAUDE.md / *.md。</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  分支：<span className="text-foreground">{gh.result.ref}</span>
+                  {gh.result.head_sha ? ` · HEAD ${gh.result.head_sha.slice(0, 7)}` : ""}
+                </p>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setGhOpen(false)} disabled={ghFetching}>取消</Button>
+            <Button disabled={ghFetching || !ghPicked} onClick={() => void ghApply()}>
+              {ghFetching ? "抓取中..." : "抓取并填入"}
             </Button>
           </DialogFooter>
         </DialogContent>

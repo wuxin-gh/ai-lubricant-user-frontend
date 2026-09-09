@@ -1052,3 +1052,47 @@ export function toggleScheduledTask(jobId: number): Promise<{ id: number; enable
 export function approveScheduledTaskScript(jobId: number): Promise<{ approved: boolean; id: number }> {
   return agentFetch<{ approved: boolean; id: number }>(`/scheduled-tasks/${jobId}/approve-script`, { method: "POST" })
 }
+
+// ── 定时任务执行记录（agent_scheduled_task_runs）────────────────────────
+// 每次执行一行：scheduler=到点、manual=立即运行、heal=脚本报错后的 AI 自愈。
+// prompt/heal 执行的 Agent 对话落 ClickHouse（kind="scheduled"），详情页拿
+// conversation_id 走既有 /conversations/{conv_id} 端点渲染。
+
+export type ScheduledTaskRunTrigger = "scheduler" | "manual" | "heal"
+export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "blocked" | "aborted"
+
+/** 列表项：不含 stdout/stderr（体积大），详情走 getScheduledTaskRun。 */
+export interface ScheduledTaskRunListItem {
+  id: number
+  run_at: string
+  task_kind: ScheduledTaskKind
+  triggered_by: ScheduledTaskRunTrigger
+  status: ScheduledTaskRunStatus
+  exit_code: number | null
+  duration_ms: number | null
+  /** result_text 前 200 字符摘要。 */
+  result_snippet: string | null
+  /** 有值 = 该次执行的 Agent 对话可回放（走 /conversations/{id}）。 */
+  conversation_id: string | null
+}
+
+export interface ScheduledTaskRunDetail extends ScheduledTaskRunListItem {
+  job_id: number
+  /** 脚本执行的标准输出（服务端已截断到 16KB）。 */
+  stdout: string | null
+  stderr: string | null
+  result_text: string | null
+  error: string | null
+}
+
+export function listScheduledTaskRuns(
+  jobId: number, cursor?: number | null, limit = 50,
+): Promise<ScheduledTaskRunListItem[]> {
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor != null) query.set("cursor", String(cursor))
+  return agentFetch<ScheduledTaskRunListItem[]>(`/scheduled-tasks/${jobId}/runs?${query}`)
+}
+
+export function getScheduledTaskRun(jobId: number, runId: number): Promise<ScheduledTaskRunDetail> {
+  return agentFetch<ScheduledTaskRunDetail>(`/scheduled-tasks/${jobId}/runs/${runId}`)
+}

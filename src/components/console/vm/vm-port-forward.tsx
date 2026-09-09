@@ -27,6 +27,7 @@ import { apiRequest } from "@/utils/requestUtils"
 import { IconAccessPoint, IconAlertCircle, IconCopy, IconDotsVertical, IconHandStop, IconReload, IconTrash } from "@tabler/icons-react"
 import { useCallback, useEffect, useState } from "react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import { useTranslation } from "react-i18next"
 
 interface VmPortForwardDialogProps {
@@ -280,14 +281,13 @@ export function VmPortForwardDialog({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem 
+                    <DropdownMenuItem
                       disabled={port.status !== ConstsPortStatus.PortStatusConnected}
                       onClick={async () => {
                         if (port.preview_url) {
-                          try {
-                            await navigator.clipboard.writeText(port.preview_url)
+                          if (await copyToClipboard(port.preview_url)) {
                             toast.success(t("consoleVm.port.copySuccess"))
-                          } catch {
+                          } else {
                             toast.error(t("consoleVm.port.copyFailed", { url: port.preview_url }))
                           }
                         }

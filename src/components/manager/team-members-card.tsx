@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { apiRequest } from "@/utils/requestUtils";
 import { captchaChallenge } from "@/utils/common";
 import { toast } from "sonner";
+import { copyToClipboard } from "@/utils/clipboard";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 
@@ -130,10 +131,9 @@ export default function TeamMembersCard({ members, memberLimit, usedSeats, group
     const text = generatedPasswords
       .map(item => `${item.email || ""}\t${item.password || ""}`)
       .join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyToClipboard(text)) {
       toast.success(t("managerMembers.toast.initialPasswordCopied"));
-    } catch {
+    } else {
       toast.error(t("managerMembers.toast.copyFailed"));
     }
   };

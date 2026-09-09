@@ -8,7 +8,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item"
-import { StackBadges, SubmoduleStackList } from "@/components/ui/stack-badges"
+import { ProjectStackBadges } from "@/components/ui/stack-badges"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { isProjectRepoUnbound } from "@/utils/project"
 import { apiRequest } from "@/utils/requestUtils"
@@ -125,8 +125,9 @@ const ProjectInfo = ({
           </Avatar>
         </ItemMedia>
         <ItemContent>
-          <ItemTitle className="font-bold">
+          <ItemTitle className="flex-wrap gap-x-2.5 font-bold line-clamp-none">
             {project?.name || "-"}
+            <ProjectStackBadges stack={project?.stack} rootName={project?.name} />
           </ItemTitle>
           <ItemDescription className="flex flex-row gap-2 items-center">
             {isRepoUnbound && (
@@ -134,10 +135,6 @@ const ProjectInfo = ({
             ) || (
               <span>{project?.description || t("consoleProject.info.noDescription")}</span>
             )}
-            <StackBadges
-              stack={project?.stack}
-              truncatedTitle={t("consoleProject.stack.truncatedWarning")}
-            />
             {project?.id && !isRepoUnbound && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -155,11 +152,6 @@ const ProjectInfo = ({
               </Tooltip>
             )}
           </ItemDescription>
-          <SubmoduleStackList
-            submodules={project?.stack?.submodules}
-            truncatedTitle={t("consoleProject.stack.truncatedWarning")}
-            className="pl-3"
-          />
         </ItemContent>
         <ItemActions>
           <Tooltip>

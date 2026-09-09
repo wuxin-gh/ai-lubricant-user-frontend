@@ -37,6 +37,11 @@ function isManagedCloudflared(scheme: TunnelScheme | undefined): boolean {
   return scheme?.kind === "cloudflared" && scheme.config?.mode === "managed"
 }
 
+/** 必填标记。 */
+function Req() {
+  return <span className="ml-0.5 text-destructive">*</span>
+}
+
 function schemeDomain(scheme: TunnelScheme | undefined): string {
   return String(scheme?.config?.domain || "")
 }
@@ -49,7 +54,10 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
 
   const [addOpen, setAddOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [form, setForm] = useState({ scheme_id: "", local_port: "", local_host: "127.0.0.1", subdomain: "", description: "" })
+  const [form, setForm] = useState({
+    scheme_id: "", local_port: "", local_host: "127.0.0.1",
+    subdomain: "", description: "", proxy_name: "", remote_port: "",
+  })
   const [formError, setFormError] = useState<string | null>(null)
   const [confirmDel, setConfirmDel] = useState<TunnelBinding | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -59,6 +67,14 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
   const domain = schemeDomain(selectedScheme)
   // 历史 managed 方案可能没配根域名,此时无法拼公网地址,先去方案页补。
   const missingDomain = needsSubdomain && !domain
+  const supportsRemotePort = selectedScheme?.kind === "frpc" || selectedScheme?.kind === "npc"
+  const supportsProxyName = selectedScheme?.kind === "frpc"
+  // 方案没配端口段时,远端端口从可选变必填(无法自动分配)。
+  const schemeRange = Array.isArray(selectedScheme?.config?.port_range)
+    ? (selectedScheme?.config?.port_range as number[])
+    : []
+  const schemeHasRange = !!(schemeRange[0] && schemeRange[1])
+  const remotePortRequired = supportsRemotePort && !schemeHasRange
 
   const fetchData = async () => {
     setLoading(true)
@@ -77,7 +93,10 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
   useEffect(() => { void fetchData() }, [nodeId])
 
   const openAdd = () => {
-    setForm({ scheme_id: schemes[0]?.id || "", local_port: "", local_host: "127.0.0.1", subdomain: "", description: "" })
+    setForm({
+      scheme_id: schemes[0]?.id || "", local_port: "", local_host: "127.0.0.1",
+      subdomain: "", description: "", proxy_name: "", remote_port: "",
+    })
     setFormError(null)
     setAddOpen(true)
   }
@@ -88,6 +107,19 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
     if (!port || port < 1 || port > 65535) { setFormError("本地端口需为 1-65535"); return }
     if (missingDomain) { setFormError("该方案未配置根域名,请先到「内网穿透」页编辑方案"); return }
     if (needsSubdomain && !form.subdomain.trim()) { setFormError("请填写子域名"); return }
+    const remotePort = Number(form.remote_port)
+    if (supportsRemotePort && remotePortRequired && (!remotePort || remotePort < 1 || remotePort > 65535)) {
+      setFormError("该方案未配置端口段,远端端口为必填(1-65535)")
+      return
+    }
+    if (supportsRemotePort && form.remote_port.trim() && (!remotePort || remotePort < 1 || remotePort > 65535)) {
+      setFormError("远端端口需为 1-65535")
+      return
+    }
+    if (supportsProxyName && /[^\w.\-]/.test(form.proxy_name.trim())) {
+      setFormError("代理名仅支持字母、数字、`.`、`_`、`-`")
+      return
+    }
     setSaving(true); setFormError(null)
     try {
       await createNodeTunnel(nodeId, {
@@ -96,6 +128,8 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
         local_port: port,
         local_host: form.local_host || "127.0.0.1",
         ...(needsSubdomain ? { subdomain: form.subdomain.trim() } : {}),
+        ...(supportsProxyName ? { proxy_name: form.proxy_name.trim() || undefined } : {}),
+        ...(supportsRemotePort ? { remote_port: remotePort || undefined } : {}),
         description: form.description.trim() || undefined,
       })
       toast.success("已创建穿透绑定,节点正在启动客户端")
@@ -228,6 +262,27 @@ export function NodeTunnels({ nodeId }: { nodeId: string }) {
                 <Input value={form.local_host} onChange={(e) => setForm({ ...form, local_host: e.target.value })} placeholder="127.0.0.1" />
               </div>
             </div>
+            {supportsRemotePort && (
+              <div className="space-y-1">
+                <Label>
+                  远端端口{remotePortRequired ? <Req /> : null}
+                  {remotePortRequired ? "" : " (可选)"}
+                </Label>
+                <Input type="number" value={form.remote_port} onChange={(e) => setForm({ ...form, remote_port: e.target.value })} placeholder={remotePortRequired ? "必填(方案未配端口段)" : "自动分配"} />
+                <p className="text-xs text-muted-foreground">
+                  {remotePortRequired
+                    ? "该方案未配置端口段,无法自动分配,必须手动指定(同方案内不能重复)。"
+                    : "代理服务端对外监听的端口;留空自动从方案端口段分配。"}
+                </p>
+              </div>
+            )}
+            {supportsProxyName && (
+              <div className="space-y-1">
+                <Label>代理名 (可选)</Label>
+                <Input value={form.proxy_name} onChange={(e) => setForm({ ...form, proxy_name: e.target.value })} placeholder="web" />
+                <p className="text-xs text-muted-foreground">写进 frpc 配置的代理名;留空自动生成。仅支持字母、数字、`.`、`_`、`-`,同方案内唯一。</p>
+              </div>
+            )}
             <div className="space-y-1">
               <Label>备注</Label>
               <Textarea

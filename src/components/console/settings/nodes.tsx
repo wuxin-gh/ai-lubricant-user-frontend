@@ -1,16 +1,21 @@
 import { useMemo, useState } from "react"
-import { Copy, RefreshCw, Server, Terminal as TerminalIcon } from "lucide-react"
+import { Copy, Plus, RefreshCw, Server, Terminal as TerminalIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   canOpenTerminal,
@@ -18,12 +23,13 @@ import {
   groupIntoTree,
   type NodeView,
 } from "@/components/nodes/node-view"
-import { NodeTreeTable } from "@/components/nodes/node-tree-table"
+import { NodeTreeTable, NODE_LIST_COLUMNS } from "@/components/nodes/node-tree-table"
 import { NodeTerminalDialog } from "@/components/nodes/node-terminal-dialog"
 import { useCommonData } from "@/components/console/data-provider"
 import { EnvironmentPanel } from "@/components/console/environment/environment-panel"
 import { SystemEnvPanel } from "@/components/console/environment/system-env-panel"
-import { nodeAvailability, nodeCapacityLabel, type NodeInfo } from "@/api/nodes"
+import { nodeAvailability, nodeEditorOccupancyLabel, type NodeInfo } from "@/api/nodes"
+import { approveGroupNode, createGroupExecutionNode, type CreateGroupExecutionNodeResult } from "@/api/reviewClient"
 import {
   formatBytes,
   machineFactRows,
@@ -111,11 +117,15 @@ export default function Nodes() {
   const { nodes, loadingNodes, nodesInited, reloadNodes } = useCommonData()
   const [detailNode, setDetailNode] = useState<NodeInfo | null>(null)
   const [terminalNode, setTerminalNode] = useState<NodeInfo | null>(null)
+  const [createManager, setCreateManager] = useState<NodeInfo | null>(null)
+  const [createNodeName, setCreateNodeName] = useState("")
+  const [actionNodeId, setActionNodeId] = useState<string | null>(null)
+  // 不可管理管理节点添加的执行节点无法自动拉起：需要展示手动安装凭证（一键命令）。
+  const [manualInstall, setManualInstall] = useState<CreateGroupExecutionNodeResult | null>(null)
 
-  // 未审批的节点不出现在用户侧：授权发生在审批之后，pending 只可能是竞态残留，
-  // 用户对它既不能操作也无从判断，列出来只会造成困惑。
+  // 待审批节点必须留在用户侧列表：有管理节点权限的成员可以在此完成审批。
   const visibleNodes = useMemo(
-    () => nodes.filter((node) => node.status !== "pending"),
+    () => nodes.filter((node) => node.status !== "revoked"),
     [nodes],
   )
 
@@ -127,20 +137,77 @@ export default function Nodes() {
     setTerminalNode(view.raw as NodeInfo)
   }
 
-  /**
-   * 用户侧只有「详情」+「终端」两个动作。
-   *
-   * 入驻/审批/移动分组/设为不可用/删除都属于管理端职责，这里根本不注入——不是禁用，
-   * 而是不存在。仅归属展示的父管理节点（未被授权本体）连详情都不给，它只是树的标签。
-   */
+  const approveNode = async (node: NodeInfo) => {
+    if (actionNodeId) return
+    setActionNodeId(node.node_id)
+    try {
+      await approveGroupNode(node.node_id)
+      toast.success(t("consoleSettings.nodes.approved", "节点已审批"))
+      await reloadNodes()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("consoleSettings.nodes.approveFailed", "审批失败"))
+    } finally {
+      setActionNodeId(null)
+    }
+  }
+
+  const createExecutionNode = async () => {
+    if (!createManager || actionNodeId) return
+    setActionNodeId(createManager.node_id)
+    try {
+      const result = await createGroupExecutionNode(createManager.group_id, {
+        startup_method: createManager.startup_method || "docker",
+        node_name: createNodeName.trim() || undefined,
+      })
+      setCreateManager(null)
+      setCreateNodeName("")
+      if (result.launched) {
+        toast.success(t("consoleSettings.nodes.executionCreated", "执行节点已由管理节点自动拉起"))
+      } else {
+        // 不可管理（passive）管理节点没有客户端，无法自动拉起：创建成功但需要
+        // 手动安装——展示一键命令让用户去目标机器执行。
+        setManualInstall(result)
+      }
+      await reloadNodes()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("consoleSettings.nodes.createFailed", "创建执行节点失败"))
+    } finally {
+      setActionNodeId(null)
+    }
+  }
+
+  /** 用户侧有管理节点权限时开放创建/审批；仅归属展示的父行不开放操作。
+   * 不可管理（passive）的管理节点也允许添加执行节点：它仍能归拢/挂载执行节点，
+   * 只是自身没有客户端、无法自动 docker run——此时后端返回 launched=false，
+   * 创建出的执行节点走手动安装流程（与 admin 端对 passive manager 的口径一致）。 */
   const renderActions = (view: NodeView) => {
     if (view.displayOnly) return null
     const node = view.raw as NodeInfo
+    const manager = isManagement(node)
+    // 不以 is_passive 拦截：passive 管理节点也能添加执行节点，只是不能自动拉起。
+    const managerCanCreate = manager && node.status === "approved" && Boolean(node.online ?? node.connected)
     return (
       <>
         <Button size="sm" variant="outline" onClick={() => setDetailNode(node)}>
           {t("consoleSettings.nodes.details", "详情")}
         </Button>
+        {managerCanCreate ? (
+          <Button size="sm" onClick={() => setCreateManager(node)}>
+            <Plus />
+            {t("consoleSettings.nodes.addExecution", "添加执行节点")}
+          </Button>
+        ) : manager && node.status !== "approved" ? (
+          <Button size="sm" disabled title={t("consoleSettings.nodes.approveManagerFirst", "请先审批管理节点")}>
+            <Plus />
+            {t("consoleSettings.nodes.addExecution", "添加执行节点")}
+          </Button>
+        ) : null}
+        {node.status === "pending" && !manager ? (
+          <Button size="sm" disabled={actionNodeId === node.node_id} onClick={() => void approveNode(node)}>
+            {actionNodeId === node.node_id ? <Spinner /> : null}
+            {t("consoleSettings.nodes.approve", "审批")}
+          </Button>
+        ) : null}
         {canOpenTerminal(view) ? (
           <Button size="sm" variant="outline" onClick={() => openTerminal(view)}>
             <TerminalIcon />
@@ -175,13 +242,12 @@ export default function Nodes() {
       <div className="min-h-0 flex-1 overflow-auto rounded-md border">
         <NodeTreeTable
           groups={nodeGroups}
-          columns={["system", "cpu", "memory", "version", "editors", "status"]}
+          columns={NODE_LIST_COLUMNS}
           loading={loadingNodes && !nodesInited}
           emptyHint={t("consoleSettings.nodes.empty", "暂无可用节点，请联系管理员分配。")}
           noExecutionHint={t("consoleSettings.nodes.noExecution", "该管理节点下暂无执行节点。")}
           renderManagerActions={renderActions}
           renderExecutionActions={renderActions}
-          actionsWidth="w-[200px]"
         />
       </div>
 
@@ -191,6 +257,78 @@ export default function Nodes() {
         nodes={nodes}
         onClose={() => setDetailNode(null)}
       />
+
+      <Dialog
+        open={createManager !== null}
+        onOpenChange={(open) => {
+          if (!open && !actionNodeId) {
+            setCreateManager(null)
+            setCreateNodeName("")
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("consoleSettings.nodes.addExecutionTitle", "添加执行节点")}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            {createManager?.is_passive
+              ? t("consoleSettings.nodes.addExecutionManual", "该管理节点是不可管理的分组容器：创建后会给出一键安装命令，需你在目标机器执行。")
+              : t("consoleSettings.nodes.addExecutionAuto", "管理节点会在其主机上自动启动执行节点，不需要你手动安装或输入凭证。")}
+          </p>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="team-create-node-name">{t("consoleSettings.nodes.nodeName", "节点名称（可选）")}</Label>
+            <Input
+              id="team-create-node-name"
+              value={createNodeName}
+              onChange={(event) => setCreateNodeName(event.target.value)}
+              placeholder={t("consoleSettings.nodes.nodeNamePlaceholder", "留空使用默认名称")}
+              disabled={actionNodeId !== null}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setCreateManager(null); setCreateNodeName("") }} disabled={actionNodeId !== null}>
+              {t("common.cancel", "取消")}
+            </Button>
+            <Button onClick={() => void createExecutionNode()} disabled={actionNodeId !== null}>
+              {actionNodeId === createManager?.node_id ? <Spinner /> : null}
+              {createManager?.is_passive
+                ? t("consoleSettings.nodes.createExecutionManual", "创建")
+                : t("consoleSettings.nodes.createExecution", "创建并自动启动")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={manualInstall !== null}
+        onOpenChange={(open) => { if (!open) setManualInstall(null) }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("consoleSettings.nodes.manualInstallTitle", "执行节点已创建，请手动安装")}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            该管理节点是不可管理的分组容器，没有客户端进程可自动启动执行节点。请在目标机器执行下面的一键命令。
+          </p>
+          <div className="rounded bg-muted p-3 font-mono text-xs break-all">
+            {manualInstall?.install_command || "安装命令未返回，请重新创建节点。"}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                const command = manualInstall?.install_command || ""
+                void copyToClipboard(command).then((ok) => ok ? toast.success("命令已复制") : toast.error("复制失败"))
+              }}
+              disabled={!manualInstall?.install_command}
+            >
+              复制命令
+            </Button>
+            <Button onClick={() => setManualInstall(null)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {terminalNode ? (
         <NodeTerminalDialog
@@ -258,10 +396,9 @@ function NodeDetailDialog({
   ].filter(Boolean)
 
   const copyNodeId = async () => {
-    try {
-      await navigator.clipboard.writeText(node.node_id)
+    if (await copyToClipboard(node.node_id)) {
       toast.success(t("consoleSettings.nodes.detail.copied", "节点 ID 已复制"))
-    } catch {
+    } else {
       toast.error(t("consoleSettings.nodes.detail.copyFailed", "复制失败"))
     }
   }
@@ -326,9 +463,6 @@ function NodeDetailDialog({
           : null}
         {!container && !node.display_only ? (
           <>
-            <DetailField label={t("consoleSettings.nodes.detail.activeSessions", "运行中会话")}>
-              {t("consoleSettings.nodes.detail.sessionCount", { count: node.active_sessions || 0, defaultValue: `${node.active_sessions || 0} 个` })}
-            </DetailField>
             <DetailField label={t("consoleSettings.nodes.detail.editorOccupancy", "绑定的编辑器")}>
               {t("consoleSettings.nodes.detail.editorCount", { count: node.editor_occupancy || 0, defaultValue: `${node.editor_occupancy || 0} 个` })}
             </DetailField>
@@ -429,7 +563,7 @@ function NodeDetailDialog({
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
-                        <Badge variant="secondary">{nodeCapacityLabel(child) || t("consoleSettings.nodes.detail.idle", "空闲")}</Badge>
+                        <Badge variant="secondary">{nodeEditorOccupancyLabel(child) || t("consoleSettings.nodes.detail.idle", "空闲")}</Badge>
                         <NodeStatus node={child} />
                       </div>
                     </div>

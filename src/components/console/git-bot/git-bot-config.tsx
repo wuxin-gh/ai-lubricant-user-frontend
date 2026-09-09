@@ -1,6 +1,7 @@
 import { Item, ItemActions, ItemContent, ItemGroup, ItemTitle } from "@/components/ui/item"
 import { useState, useEffect, forwardRef, useImperativeHandle, useCallback } from "react"
 import { apiRequest } from "@/utils/requestUtils"
+import { copyToClipboard } from "@/utils/clipboard"
 import { toast } from "sonner"
 import type { DomainGitBot } from "@/api/Api"
 import { Button } from "@/components/ui/button"
@@ -96,17 +97,23 @@ export const GitBotConfig = forwardRef<GitBotConfigRef>(function GitBotConfig(_,
     setPermissionDialogOpen(true)
   }
 
-  const handleCopyWebhook = () => {
+  const handleCopyWebhook = async () => {
     if (webhookBot?.webhook_url) {
-      navigator.clipboard.writeText(webhookBot.webhook_url)
-      toast.success(t("consoleGitBot.toast.webhookCopied"))
+      if (await copyToClipboard(webhookBot.webhook_url)) {
+        toast.success(t("consoleGitBot.toast.webhookCopied"))
+      } else {
+        toast.error("复制失败，请手动选择")
+      }
     }
   }
 
-  const handleCopySecretToken = () => {
+  const handleCopySecretToken = async () => {
     if (webhookBot?.secret_token) {
-      navigator.clipboard.writeText(webhookBot.secret_token)
-      toast.success(t("consoleGitBot.toast.secretCopied"))
+      if (await copyToClipboard(webhookBot.secret_token)) {
+        toast.success(t("consoleGitBot.toast.secretCopied"))
+      } else {
+        toast.error("复制失败，请手动选择")
+      }
     }
   }
 

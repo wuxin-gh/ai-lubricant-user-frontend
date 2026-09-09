@@ -72,6 +72,8 @@ interface SchemeFormValues {
   port_range_hi: string
   /** frpc/npc:可选对外访问域名。cloudflared managed:必填根域名。 */
   domain: string
+  /** frpc:可选客户端 user(frp [common].user);代理名会带 user. 前缀。 */
+  user: string
   // cloudflared
   cf_mode: "quick" | "managed"
   cf_api_token: string
@@ -89,6 +91,7 @@ const EMPTY_FORM: SchemeFormValues = {
   port_range_lo: "",
   port_range_hi: "",
   domain: "",
+  user: "",
   cf_mode: "quick",
   cf_api_token: "",
   cf_account_id: "",
@@ -120,6 +123,7 @@ function formFromConfig(s: TunnelScheme): SchemeFormValues {
     port_range_lo: rng[0] != null ? String(rng[0]) : "",
     port_range_hi: rng[1] != null ? String(rng[1]) : "",
     domain: String(c.domain || ""),
+    user: String(c.user || ""),
     cf_mode: (c.mode as "quick" | "managed") || "quick",
     cf_api_token: String(c.api_token || ""),
     cf_account_id: String(c.account_id || ""),
@@ -130,13 +134,24 @@ function formFromConfig(s: TunnelScheme): SchemeFormValues {
 
 function configFromForm(v: SchemeFormValues): TunnelSchemeConfig {
   if (v.kind === "frpc" || v.kind === "npc") {
-    return {
+    const cfg: TunnelSchemeConfig = {
       server_addr: v.server_addr.trim(),
       server_port: Number(v.server_port) || 0,
       token: v.token.trim(),
-      port_range: [Number(v.port_range_lo) || 0, Number(v.port_range_hi) || 0],
       domain: v.domain.trim(),
     }
+    // 端口段选填:留空(或填了起点没填终点)则不写 port_range,该方案不做
+    // 端口限制 —— 每条代理创建时必须手填远端端口。
+    const lo = Number(v.port_range_lo)
+    const hi = Number(v.port_range_hi)
+    if (v.port_range_lo.trim() && v.port_range_hi.trim() && lo > 0 && hi >= lo) {
+      cfg.port_range = [lo, hi]
+    }
+    // user 仅 frpc 写入 config(npc [common] 无 user);空串不发键。
+    if (v.kind === "frpc" && v.user.trim()) {
+      cfg.user = v.user.trim()
+    }
+    return cfg
   }
   // cloudflared
   if (v.cf_mode === "quick") {
@@ -163,7 +178,10 @@ function summarizeConfig(s: TunnelScheme): string {
   const rng = Array.isArray(c.port_range) ? (c.port_range as number[]) : []
   const host = domain || String(c.server_addr || "")
   const via = domain ? ` (连 ${c.server_addr || ""})` : ""
-  return `${host}:${c.server_port || ""}${via} · 端口段 ${rng[0] ?? "?"}-${rng[1] ?? "?"}`
+  const range = rng.length === 2 && rng[0]
+    ? ` · 端口段 ${rng[0] ?? "?"}-${rng[1] ?? "?"}`
+    : " · 端口不限(代理手填远端端口)"
+  return `${host}:${c.server_port || ""}${via}${range}`
 }
 
 function targetLabel(binding: TunnelBinding, nodes: AdminNodeInfo[]): string {
@@ -225,6 +243,8 @@ export function TunnelSchemes() {
     local_port: "",
     subdomain: "",
     description: "",
+    proxy_name: "",
+    remote_port: "",
   })
 
   // 视图:按方案 / 按节点 + 节点筛选 + 全量代理(两个视图共用同一份数据,
@@ -240,6 +260,15 @@ export function TunnelSchemes() {
   const proxyScheme = schemes.find((s) => s.id === proxySchemeId)
   const proxyNeedsSubdomain = proxyScheme?.kind === "cloudflared" && proxyScheme.config?.mode === "managed"
   const proxyDomain = String(proxyScheme?.config?.domain || "")
+  // 代理名/远端端口覆盖:remote_port 仅 frpc/npc,proxy_name 仅 frpc。
+  const proxySupportsRemotePort = proxyScheme?.kind === "frpc" || proxyScheme?.kind === "npc"
+  const proxySupportsProxyName = proxyScheme?.kind === "frpc"
+  // 方案没配端口段时,远端端口从可选变必填(无法自动分配)。
+  const schemeRange = Array.isArray(proxyScheme?.config?.port_range)
+    ? (proxyScheme?.config?.port_range as number[])
+    : []
+  const schemeHasRange = !!(schemeRange[0] && schemeRange[1])
+  const remotePortRequired = proxySupportsRemotePort && !schemeHasRange
 
   // 异步收敛:绑定创建/启停/删除后,运行时服务需要几秒才能把 client_status 从
   // pending 翻成 running/failed。有 pending 绑定时启动 3s 轮询,全部稳定后停止。
@@ -293,7 +322,10 @@ export function TunnelSchemes() {
     const initial = schemeId || schemes.find((s) => s.enabled)?.id || ""
     setProxyEditing(null)
     setProxySchemeId(initial)
-    setProxyForm({ node_id: "__main__", local_host: "127.0.0.1", local_port: "", subdomain: "", description: "" })
+    setProxyForm({
+      node_id: "__main__", local_host: "127.0.0.1", local_port: "", subdomain: "",
+      description: "", proxy_name: "", remote_port: "",
+    })
     setProxyError(null)
     setProxyOpen(true)
   }
@@ -313,6 +345,9 @@ export function TunnelSchemes() {
       local_port: String(binding.local_port),
       subdomain,
       description: binding.description || "",
+      // 回填当前生效端口:手动覆盖优先,否则自动分配值(编辑时留空=保持不变)。
+      proxy_name: binding.proxy_name || "",
+      remote_port: String(binding.remote_port ?? binding.allocated_value ?? ""),
     })
     setProxyError(null)
     setProxyOpen(true)
@@ -325,12 +360,27 @@ export function TunnelSchemes() {
     if (!port || port < 1 || port > 65535) { setProxyError("端口需为 1-65535"); return }
     if (proxyNeedsSubdomain && !proxyDomain) { setProxyError("方案未配置根域名,请先编辑方案"); return }
     if (proxyNeedsSubdomain && !proxyForm.subdomain.trim()) { setProxyError("请填写子域名"); return }
+    const remotePort = Number(proxyForm.remote_port)
+    if (proxySupportsRemotePort && remotePortRequired && (!remotePort || remotePort < 1 || remotePort > 65535)) {
+      setProxyError("该方案未配置端口段,远端端口为必填(1-65535)")
+      return
+    }
+    if (proxySupportsRemotePort && proxyForm.remote_port.trim() && (!remotePort || remotePort < 1 || remotePort > 65535)) {
+      setProxyError("远端端口需为 1-65535")
+      return
+    }
+    if (proxySupportsProxyName && /[^\w.\-]/.test(proxyForm.proxy_name.trim())) {
+      setProxyError("代理名仅支持字母、数字、`.`、`_`、`-`")
+      return
+    }
     const input = {
       scheme_id: proxySchemeId,
       node_id: proxyForm.node_id,
       local_host: proxyForm.local_host.trim() || "127.0.0.1",
       local_port: port,
       ...(proxyNeedsSubdomain ? { subdomain: proxyForm.subdomain.trim() } : {}),
+      ...(proxySupportsProxyName ? { proxy_name: proxyForm.proxy_name.trim() || undefined } : {}),
+      ...(proxySupportsRemotePort ? { remote_port: remotePort || undefined } : {}),
       description: proxyForm.description.trim() || undefined,
     }
     setProxySaving(true); setProxyError(null)
@@ -935,14 +985,28 @@ export function TunnelSchemes() {
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <Label>端口段起</Label>
+                    <Label>端口段起 (可选)</Label>
                     <Input value={form.port_range_lo} onChange={(e) => setForm({ ...form, port_range_lo: e.target.value })} placeholder="30000" />
                   </div>
                   <div className="space-y-1">
-                    <Label>端口段止</Label>
+                    <Label>端口段止 (可选)</Label>
                     <Input value={form.port_range_hi} onChange={(e) => setForm({ ...form, port_range_hi: e.target.value })} placeholder="30100" />
                   </div>
                 </div>
+                {(form.kind === "frpc" || form.kind === "npc") && (
+                  <p className="text-xs text-muted-foreground">
+                    端口段用于给代理自动分配远端端口;两格都留空则该方案不限端口,创建代理时须手动填写远端端口。
+                  </p>
+                )}
+                {form.kind === "frpc" && (
+                  <div className="space-y-1">
+                    <Label>User (可选)</Label>
+                    <Input value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} placeholder="myname" />
+                    <p className="text-xs text-muted-foreground">
+                      frp 客户端标识(对应 [common].user)。设置后实际代理名会带上 user. 前缀;仅支持字母、数字、`.`、`_`、`-`。
+                    </p>
+                  </div>
+                )}
               </>
             )}
 
@@ -1134,6 +1198,40 @@ export function TunnelSchemes() {
                 />
               </div>
             </div>
+            {proxySupportsRemotePort && (
+              <div className="space-y-1">
+                <Label>
+                  远端端口{remotePortRequired ? <Req /> : null}
+                  {remotePortRequired ? "" : " (可选)"}
+                </Label>
+                <Input
+                  type="number"
+                  value={proxyForm.remote_port}
+                  onChange={(e) => setProxyForm({ ...proxyForm, remote_port: e.target.value })}
+                  placeholder={proxyEditing ? (remotePortRequired ? "必填" : "保持当前") : (remotePortRequired ? "必填(方案未配端口段)" : "自动分配")}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {remotePortRequired
+                    ? "该方案未配置端口段,无法自动分配,必须手动指定(同方案内不能重复)。"
+                    : proxyEditing
+                      ? "留空保持当前端口;填写则改用该端口(同方案内不能重复)。"
+                      : "代理服务端对外监听的端口;留空自动从方案端口段分配。"}
+                </p>
+              </div>
+            )}
+            {proxySupportsProxyName && (
+              <div className="space-y-1">
+                <Label>代理名 (可选)</Label>
+                <Input
+                  value={proxyForm.proxy_name}
+                  onChange={(e) => setProxyForm({ ...proxyForm, proxy_name: e.target.value })}
+                  placeholder="web"
+                />
+                <p className="text-xs text-muted-foreground">
+                  写进 frpc 配置的代理名;留空自动生成。仅支持字母、数字、`.`、`_`、`-`,同方案内唯一。
+                </p>
+              </div>
+            )}
             {proxyNeedsSubdomain && (
               <div className="space-y-1">
                 <Label>子域名<Req /></Label>

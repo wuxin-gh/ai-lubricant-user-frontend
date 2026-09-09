@@ -158,6 +158,30 @@ export function installNodeTool(nodeId: string, tool: string): Promise<unknown> 
   return reviewFetch(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/tools/${encodeURIComponent(tool)}/install`, { method: "POST" })
 }
 
+/** 在分组的管理节点下新增执行节点：服务端 onboard + dispatch 自动拉起。 */
+export interface CreateGroupExecutionNodeResult {
+  node_id: string
+  secret?: string
+  install_command?: string
+  launched?: boolean
+  node?: unknown
+}
+
+export function createGroupExecutionNode(
+  groupId: string,
+  body: { startup_method?: string; node_name?: string; proxy_config_id?: string },
+): Promise<CreateGroupExecutionNodeResult> {
+  return reviewFetch(`/api/v1/teams/groups/${encodeURIComponent(groupId)}/execution-nodes`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** 成员侧审批节点（权限：user_can_use_node 派生管理权）。 */
+export function approveGroupNode(nodeId: string): Promise<unknown> {
+  return reviewFetch(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/approve`, { method: "POST" })
+}
+
 /** 节点上一个命名共享环境（用户侧只读视图，归属该节点）。 */
 export interface MyNodeEnvironment {
   env_id: string

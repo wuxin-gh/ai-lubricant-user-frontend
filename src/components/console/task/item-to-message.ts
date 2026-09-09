@@ -40,6 +40,36 @@ export interface NormalizedItem {
   task?: string
   /** Set by the backend when ClickHouse is unreachable for this frame. */
   content_unavailable?: boolean
+  /**
+   * Wall-clock time the frame happened, as epoch seconds. The data layer that
+   * actually knows the time stamps it: the replay path parses the persisted
+   * row's ``created_at``; the live path stamps arrival time. ``itemToRootMessage``
+   * threads it onto ``message.time`` instead of hard-coding 0 (which rendered
+   * every message as 1970-01-01).
+   */
+  created_at?: number
+}
+
+/** Parse a persisted row's ``created_at`` (ISO 8601, possibly tz-aware) to epoch
+ * seconds. The mc_* tables store naive UTC, but asyncpg returns the value with
+ * whatever tz the column carries; a string with no timezone designator is
+ * treated as UTC so it does not slip into the browser's local zone. */
+export function parseIsoToSeconds(value: string | number | null | undefined): number {
+  if (value == null) return 0
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return 0
+    // ms → s; seconds already; the renderer's normalizeTimestampToSeconds also
+    // defends against magnitude, so just keep the number.
+    return value >= 1e12 ? Math.floor(value / 1000) : Math.floor(value)
+  }
+  const text = value.trim()
+  if (!text) return 0
+  const hasTz = /([zZ]|[+-]\d{2}:?\d{2})$/.test(text)
+  // Postgres naive-UTC isoformat uses a space; Date needs the T, and without a
+  // designator JS treats the string as local time — force UTC.
+  const normalized = `${text.replace(" ", "T")}${hasTz ? "" : "Z"}`
+  const ms = Date.parse(normalized)
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
 }
 
 /** Claude tool name → message.data.kind the existing renderers route on. */
@@ -127,15 +157,48 @@ function buildToolMeta(toolName: string, input: Record<string, unknown>, output:
 }
 
 /** Convert one item to a root-agent message, or null if it shouldn't render inline. */
+/** Per-call token usage the runtime stamps on assistant items. */
+export interface ItemUsage {
+  input: number
+  output: number
+  cache_read: number
+  cache_creation: number
+  total: number
+}
+
+function itemUsageOf(item: NormalizedItem): ItemUsage | undefined {
+  const raw = (item as { usage?: unknown }).usage
+  if (!raw || typeof raw !== "object") return undefined
+  const record = raw as Record<string, unknown>
+  const usage: ItemUsage = {
+    input: Number(record.input ?? 0),
+    output: Number(record.output ?? 0),
+    cache_read: Number(record.cache_read ?? 0),
+    cache_creation: Number(record.cache_creation ?? 0),
+    total: Number(record.total ?? 0),
+  }
+  if (!usage.input && !usage.output && !usage.cache_read && !usage.cache_creation) return undefined
+  return usage
+}
+
+function itemModelOf(item: NormalizedItem): string | undefined {
+  const model = asString((item as { model?: unknown }).model)
+  return model || undefined
+}
+
 export function itemToRootMessage(item: NormalizedItem, seq: number): MessageType | null {
   const id = rootMessageIdFor(String(item.id ?? ""), seq)
+  // The data layer (persisted row's created_at / live arrival) stamps the item;
+  // absent (legacy frames without the field threaded) falls back to 0, which
+  // the renderer has always treated as "no timestamp to show".
+  const time = item.created_at ?? 0
   // The backend marks a frame `content_unavailable` when ClickHouse cannot be
   // read for it. Rendering nothing would read as data loss (a gap where a turn
   // should be); a muted notice reads as a degraded store, which is what it is.
   if (item.content_unavailable) {
     return {
       id,
-      time: 0,
+      time,
       role: "system",
       type: "system_message",
       data: { text: "该消息内容暂不可用（内容存储暂时不可达）" },
@@ -144,19 +207,33 @@ export function itemToRootMessage(item: NormalizedItem, seq: number): MessageTyp
   switch (item.type) {
     case "user_input": {
       const text = asString(item.text)
-      return text ? { id, time: 0, role: "user", type: "user_input", data: { content: text } } : null
+      return text ? { id, time, role: "user", type: "user_input", data: { content: text } } : null
     }
     case "agent_message": {
       const text = asString(item.text)
-      return text ? { id, time: 0, role: "agent", type: "agent_message_chunk", data: { content: text } } : null
+      if (!text) return null
+      return {
+        id,
+        time,
+        role: "agent",
+        type: "agent_message_chunk",
+        data: { content: text, ...(itemModelOf(item) ? { model: itemModelOf(item) } : {}), ...(itemUsageOf(item) ? { usage: itemUsageOf(item) } : {}) },
+      }
     }
     case "reasoning": {
       const text = asString(item.text)
-      return text ? { id, time: 0, role: "agent", type: "agent_thought_chunk", data: { content: text } } : null
+      if (!text) return null
+      return {
+        id,
+        time,
+        role: "agent",
+        type: "agent_thought_chunk",
+        data: { content: text, ...(itemModelOf(item) ? { model: itemModelOf(item) } : {}), ...(itemUsageOf(item) ? { usage: itemUsageOf(item) } : {}) },
+      }
     }
     case "error": {
       const text = asString(item.text) || "运行时报告错误"
-      return { id, time: 0, role: "agent", type: "error_message", data: { text } }
+      return { id, time, role: "agent", type: "error_message", data: { text } }
     }
     case "tool_call":
     case "command_execution":
@@ -167,7 +244,7 @@ export function itemToRootMessage(item: NormalizedItem, seq: number): MessageTyp
       const input = (item.input && typeof item.input === "object" ? item.input : {}) as Record<string, unknown>
       return {
         id,
-        time: 0,
+        time,
         role: "agent",
         type: "tool_call",
         data: {
@@ -316,6 +393,11 @@ export function reduceItems(rows: { item: NormalizedItem; agentId: AgentId; seq:
   const messages: MessageType[] = []
   const subAgentMap = new Map<AgentId, EditorSessionSubAgent>()
   const subAgentSeenInline = new Set<AgentId>()
+  // Per-sub-agent merged raw items by id, mirroring the root branch's rawById:
+  // a sub-agent's tool call also arrives twice (opening frame with title/input,
+  // closing frame with only output/status), and the closing frame must update
+  // the opening card rather than stack a forever-running twin beside it.
+  const subAgentRawById = new Map<AgentId, Map<string, NormalizedItem>>()
   // Position of each already-emitted message id, so a re-sent item updates its
   // entry in place. The runtime reports one logical item several times as it
   // advances (a tool call arrives `running`, then again `done` with its output)
@@ -336,16 +418,23 @@ export function reduceItems(rows: { item: NormalizedItem; agentId: AgentId; seq:
         const existing = subAgentMap.get(agentId)
         messages.push({
           id: `subagent-entry-${agentId}`,
-          time: 0,
+          // The entry card sits at the sub-agent's first frame; show that
+          // frame's time, not 0.
+          time: item.created_at ?? 0,
           role: "system",
           type: "system_message",
           data: { text: existing?.name || `子 Agent ${agentId.slice(0, 8)}`, toolCallId: agentId },
         })
       }
-      // Fold the item into the sub-agent record.
+      // Fold the item into the sub-agent record. Status comes from the item —
+      // replay delivers the merged `done`/`failed` frame, and hard-coding
+      // "running" here is what left sub-agent cards spinning after a refresh.
       const prev = subAgentMap.get(agentId)
       const name = asString(item.agent_name) || prev?.name || `子 Agent ${agentId.slice(0, 8)}`
       const task = asString(item.task) || prev?.task || ""
+      // Sub-agent overall status: once a `done` frame lands on any item, the
+      // agent has finished; a later `running` frame must not resurrect it.
+      const agentDone = prev?.status === "done" || item.status === "done"
       if (item.type === "agent_message") {
         const text = asString(item.text)
         subAgentMap.set(agentId, {
@@ -353,23 +442,35 @@ export function reduceItems(rows: { item: NormalizedItem; agentId: AgentId; seq:
           id: agentId,
           name,
           task,
-          status: "running",
+          status: agentDone ? "done" : "running",
           content: (prev?.content || "") + (prev?.content ? "\n" : "") + text,
           toolCalls: prev?.toolCalls || [],
         })
       } else if (item.type === "tool_call" || item.type === "command_execution" || item.type === "mcp_tool_call") {
+        // Merge by id onto the previous report of the same tool call: the
+        // closing frame carries only output/status, so a fresh entry would
+        // lose the opening frame's title/input and never reach `done`.
+        const rawMap = subAgentRawById.get(agentId) || new Map<string, NormalizedItem>()
+        subAgentRawById.set(agentId, rawMap)
+        const key = String(item.id ?? asString(item.title))
+        const previousRaw = rawMap.get(key)
+        const merged = previousRaw ? mergeItems(previousRaw, item) : item
+        rawMap.set(key, merged)
+        const mergedStatus = asString(merged.status) || "done"
         const toolCall = {
-          name: asString(item.title),
-          args: item.input ?? {},
-          result: item.output,
-          status: "running" as const,
+          name: asString(merged.title),
+          args: merged.input ?? {},
+          result: merged.output,
+          // toolCalls only model running|done; a failed call still produced a
+          // result, so it is `done` (the error is in the result text).
+          status: (mergedStatus === "running" ? "running" : "done") as "running" | "done",
         }
         subAgentMap.set(agentId, {
           ...prev!,
           id: agentId,
           name,
           task,
-          status: "running",
+          status: agentDone ? "done" : "running",
           content: prev?.content || "",
           toolCalls: [...(prev?.toolCalls || []), toolCall],
         })

@@ -44,6 +44,7 @@ export const EDITOR_LABEL: Record<string, string> = {
   codex: "Codex",
   gemini: "Gemini",
   opencode: "OpenCode",
+  cursor: "Cursor",
   openai: "OpenAI",
   anthropic: "Anthropic",
 }
@@ -210,7 +211,7 @@ export function machineSpecsLine(caps: NodeCaps | undefined | null): string {
 }
 
 /** 本系统支持安装/升级/版本上报的编辑器 CLI（与 Go agent.SupportedEditors 对齐）。 */
-export const SUPPORTED_EDITORS = ["claude", "codex", "gemini", "opencode"] as const
+export const SUPPORTED_EDITORS = ["claude", "codex", "gemini", "opencode", "cursor"] as const
 
 /** 已安装的编辑器/Provider 列表（来自 capabilities.providers 逗号串）。 */
 export function nodeEditors(caps: NodeCaps | undefined | null): string[] {
@@ -248,4 +249,32 @@ export function nodeEditorVersions(
       installed: installedSet.has(editor) || version !== "",
     }
   })
+}
+
+// ── Node.js/npm 版本门禁 ─────────────────────────────────────────────────────
+// 编辑器 CLI（claude-code 等）的 postinstall 脚本用新 Node 语法，Node 10.x 这类
+// 系统自带旧版上直接跑挂。低于下限的节点按「需升级」处理：审批门禁拦截 +
+// 环境 Tab 给升级按钮（InstallHostTool 装 LTS 到自管目录，装即升级）。
+
+/** Node.js 最低主版本（编辑器 CLI 与 runtime 的实际下限）。 */
+export const NODE_FLOOR_MAJOR = 18
+/** npm 最低主版本（随 Node LTS 自带，旧 npm 装不上新编辑器包）。 */
+export const NPM_FLOOR_MAJOR = 9
+
+/** 解析 "10.15.3" / "v10.15.3" 的主版本号；无版本/解析失败返回 -1（视为缺失）。 */
+export function versionMajor(version: string | undefined | null): number {
+  const m = String(version || "").trim().match(/^v?(\d+)/)
+  return m ? Number(m[1]) : -1
+}
+
+/** Node.js 缺失或低于下限（审批按需升级拦截）。 */
+export function nodeBelowFloor(caps: NodeCaps | undefined | null): boolean {
+  const raw = String((caps || {}).node_version || "").trim()
+  return !raw || versionMajor(raw) < NODE_FLOOR_MAJOR
+}
+
+/** npm 缺失或低于下限。 */
+export function npmBelowFloor(caps: NodeCaps | undefined | null): boolean {
+  const raw = String((caps || {}).npm_version || "").trim()
+  return !raw || versionMajor(raw) < NPM_FLOOR_MAJOR
 }

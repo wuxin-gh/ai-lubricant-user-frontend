@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react"
 import dayjs from "dayjs"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import { useTranslation } from "react-i18next"
 import {
   IconCirclePlus,
@@ -397,11 +398,10 @@ export default function TeamManagerMembers() {
 
   const handleCopyPassword = async () => {
     if (!passwordResult) return
-    try {
-      await navigator.clipboard.writeText(`${passwordResult.email || ""}\t${passwordResult.password || ""}`)
+    if (await copyToClipboard(`${passwordResult.email || ""}\t${passwordResult.password || ""}`)) {
       toast.success("已复制")
-    } catch {
-      toast.error("复制失败")
+    } else {
+      toast.error("复制失败，请手动选择")
     }
   }
 

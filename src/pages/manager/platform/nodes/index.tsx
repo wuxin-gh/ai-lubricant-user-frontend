@@ -30,7 +30,7 @@ import {
   groupIntoTree,
   type NodeView,
 } from "@/components/nodes/node-view"
-import { NodeTreeTable } from "@/components/nodes/node-tree-table"
+import { NodeTreeTable, NODE_LIST_COLUMNS } from "@/components/nodes/node-tree-table"
 import { NodeTerminalDialog } from "@/components/nodes/node-terminal-dialog"
 import {
   AlertDialog,
@@ -69,6 +69,9 @@ import { ApproveNodeModal } from "./approve-node"
  *
  * secret 无法再次获取，只展示公开字段 + 命令模板 + 运行程序下载。节点的
  * role / startup_method 来自 ListNodes 的实时状态。
+ *
+ * 布局与入驻弹窗同款：头部 + 内容滚动区（flex-1 min-h-0）+ 固定页脚。关闭按钮
+ * 固定在页脚，不藏在滚动内容末尾——展开「高级」折叠块后也不把它顶走。
  */
 function InstallGuideModal({
   open,
@@ -86,12 +89,14 @@ function InstallGuideModal({
   if (!node) return null
   return (
     <Dialog open={open} onOpenChange={(o) => (o ? undefined : onClose())}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[720px]">
-        <DialogHeader>
+      <DialogContent showCloseButton={false} className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[720px]">
+        <DialogHeader className="border-b p-6 pb-4">
           <DialogTitle>节点安装与启动方式</DialogTitle>
         </DialogHeader>
-        <NodeInstallGuide nodeId={node.node_id} role={node.role} serverUrl={serverUrl} />
-        <div className="text-right">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-6">
+          <NodeInstallGuide nodeId={node.node_id} role={node.role} serverUrl={serverUrl} />
+        </div>
+        <div className="flex shrink-0 items-center justify-end border-t p-6 pt-4">
           <Button onClick={onClose}>关闭</Button>
         </div>
       </DialogContent>
@@ -193,6 +198,16 @@ export function Nodes() {
     const grouping = onboardKind === "management" && manage === "grouping"
     setOnboardSubmitting(true)
     try {
+      // 执行节点交给可管理管理节点时，跟随管理节点的形态：docker 形态管理节点
+      // 只能在本机 docker run 拉起子节点（standalone 在容器化环境被拒）。把
+      // startup_method 取管理节点的，拉起的子节点形态自然与管理节点一致。
+      const execStartup = (() => {
+        if (onboardKind !== "execution") return "standalone"
+        const mgr = managementNodes.find((n) => n.node_id === presetManagerId)
+        const m = String(mgr?.startup_method || "")
+        if (m === "docker" || m === "docker-compose") return m
+        return "standalone"
+      })()
       const result = await onboardNode({
         role:
           onboardKind === "execution"
@@ -200,7 +215,7 @@ export function Nodes() {
             : grouping
               ? "passive_management"
               : "management",
-        startup_method: onboardKind === "execution" ? "standalone" : "docker",
+        startup_method: execStartup,
         node_name: nodeName || undefined,
         manager_node_id:
           onboardKind === "execution" ? presetManagerId || undefined : undefined,
@@ -213,6 +228,9 @@ export function Nodes() {
         setOnboardOpen(false)
         setOnboardResult(null)
       } else {
+        // 执行节点被管理节点自动拉起（result.launched）时，弹窗进入等待态而非
+        // 展示凭证：节点正在容器里启动 → 拨号 → pending，弹窗轮询到上线后自动
+        // 开审批。凭证/一键命令对自动拉起无意义，由弹窗按 launched 隐藏。
         setOnboardResult(result)
       }
       await fetchData()
@@ -326,10 +344,25 @@ export function Nodes() {
         <Button size="sm" variant="outline" onClick={() => setDetailNode(manager)}>
           详情
         </Button>
-        <Button size="sm" onClick={() => openAddExecutionNode(manager.node_id)}>
-          <Plus />
-          添加执行节点
-        </Button>
+        {/* 执行节点由可管理管理节点自动拉起（docker run），前置条件是管理节点
+            已审批：未审批时置灰引导先审批，而不是让 onboard 落到 launched=false
+            的手动凭证兜底。纯分组容器（passive）没有客户端拉不起，但后端允许
+            它挂执行节点（手动安装流程），保持可用。 */}
+        {manager.status === "approved" || view.isPassive ? (
+          <Button size="sm" onClick={() => openAddExecutionNode(manager.node_id)}>
+            <Plus />
+            添加执行节点
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            disabled
+            title="管理节点审批通过后才能自动拉起执行节点"
+          >
+            <Plus />
+            添加执行节点
+          </Button>
+        )}
         {canOpenTerminal(view) ? (
           <Button size="sm" variant="outline" onClick={() => openTerminal(manager)}>
             <TerminalIcon />
@@ -471,7 +504,7 @@ export function Nodes() {
         ) : (
           <NodeTreeTable
             groups={nodeGroups}
-            columns={["version", "editors", "status"]}
+            columns={NODE_LIST_COLUMNS}
             emptyHint="暂无节点。先「新建管理节点」，再在其下添加执行节点"
             noExecutionHint="该管理节点下暂无执行节点，点击「添加执行节点」创建。"
             renderManagerActions={renderManagerActions}

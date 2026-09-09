@@ -7,7 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { isSafeImageSource } from "@/lib/media-url"
+import { isSafeDataImageUrl, isSafeImageSource } from "@/lib/media-url"
 
 interface ImagePreviewProps {
   src: string
@@ -17,6 +17,8 @@ interface ImagePreviewProps {
   imageClassName?: string
   loading?: "eager" | "lazy"
   disabled?: boolean
+  /** 允许内联 data:image/…（非 SVG）源——仅供信任的管理端配置内容按调用点显式开启。 */
+  allowDataImage?: boolean
 }
 
 /**
@@ -32,11 +34,12 @@ export function ImagePreview({
   imageClassName,
   loading = "lazy",
   disabled = false,
+  allowDataImage = false,
 }: ImagePreviewProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [previewError, setPreviewError] = useState(false)
-  const safeSrc = isSafeImageSource(src) ? src : ""
+  const safeSrc = isSafeImageSource(src) || (allowDataImage && isSafeDataImageUrl(src)) ? src : ""
   const label = alt?.trim() || t("common.imagePreview.defaultAlt")
   const dialogTitle = title?.trim() || label
 

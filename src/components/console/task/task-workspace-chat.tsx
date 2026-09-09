@@ -21,6 +21,7 @@ import {
 } from "@/components/console/editor/editor-session-stream-client"
 import {
   collapseErrorDuplicates,
+  parseIsoToSeconds,
   reduceItems,
   type AgentId,
   type NormalizedItem,
@@ -81,6 +82,12 @@ function rowToItem(row: UserTaskEventRow): { item: NormalizedItem; agentId: Agen
   // from the legacy `agent_id` alias for rows written before the field
   // existed, so this reader never guesses.
   const subagentId = typeof root.subagent_id === "string" ? root.subagent_id : ""
+  // The row's own persisted timestamp is the honest time this frame happened —
+  // it is what itemToRootMessage threads onto message.time so the transcript
+  // shows real wall-clock instead of 1970. Parsed here, where the row is
+  // decoded, because that is the layer that owns the timestamp.
+  const createdAt = parseIsoToSeconds(row.created_at)
+  if (createdAt) (rawItem as { created_at?: number }).created_at = createdAt
   return {
     item: rawItem as unknown as NormalizedItem,
     agentId: subagentId,
@@ -226,6 +233,12 @@ export default function TaskWorkspaceChat({
   // event: error 抛出，没有这条 banner 用户只会看到「连接断开」却不知真因。
   const [streamError, setStreamError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  // 子 Agent 会话面板会卸载主对话的 ScrollArea，返回时重新挂载会让 scrollTop 归零
+  // （跟随尾部的 effect 只在接近底部时才滚，所以停在顶部）。离开前记下当前
+  // scrollTop 与所点子 Agent 卡片 id，返回时优先滚到那张卡片、卡片不在视口
+  // （翻页出去了）则恢复上次位置——用户从哪里点进去，就回到哪里。
+  const mainScrollRestoreRef = useRef<{ scrollTop: number; cardId: string | null } | null>(null)
+  const prevActiveSubAgentRef = useRef<string | null>(activeSubAgentId ?? null)
   const clientRef = useRef<EditorSessionStreamClient | null>(null)
   // 最近一次发出去的轮次（原文 + 附件 + 幂等键）。失败后的「重新发送」重发的
   // 是这一条而不是另造一句 prompt —— 用 ref 而非 state：只在点击时读取，不该
@@ -254,6 +267,10 @@ export default function TaskWorkspaceChat({
   // 刷新把 node_session_id 回填，SSE 这时才连上。
   const canStream = hasRuntime && !preparing
   const canInteract = canSend
+  // 模型可选多个而当前没选：发送前必须先挑一个（用户要求「警告让我选择模型」，
+  // 而不是停在「不限制」态默默发出去）。快照为空 = 不限制，只在可选项 ≥2 时
+  // 强制选——单模型没有选择余地、零个无从选起，都静默放行走默认。
+  const requireModel = (models || []).length > 1 && !modelLabel?.model
   // 上下文用量：流上报 size/used 时用它做进度；否则回退累计 token 作输入、上限未知。
   const ctxSize = contextUsage?.size ?? 0
   const ctxUsed = contextUsage?.used ?? 0
@@ -467,6 +484,9 @@ export default function TaskWorkspaceChat({
     for (const agent of liveSubAgents) map.set(agent.id, agent)
     return [...map.values()]
   }, [replay.subAgents, liveSubAgents])
+  // 子 Agent id 集合。主 Agent 派发子 Agent 的那次 Agent tool_use，其 id 就是
+  // subagent_id（runtime 按 parent_tool_use_id 关联两者），用它识别派发帧。
+  const subAgentIds = useMemo(() => new Set(allSubAgents.map((a) => a.id)), [allSubAgents])
   // Live entries supersede persisted ones with the same id instead of stacking
   // beside them. Both sources describe the same turn: the message the user just
   // sent is appended optimistically *and* recorded server-side, and every live
@@ -514,6 +534,39 @@ export default function TaskWorkspaceChat({
     if (distanceFromBottom > 160) return
     container.scrollTop = container.scrollHeight
   }, [lastMessageId, running])
+
+  // 离开主对话进子 Agent 视图前，抓一份当前滚动位置 + 所点卡片 id。
+  const captureMainScroll = useCallback((cardId: string | null) => {
+    const viewport = scrollRef.current?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")
+    mainScrollRestoreRef.current = { scrollTop: viewport?.scrollTop ?? 0, cardId }
+  }, [])
+
+  // 从子 Agent 视图返回主对话：ScrollArea 已被卸载过、重新挂载停在顶部。
+  // 等 React 把主对话铺好（两帧 rAF 后布局稳定），定位到子 Agent 卡片；找不到
+  // （卡片被翻页带出视口）就恢复离开时的 scrollTop。
+  useEffect(() => {
+    const wasId = prevActiveSubAgentRef.current
+    prevActiveSubAgentRef.current = activeSubAgentId ?? null
+    if (!wasId || activeSubAgentId) return
+    const saved = mainScrollRestoreRef.current
+    mainScrollRestoreRef.current = null
+    if (!saved) return
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => {
+      const viewport = scrollRef.current?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")
+      if (!viewport) return
+      const card = saved.cardId
+        ? viewport.querySelector<HTMLElement>(`[data-subagent-card="${CSS.escape(saved.cardId)}"]`)
+        : null
+      if (card) {
+        const vRect = viewport.getBoundingClientRect()
+        const cRect = card.getBoundingClientRect()
+        viewport.scrollTop = Math.max(0, cRect.top - vRect.top + viewport.scrollTop - 48)
+      } else {
+        viewport.scrollTop = saved.scrollTop
+      }
+    }))
+    return () => cancelAnimationFrame(raf)
+  }, [activeSubAgentId])
 
   async function send(value: string, pendingAttachments: UserTaskAttachment[] = []) {
     const content = value.trim()
@@ -631,7 +684,10 @@ export default function TaskWorkspaceChat({
         <SubagentSideRail
           subAgents={allSubAgents}
           activeSubAgentId={activeSubAgentId}
-          onSelect={(id) => onSelectSubAgent?.(id)}
+          onSelect={(id) => {
+            captureMainScroll(id)
+            onSelectSubAgent?.(id)
+          }}
         />
         {activeSubAgent ? (
           <SubagentConversationPanel
@@ -682,14 +738,29 @@ export default function TaskWorkspaceChat({
                 {historyLoading && (
                   <div className="flex justify-center py-1 text-xs text-muted-foreground"><Spinner className="mr-1.5 size-3" />加载更早轮次…</div>
                 )}
-                {messages.map((message, index) => (
-                  message.type === "system_message" && message.data.toolCallId ? (
-                    <SubagentInlineEntry
-                      key={message.id}
-                      subAgent={allSubAgents.find((a) => a.id === message.data.toolCallId) ?? null}
-                      onOpen={() => onSelectSubAgent?.(message.data.toolCallId ?? null)}
-                    />
-                  ) : (
+                {messages.map((message, index) => {
+                  // 主 Agent 派发子 Agent 的 Agent tool_use（id == subagent_id）落在
+                  // 「子 Agent」入口卡的上方，完成后还把子 Agent 的最终文本当 output
+                  // 顶在轮次最前面。入口卡已经是该轮次的标记，这张派发帧不再当普通
+                  // 工具卡重复渲染；结果去子 Agent 面板看，跟在它的工具卡之后。
+                  if (message.type === "tool_call" && subAgentIds.has(message.id.slice("item-".length))) return null
+                  if (message.type === "system_message" && message.data.toolCallId) {
+                    return (
+                      <div
+                        key={message.id}
+                        data-subagent-card={message.data.toolCallId ?? undefined}
+                      >
+                        <SubagentInlineEntry
+                          subAgent={allSubAgents.find((a) => a.id === message.data.toolCallId) ?? null}
+                          onOpen={() => {
+                            captureMainScroll(message.data.toolCallId ?? null)
+                            onSelectSubAgent?.(message.data.toolCallId ?? null)
+                          }}
+                        />
+                      </div>
+                    )
+                  }
+                  return (
                     <MessageItem
                       key={message.id}
                       // 只给错误气泡挂重发：它是唯一需要「原文再来一次」的位置，
@@ -700,7 +771,7 @@ export default function TaskWorkspaceChat({
                       isLatest={index === messages.length - 1}
                     />
                   )
-                ))}
+                })}
               </>
             )}
             {plan.entries.length > 0 && (
@@ -761,6 +832,7 @@ export default function TaskWorkspaceChat({
           modelOptions={(models || []).map((modelId) => ({ value: modelId, label: modelId }))}
           onSwitchModel={(modelId) => void onSwitchModel?.(modelId)}
           onAddModel={onAddModel}
+          requireModel={requireModel}
           leftActions={
             <>
               {totalTokens > 0 && <span className="shrink-0 text-[11px] text-muted-foreground" title="该任务累计消耗 Token">{formatTokens(totalTokens)}</span>}

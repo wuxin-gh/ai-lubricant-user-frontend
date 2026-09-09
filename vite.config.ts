@@ -109,10 +109,14 @@ export default defineConfig(({ command, mode }) => {
         // MCP market/runtime endpoints (ai-lubricant's own MCP, not MonkeyCode's).
         // The admin ``mcp.ts`` client hits ``/mcp/*`` directly; without this the
         // requests fall through to the SPA and the market shows nothing.
+        // ``ws: true`` 让 device-control 的 WebSocket 升级也透传到后端——否则手机
+        // 拨 ws://<vite>/mcp/device-control/ws/device 永远等不到 101、卡「连接中」
+        // （配对走 HTTP 能转发，WS 升级被吞，所以「配对成功但永远连接中」）。
         '/mcp': {
           target: env.TARGET,
           changeOrigin: true,
           secure: false,
+          ws: true,
         },
         // 桌面上游型 OAuth 的本机回调（127.0.0.1:{port}/oauth/callback，codearts 等）。
         // portal 登录后把浏览器打到这个 origin 的 /oauth/callback——dev 下 origin 是

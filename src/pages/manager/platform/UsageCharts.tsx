@@ -82,6 +82,48 @@ function buildFailureRate(callRows: DashboardSeriesItem[], failRows: DashboardSe
   return { data, names: ['失败率'], max: Math.max(1, ...data.map((item) => item.value)) }
 }
 
+// 请求次数拆分图的固定配色：总数蓝、成功绿、失败红，语义直观。
+const CALLS_BREAKDOWN_COLOR: Record<string, string> = {
+  '请求次数': 'var(--blue)',
+  '成功': 'var(--green)',
+  '失败': 'var(--red)',
+}
+
+/**
+ * 请求次数拆分：同一张图内呈现 请求次数（总数）/ 成功 / 失败 三条序列。
+ * 失败取 model_failure_distribution（与失败率图同口径），成功 = 总数 − 失败（夹到 ≥0），
+ * 口径为尝试级（含重试），与 deriveSuccessFail 一致。无任何数据时返回空，保留「暂无数据」态。
+ */
+function buildCallsBreakdown(callRows: DashboardSeriesItem[], failRows: DashboardSeriesItem[], filters: RangeFilters) {
+  if (callRows.length === 0 && failRows.length === 0) {
+    return { data: [] as Array<{ label: string; series: string; value: number }>, names: [] as string[], max: 1 }
+  }
+  const columns = buildBuckets(new Date(filters.start).getTime() / 1000, new Date(filters.end).getTime() / 1000, filters.grain)
+  const callByBucket = new Map<number, number>()
+  const failByBucket = new Map<number, number>()
+
+  callRows.forEach((item) => {
+    const bucket = alignBucket(Number(item.bucket || 0), filters.grain)
+    callByBucket.set(bucket, (callByBucket.get(bucket) ?? 0) + Math.max(0, Number(item.value || 0)))
+  })
+  failRows.forEach((item) => {
+    const bucket = alignBucket(Number(item.bucket || 0), filters.grain)
+    failByBucket.set(bucket, (failByBucket.get(bucket) ?? 0) + Math.max(0, Number(item.value || 0)))
+  })
+
+  const data: Array<{ label: string; series: string; value: number }> = []
+  const totals: number[] = []
+  columns.forEach((column) => {
+    const total = callByBucket.get(column.bucket) ?? 0
+    const fail = failByBucket.get(column.bucket) ?? 0
+    data.push({ label: column.label, series: '请求次数', value: total })
+    data.push({ label: column.label, series: '成功', value: Math.max(0, total - fail) })
+    data.push({ label: column.label, series: '失败', value: fail })
+    totals.push(total)
+  })
+  return { data, names: ['请求次数', '成功', '失败'], max: Math.max(1, ...totals) }
+}
+
 type FlatRow = { label: string; series: string; value: number }
 
 // 把 [{label, series, value}] 透视成 recharts 需要的 [{label, [series]: value}] 宽表
@@ -176,11 +218,11 @@ export function UsageChart({ metric, scope, series, filters, chartType, title }:
         break
       }
       case 'calls': {
-        // 同上：provider_call_distribution 不存在，统一用 model_call_distribution。
-        sourceRows = series.model_call_distribution ?? []
-        keepSeries = false
-        singleName = '请求次数'
-        break
+        // 图内三条序列：请求次数（总数）/ 成功 / 失败。总数取 model_call_distribution
+        // （provider_call_distribution 不存在，见 token 分支说明），失败取 model_failure_distribution。
+        const derived = buildCallsBreakdown(series.model_call_distribution ?? [], series.model_failure_distribution ?? [], filters)
+        tooltip = '成功 = 请求次数 − 失败，失败口径沿用 error_count。'
+        return { data: derived.data, names: derived.names, max: derived.max, decimals, unit, tooltip, fixedColor: (name: string) => CALLS_BREAKDOWN_COLOR[name] ?? colorOf(name) }
       }
       case 'modelToken': {
         sourceRows = series.model_token_distribution ?? []
@@ -212,7 +254,8 @@ export function UsageChart({ metric, scope, series, filters, chartType, title }:
   const colorFn = fixedColor ?? ((name: string) => colorOf(name))
   const chartData = useMemo(() => pivotChartData(data as FlatRow[], names), [data, names])
   const showLegend = names.length > 1
-  const stacked = chartType === 'bar' && names.length > 1
+  // 请求次数拆分图不做堆叠：总数序列已包含成功与失败，堆叠会重复计数。
+  const stacked = chartType === 'bar' && names.length > 1 && metric !== 'calls'
 
   return (
     <div className="w-full">

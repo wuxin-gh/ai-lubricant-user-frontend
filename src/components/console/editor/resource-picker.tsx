@@ -14,6 +14,14 @@ export type ResourceItem = {
   __badge?: string
   /** 勾选了会无效的条目（如未启用的服务）灰显且不可选。 */
   disabled?: boolean
+  /** 集合子条目提交时仍归属这个资源引用。 */
+  resource_id?: string
+  /** 集合子条目名称（提交时归并成 {resource_id, entries:[...]} 绑定）。 */
+  resource_entry?: string
+  /** 新表引用（统一资源池）：提交时归并成 {reference_id, entries:[...]} 绑定。 */
+  reference_id?: string
+  /** 恒显示勾选且不可切换（例如系统 HOME 已自动加载、任务级不能关闭的资源）。 */
+  __locked?: boolean
 }
 export type ItemState = "ready" | "loading" | "failed"
 
@@ -23,7 +31,8 @@ function entryId(item: { id?: string | number; name?: string; url?: string; entr
 
 export function EditorResourcePicker({ label, items, selected, onChange, mapItem, itemState, groups }: {
   label: string
-  items: ResourceItem[]
+  /** 可选项。groups 模式下可省略（分组自带 items）。 */
+  items?: ResourceItem[]
   selected: ConfigEntry[]
   onChange: (next: ConfigEntry[]) => void
   mapItem?: (item: ResourceItem) => ConfigEntry
@@ -37,14 +46,18 @@ export function EditorResourcePicker({ label, items, selected, onChange, mapItem
   groups?: Array<{ title: string; items: ResourceItem[] }>
 }) {
   const selectedIds = new Set(selected.map((entry) => entryId(entry)))
-  const local = items.filter((item) => item.__source !== "marketplace")
-  const market = items.filter((item) => item.__source === "marketplace")
+  // groups 模式不使用 items（本地/市场二分只在默认分组下才有意义），但函数体
+  // 仍要读它——给个空数组兜底，让只传 groups 的调用方不必无意义地传 items。
+  const allItems = items || []
+  const local = allItems.filter((item) => item.__source !== "marketplace")
+  const market = allItems.filter((item) => item.__source === "marketplace")
 
   const renderItems = (group: ResourceItem[]) => group.map((item) => {
     const id = entryId(item)
-    const checked = selectedIds.has(id)
+    const locked = item.__locked === true
+    const checked = locked || selectedIds.has(id)
     const state = itemState?.(item) || "ready"
-    const disabled = (state !== "ready" || item.disabled === true) && !checked
+    const disabled = locked || ((state !== "ready" || item.disabled === true) && !checked)
     return (
       <label key={id} className={`flex items-start gap-2 rounded px-2 py-1.5 text-sm ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-muted"}`}>
         <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => {
@@ -58,6 +71,7 @@ export function EditorResourcePicker({ label, items, selected, onChange, mapItem
             <span className="block truncate">{item.display_name || item.name || item.entry || id}</span>
             {item.__source === "marketplace" && <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">市场</Badge>}
             {item.__badge && <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">{item.__badge}</Badge>}
+            {locked && <span className="shrink-0 text-[10px] text-muted-foreground">随环境自动生效</span>}
             {item.disabled === true && <span className="text-[10px] text-muted-foreground">未启用</span>}
             {state === "loading" && <span className="text-[10px] text-muted-foreground">加载 manifest...</span>}
             {state === "failed" && <span className="text-[10px] text-destructive">manifest 加载失败</span>}

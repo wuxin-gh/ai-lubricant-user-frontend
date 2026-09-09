@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import { ArrowLeft, Copy, ExternalLink, Plus, RefreshCw, Trash2 } from "lucide-react"
 
 import type { McpPrincipal } from "@/api/mcpClient"
@@ -239,11 +240,10 @@ export function McpUserManagerDialog({
 
   const copyToken = async () => {
     if (!oneTimeToken) return
-    try {
-      await navigator.clipboard.writeText(oneTimeToken)
+    if (await copyToClipboard(oneTimeToken)) {
       toast.success("token 已复制")
-    } catch {
-      toast.error("复制失败")
+    } else {
+      toast.error("复制失败，请手动选择")
     }
   }
 
@@ -448,7 +448,7 @@ function DetailMode({
 
   useEffect(() => {
     if (isDraft || !current || principalId == null) { setParamsCount(null); return }
-    void api.permission.loadParams(principalId).then((p) => setParamsCount(p.length)).catch(() => setParamsCount(null))
+    void api.permission.loadGrants(principalId).then((p) => setParamsCount(p.length)).catch(() => setParamsCount(null))
   }, [api, current, isDraft, principalId])
 
   return (
@@ -494,16 +494,16 @@ function DetailMode({
         )}
       </div>
 
-      {/* 内联权限资源编辑：仅已落库用户可改授权。保存由弹框底部统一按钮触发。 */}
+      {/* 内联授权编辑：仅已落库用户可改授权。保存由弹框底部统一按钮触发。 */}
       {!isDraft && current && principalId != null ? (
         <McpUserPermissionEditor
           ref={permissionEditorRef}
           principalId={principalId}
           api={api.permission}
-          title={`操作参数（${paramsCount ?? "-"}）`}
+          title={`授权（${paramsCount ?? "-"}）`}
         />
       ) : (
-        <p className="text-xs text-muted-foreground">创建后即可配置操作参数（绑定 CDP 客户端 / 邮箱账户）。</p>
+        <p className="text-xs text-muted-foreground">创建后即可配置授权（勾选服务 / 绑定内置资源实例）。</p>
       )}
     </div>
   )

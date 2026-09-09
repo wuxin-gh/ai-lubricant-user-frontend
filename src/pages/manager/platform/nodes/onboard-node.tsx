@@ -86,12 +86,16 @@ export function OnboardNodeModal({
   // 下载代理：有凭证的节点（execution / 可管理 management）下发升级/安装二进制用它。
   const [proxies, setProxies] = useState<ProxyEntry[]>([])
   const [proxyId, setProxyId] = useState<string>(DIRECT_ONBOARD)
+  // 代理池加载失败必须可见：静默降级成空列表会让管理员「以为选了代理」，
+  // 实际下拉里只剩直连，节点安装脚本烘不出代理，GitHub 直连挂死下载。
+  const [proxyLoadFailed, setProxyLoadFailed] = useState(false)
 
   useEffect(() => {
     if (open && !result) {
       setNodeName("")
       setManage("manageable")
       setProxyId(DIRECT_ONBOARD)
+      setProxyLoadFailed(false)
     }
   }, [open, result])
 
@@ -99,7 +103,10 @@ export function OnboardNodeModal({
     if (!open || result) return
     void getProxies()
       .then((list) => setProxies((list || []).filter((p) => p.mode !== "node")))
-      .catch(() => setProxies([]))
+      .catch(() => {
+        setProxies([])
+        setProxyLoadFailed(true)
+      })
   }, [open, result])
 
   // 纯分组容器（不可管理）无凭证、不安装——提交后不进入结果态，直接由父层关闭刷新。
@@ -156,14 +163,20 @@ export function OnboardNodeModal({
   }, [liveNode, onApprove, open, result?.node_id])
 
   const hasSecret = Boolean(result?.secret)
+  // 管理节点自动拉起的执行节点：保留结果弹窗轮询上线，但绝不展示 secret/安装命令。
+  // 这个状态的唯一动作就是等管理节点 docker run → 子节点拨号；上线后自动开审批。
+  const managerLaunching = kind === "execution" && Boolean(result?.launched)
   // 已连回 = 节点客户端真正建好了 NodeConnect 流。审批状态单独看，不并入「在线」。
   const online = Boolean(liveNode?.connected)
-  const awaitingFirstRegister = Boolean(result) && hasSecret && !online
+  const awaitingFirstRegister = Boolean(result) && hasSecret && !online && !managerLaunching
+  // 弹窗关闭拦截只服务于手动安装（怕丢一次性 secret）；自动拉起态随时可关。
 
   const title = result
     ? online
-      ? "节点已连回"
-      : "节点已入驻 — 安装与启动"
+      ? "执行节点已启动"
+      : managerLaunching
+        ? "正在启动执行节点"
+        : "节点已入驻 — 安装与启动"
     : isManagement
       ? "新建管理节点"
       : "添加执行节点"
@@ -173,13 +186,40 @@ export function OnboardNodeModal({
       open={open}
       onOpenChange={(o) => (o ? undefined : awaitingFirstRegister ? undefined : onClose())}
     >
+      {/* 布局契约：头部 + 内容滚动区（flex-1 min-h-0）+ 页脚（shrink-0）。滚动区少了
+          flex-1 min-h-0 时，flex 子项 min-height:auto 不收缩，内容一长就把页脚顶出
+          max-h + overflow-hidden 被裁掉——页脚按钮会"被挡住"。 */}
       <DialogContent showCloseButton={false} className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-[720px]">
         <DialogHeader className="border-b p-6 pb-4">
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
 
         {result ? (
-          <div className="flex flex-col gap-4 overflow-y-auto p-6">
+          managerLaunching ? (
+            /* 管理节点自动拉起执行节点：纯等待页，不展示 secret / 一键命令 /
+               安装引导。用户什么都不用做，等节点在管理节点宿主机上以容器起来、
+               拨号连回，弹窗轮询到 pending 自动开审批。 */
+            <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-6">
+              <Alert variant="default">
+                <AlertDescription>
+                  {online
+                    ? liveNode?.status === "pending"
+                      ? "执行节点已由管理节点启动并连回，正在打开审批窗口。"
+                      : "执行节点已由管理节点启动并连回。"
+                    : "管理节点正在本机自动拉起该执行节点（下载镜像/启动容器→连回服务端），无需任何手动操作。此处会自动更新，请稍候。"}
+                </AlertDescription>
+              </Alert>
+              {online ? (
+                <NodeInfoPanel node={liveNode || result.node} />
+              ) : (
+                <div className="flex items-center gap-3 rounded-lg border p-4 text-sm text-muted-foreground">
+                  <Spinner className="size-4" />
+                  等待执行节点连回服务端…
+                </div>
+              )}
+            </div>
+          ) : (
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-6">
             <Alert variant={online ? "default" : "destructive"}>
               <AlertDescription>
                 {online
@@ -216,8 +256,9 @@ export function OnboardNodeModal({
               />
             )}
           </div>
+          )
         ) : (
-          <div className="flex flex-col gap-4 overflow-y-auto p-6">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-6">
             {isManagement ? (
               <Alert>
                 <AlertDescription>
@@ -285,9 +326,16 @@ export function OnboardNodeModal({
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  节点从 GitHub 下载升级/安装二进制时使用的代理，与节点绑定，可随后在节点详情修改。
-                </p>
+                {proxyLoadFailed ? (
+                  <p className="text-xs text-destructive">
+                    代理池加载失败，当前只有直连可选项。请刷新重试；GitHub 直连不通的网络里，
+                    直连安装会在下载节点程序时长时间挂起。
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    节点从 GitHub 下载升级/安装二进制时使用的代理，与节点绑定，可随后在节点详情修改。
+                  </p>
+                )}
               </div>
             ) : null}
           </div>
@@ -295,7 +343,28 @@ export function OnboardNodeModal({
 
         <div className="mt-auto flex shrink-0 items-center justify-end gap-2 border-t p-6 pt-4">
           {result ? (
-            awaitingFirstRegister ? (
+            managerLaunching ? (
+              // 自动拉起等待态：等连回/等审批。连回 pending 时自动开审批窗口，
+              // 这里给个「后台等待」退出——节点已托付给管理节点，不存在丢凭证问题。
+              online ? (
+                liveNode?.status === "pending" ? (
+                  <span className="mr-auto flex items-center gap-2 text-xs text-muted-foreground">
+                    <Spinner className="size-3.5" />
+                    正在打开审批窗口…
+                  </span>
+                ) : (
+                  <Button onClick={onClose}>完成</Button>
+                )
+              ) : (
+                <>
+                  <span className="mr-auto flex items-center gap-2 text-xs text-muted-foreground">
+                    <Spinner className="size-3.5" />
+                    管理节点正在拉起执行节点…
+                  </span>
+                  <Button variant="outline" onClick={onClose}>后台等待</Button>
+                </>
+              )
+            ) : awaitingFirstRegister ? (
               <>
                 <span className="mr-auto flex items-center gap-2 text-xs text-muted-foreground">
                   <Spinner className="size-3.5" />

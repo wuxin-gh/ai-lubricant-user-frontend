@@ -9,6 +9,7 @@ import { ExternalLink, Star } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { fmtSyncAt } from "./leaderboard-labels"
 import type { LeaderboardItem } from "@/api/marketplaceAdmin"
 import { BOARD_LABELS, MODULE_LABELS, normalizeModules } from "./leaderboard-labels"
 
@@ -110,11 +111,11 @@ export function LeaderboardItemInfo({
           {item.launch_spec_error ? (
             <Row label="补全错误"><span className="text-destructive">{item.launch_spec_error}</span></Row>
           ) : null}
-          <Row label="最近同步">{item.last_synced_at || "-"}</Row>
-          <Row label="上游更新">{item.upstream_updated_at || "-"}</Row>
+          <Row label="最近同步">{fmtSyncAt(item.last_synced_at) || "-"}</Row>
+          <Row label="上游更新">{fmtSyncAt(item.upstream_updated_at) || "-"}</Row>
           {published ? (
             <Row label="发布信息">
-              {item.published_by ? `由 ${item.published_by}` : "已发布"}{item.published_at ? ` · ${item.published_at}` : ""}
+              {item.published_by ? `由 ${item.published_by}` : "已发布"}{item.published_at ? ` · ${fmtSyncAt(item.published_at)}` : ""}
             </Row>
           ) : null}
         </div>

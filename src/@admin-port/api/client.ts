@@ -31,7 +31,9 @@ export function clearToken(): void {
  */
 const request: AxiosInstance = axios.create({
   baseURL: "", // 开发环境通过 Vite proxy 转发
-  timeout: 15000,
+  // 默认 120s：覆盖普通管理请求，也兜住漏显式 timeout 的长操作调用（编辑器安装/宿主工具
+  // 安装可达数分钟，每个调用点已显式传 620000，但默认 15000ms 太短，一旦漏覆盖即误杀）。
+  timeout: 120000,
   // withCredentials：带上 C 端 session cookie（ai_lubricant_session），
   // 后端 _require_admin 主路径认「session + role==admin」；localStorage 里
   // 若还有 admin token，请求拦截也会带 Bearer 作应急兜底。

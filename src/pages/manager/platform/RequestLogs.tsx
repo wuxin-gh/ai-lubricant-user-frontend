@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { copyToClipboard } from '@/utils/clipboard'
 import { AdminPage } from '@/components/manager/platform-page'
 import { ManagerRefreshButton } from '@/components/manager/manager-header-actions'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -1350,10 +1351,10 @@ function CopyButton({ text, label = '复制' }: { text: string; label?: string }
       variant="outline"
       onClick={(e) => {
         e.stopPropagation()
-        void navigator.clipboard
-          .writeText(text)
-          .then(() => toast.success('已复制'))
-          .catch(() => toast.error('复制失败'))
+        void copyToClipboard(text).then((ok) => {
+          if (ok) toast.success('已复制')
+          else toast.error('复制失败，请手动选择')
+        })
       }}
     >
       <Copy className="size-3.5" />

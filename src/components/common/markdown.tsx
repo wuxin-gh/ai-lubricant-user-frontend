@@ -10,6 +10,7 @@ import mermaid from "mermaid"
 import { Link, useLocation } from "react-router-dom"
 import { IconCopy } from "@tabler/icons-react"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import "@/utils/markdown.css"
 import { cn } from "@/lib/utils"
 import { isSafeImageSource, isSvgImageSource } from "@/lib/media-url"
@@ -98,12 +99,11 @@ const CodeBlock = ({ code, language, isDark }: CodeBlockProps) => {
   const { t } = useTranslation()
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(code)
+    if (await copyToClipboard(code)) {
       toast.success(t("common.markdown.copySuccess"))
-    } catch (error) {
+    } else {
       toast.error(t("common.markdown.copyFailed"))
-      console.error("Copy code failed:", error)
+      console.error("Copy code failed: clipboard unavailable")
     }
   }
 

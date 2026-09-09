@@ -5,6 +5,7 @@
 import { useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { toast } from 'sonner'
+import { copyToClipboard } from '@/utils/clipboard'
 import { AdminPage, SectionCard, SimpleTable } from '@/components/manager/platform-page'
 import type { SimpleTableColumn } from '@/components/manager/platform-page'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -70,13 +71,12 @@ function InlineCode({ children }: { children: React.ReactNode }) {
 function CodeBlock({ children }: { children: string }) {
   const [copied, setCopied] = useState(false)
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(children)
+    if (await copyToClipboard(children)) {
       setCopied(true)
       toast.success('已复制')
       setTimeout(() => setCopied(false), 1500)
-    } catch {
-      toast.error('复制失败')
+    } else {
+      toast.error('复制失败，请手动选择')
     }
   }
   return (

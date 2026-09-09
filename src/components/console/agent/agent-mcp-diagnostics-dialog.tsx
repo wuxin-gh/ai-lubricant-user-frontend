@@ -100,7 +100,7 @@ export function AgentMcpDiagnosticsDialog({
                   )}
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">未绑定 MCP 用户（开启鉴权的 MCP 调用会被拒绝）。</p>
+                <p className="text-xs text-muted-foreground">未绑定 MCP 用户（MCP 调用会被拒绝）。</p>
               )}
             </section>
 

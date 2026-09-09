@@ -1,8 +1,18 @@
 /**
  * 资源统一编辑弹窗：市场 tab（mcp/插件/skill/项目提示词）与外部榜单草稿**共用同一套
- * 字段**——资源标识、名称、显示名、摘要（大输入框）、发布者、版本、子分类、标签、
- * 分类（多选）、按分类展开的安装配置、状态。footer 统一「取消/保存」，发布=状态选
- * 「已发布」保存。
+ * 字段**，驱动模型=统一资源池：**selectedType 单值**（对齐后端 resources.resource_type，
+ * "" = 仅浏览）决定渲染哪个安装配置分区与保存时组装哪段 install_spec。
+ *
+ * 派生坐标不是表单字段：skill/skills 恒 github_clone（榜单源是 GitHub 仓库）；plugin
+ * 的 download_url 由 repo_full_name + ref 现算（GitHub archive zip，只读展示、保存时
+ * 落库）。下载方式不由管理员选——服务端镜像是独立管理动作（列表页镜像按钮）。
+ *
+ * 适用客户端是统一概念，各类型各一种形态：skill/技能集=条目 editors 勾选（entries
+ * 表内）；plugin=provider 单选按钮组；prompt=providers 多勾选；mcp=无客户端维度
+ * （分区里一行说明文案）。
+ *
+ * 状态语义两变体不同：市场资源=表单里的 manifest.status（保存即改）；榜单条目
+ * 编辑不碰状态——发布是列表页「发布」按钮触发的推送队列动作（先编辑后推送）。
  *
  * 上游数据口径（external_data 是唯一上游真相）：
  * - 同步进来的条目已在 external_data 存了上游原文；资源字段是它首次入池时的派生值。
@@ -10,14 +20,13 @@
  *   **逐项、主动触发**（分类用 external_data 里的 board/category 重新推导），仍需保存
  *   才落库。安装配置（launch_spec/install_spec）不提供——上游没有对应值。
  *
- * 概念口径：分类=安装形态（多选）；子分类=用途场景（多选，源=上游 use_cases）；
- * 标签=搜索自由词（源=上游 topics）。
+ * 概念口径：分类=安装形态（**单选**，对齐统一资源池 resource_type）；子分类=用途场景
+ * （多选，源=上游 use_cases）；标签=搜索自由词（源=上游 topics）。
  */
 import { useEffect, useRef, useState } from "react"
-import { ExternalLink, HelpCircle, RefreshCw, Save, Sparkles } from "lucide-react"
+import { ExternalLink, HelpCircle, RefreshCw, Save } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -27,8 +36,8 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { MarketplaceManifest, LeaderboardItem } from "@/api/marketplaceAdmin"
 import {
-  ALL_MODULES,
   BOARD_LABELS,
+  EDITOR_LABELS,
   LAUNCH_TRANSPORTS,
   MODULE_LABELS,
   deriveModulesFromExternal,
@@ -41,6 +50,16 @@ import { LeaderboardTagInput, toStringArray } from "./LeaderboardTagInput"
 import { toast } from "sonner"
 
 export type EditMode = "mcp-remote" | "mcp-stdio" | "plugin" | "skill" | "prompt"
+
+/** 分类单选选项（对齐后端 resource_type；unknown=仅浏览）。 */
+const TYPE_OPTIONS = [
+  { value: "skills", label: "技能集" },
+  { value: "skill", label: "Skill" },
+  { value: "plugin", label: "插件" },
+  { value: "mcp", label: "MCP" },
+  { value: "prompt", label: "提示词" },
+  { value: "", label: "仅浏览" },
+] as const
 
 /** 项名后面的问号：说明文字挪进 tooltip，表单里不堆一行行小字。 */
 function Hint({ text }: { text: string }) {
@@ -94,13 +113,13 @@ function SyncButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-/** 榜单草稿保存时回传的收口 patch（由 LeaderboardItemsView 转成 updateLeaderboardItem）。 */
+/** 榜单草稿保存时回传的收口 patch（由 LeaderboardItemsView 转成 updateLeaderboardItem）。
+ *  不含 status——发布是独立的推送动作（列表页「发布」按钮入队），编辑只落表。 */
 export type LeaderboardCurationPatch = {
   target_modules: string[]
   installable: boolean
   install_spec?: Record<string, unknown>
   launch_spec?: Record<string, unknown>
-  status?: "draft" | "published" | "hidden"
   sort_order?: number | null
   name?: string
   display_name?: string
@@ -119,7 +138,7 @@ export function MarketplaceEditDialog({
   onSave,
   leaderboardItem,
   onLeaderboardSave,
-  onFillLaunch,
+  onReprobe,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
@@ -130,7 +149,8 @@ export function MarketplaceEditDialog({
   /** 榜单变体：传入榜单条目即启用（与 item 二选一）。 */
   leaderboardItem?: LeaderboardItem | null
   onLeaderboardSave?: (patch: LeaderboardCurationPatch) => Promise<void>
-  onFillLaunch?: (item: LeaderboardItem) => void
+  /** 榜单变体：按所选类型重跑探针并重派生安装配置（编辑弹框「重新识别」）。 */
+  onReprobe?: (type: string) => Promise<LeaderboardItem | null>
 }) {
   const isLeaderboard = !!leaderboardItem
 
@@ -147,8 +167,8 @@ export function MarketplaceEditDialog({
   const [sortOrder, setSortOrder] = useState("")
   const [categories, setCategories] = useState<string[]>([])
   const [tags, setTags] = useState<string[]>([])
-  // 分类（多选）——榜单变体；市场变体由 tab 决定（单形态徽标）
-  const [modules, setModules] = useState<string[]>([])
+  // 分类（单选，对齐后端 resources.resource_type）："" = 仅浏览。
+  const [selectedType, setSelectedType] = useState("")
   // 状态（两个变体同一字段；榜单发布=选已发布保存）
   const [status, setStatus] = useState("published")
   // MCP 启动方式（launch_spec）
@@ -157,17 +177,51 @@ export function MarketplaceEditDialog({
   const [mcpArgs, setMcpArgs] = useState("")
   const [mcpUrl, setMcpUrl] = useState("")
   const [mcpTransport, setMcpTransport] = useState("sse")
-  // skill 安装参数（install_spec.skill）：entries 列表形态，支持技能包与多编辑器
-  const [skillInstallMethod, setSkillInstallMethod] = useState("github_clone")
+  // skill 安装参数（install_spec.skill）：entries 列表形态，支持技能包与多编辑器。
+  // install_method 是派生事实不由管理员选——skill/skills 恒 github_clone（榜单源是
+  // GitHub 仓库，clone 坐标=repo+ref 派生），服务端镜像是独立管理动作（列表页镜像
+  // 按钮），保存时固定写 github_clone。
   const [skillRef, setSkillRef] = useState("main")
   const [skillEntries, setSkillEntries] = useState<SkillEntry[]>([])
-  // plugin 安装参数（install_spec.plugin）
-  const [pluginDownloadUrl, setPluginDownloadUrl] = useState("")
+  // plugin 安装参数（install_spec.plugin）。download_url 不是表单字段：由
+  // repo_full_name + ref 派生（GitHub archive zip），保存时现算、只读展示。
   const [pluginProvider, setPluginProvider] = useState("claude")
   // prompt 安装参数（install_spec.prompt）
   const [promptContent, setPromptContent] = useState("")
-  const [promptProviders, setPromptProviders] = useState<string[]>(["claude", "codex", "opencode", "cursor"])
+  const [promptProviders, setPromptProviders] = useState<string[]>(["claude", "codex", "opencode", "cursor", "gemini"])
   const [saving, setSaving] = useState(false)
+  const [reprobing, setReprobing] = useState(false)
+
+  // 按所选类型重跑探针：返回的新条目覆盖表单的 install_spec/launch_spec/分类，
+  // 但保留名称/描述/排序（管理员编辑过的资源字段）。
+  const handleReprobe = async () => {
+    if (!onReprobe) return
+    setReprobing(true)
+    try {
+      const updated = await onReprobe(selectedType)
+      if (updated) {
+        // 回填探针重新派生的字段
+        const install = (updated.install_spec || {}) as Record<string, any>
+        const skill = normalizeSkillInstallSpec(install)
+        if (skill.entries.length > 0) setSkillEntries(skill.entries)
+        if (skill.ref) setSkillRef(skill.ref)
+        const plugin = install.plugin || {}
+        if (plugin.provider) setPluginProvider(String(plugin.provider))
+        const prompt = install.prompt || {}
+        if (prompt.content !== undefined) setPromptContent(String(prompt.content))
+        if (Array.isArray(prompt.providers) && prompt.providers.length) setPromptProviders(prompt.providers as string[])
+        const spec = (updated.launch_spec || {}) as Record<string, any>
+        if (spec.kind) { setMcpKind(String(spec.kind)); setMcpCommand(String(spec.command || "")); setMcpUrl(String(spec.url || "")); setMcpTransport(String(spec.transport || "sse")) }
+        const newType = normalizeModules(updated.target_modules, updated.target_module)[0] || ""
+        if (newType) setSelectedType(newType)
+        toast.success("已按所选类型重新识别")
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "重新识别失败")
+    } finally {
+      setReprobing(false)
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -185,11 +239,11 @@ export function MarketplaceEditDialog({
       setCategories(toStringArray(it.categories))
       setTags(toStringArray(it.tags))
       const initialModules = normalizeModules(it.target_modules, it.target_module)
-      // 存量/旧后端可能没有 target_modules，按 external_data 的榜单类型自动推导默认勾选；
+      // 存量/旧后端可能没有 target_modules，按 external_data 的榜单类型自动推导默认值；
       // 注意：只填表单默认值，仍要保存才落库。
-      setModules(initialModules.length > 0
+      setSelectedType((initialModules.length > 0
         ? initialModules
-        : deriveModulesFromExternal(it.external_data, it.board, it.upstream_category))
+        : deriveModulesFromExternal(it.external_data, it.board, it.upstream_category))[0] || "")
       setStatus(it.status || "draft")
       setMcpKind(String(spec.kind || "none"))
       setMcpCommand(String(spec.command || ""))
@@ -197,15 +251,13 @@ export function MarketplaceEditDialog({
       setMcpUrl(String(spec.url || ""))
       setMcpTransport(String(spec.transport || "sse"))
       const skill = normalizeSkillInstallSpec(install)
-      setSkillInstallMethod(skill.install_method || "github_clone")
       setSkillRef(skill.ref || "main")
       setSkillEntries(skill.entries.length > 0 ? skill.entries : [{ name: "", path: "", entry: "SKILL.md", editors: ["claude"] }])
       const plugin = install.plugin || {}
-      setPluginDownloadUrl(String(plugin.download_url || `https://github.com/${it.repo_full_name}/archive/refs/heads/main.zip`))
       setPluginProvider(String(plugin.provider || "claude"))
       const prompt = install.prompt || {}
       setPromptContent(String(prompt.content || ""))
-      setPromptProviders(Array.isArray(prompt.providers) && prompt.providers.length ? prompt.providers : ["claude", "codex", "opencode", "cursor"])
+      setPromptProviders(Array.isArray(prompt.providers) && prompt.providers.length ? prompt.providers : ["claude", "codex", "opencode", "cursor", "gemini"])
     } else if (item) {
       setForm(item)
       setName(item.name || "")
@@ -244,7 +296,7 @@ export function MarketplaceEditDialog({
         base.resource = {
           type: "project_prompt",
           content: "",
-          providers: ["claude", "codex", "opencode", "cursor"],
+          providers: ["claude", "codex", "opencode", "cursor", "gemini"],
           target_files: ["CLAUDE.md", "AGENTS.md"],
         }
       } else {
@@ -283,27 +335,23 @@ export function MarketplaceEditDialog({
       case "version": setVersion(String(external.version || "latest")); break
       case "categories": setCategories(toStringArray(external.categories ?? external.use_cases)); break
       case "tags": setTags(toStringArray(external.tags ?? external.topics)); break
-      case "modules": setModules(deriveModulesFromExternal(
+      case "modules": setSelectedType(deriveModulesFromExternal(
         external,
         leaderboardItem?.board || "",
         leaderboardItem?.upstream_category || "",
-      )); break
+      )[0] || ""); break
       default: break
     }
   }
 
   const syncAction = (field: string) => (external ? <SyncButton onClick={() => syncField(field)} /> : undefined)
 
-  const toggleModule = (module: string) => {
-    setModules((prev) => (prev.includes(module) ? prev.filter((m) => m !== module) : [...prev, module]))
-  }
-
   const togglePromptProvider = (provider: string) => {
     setPromptProviders((prev) => (prev.includes(provider) ? prev.filter((p) => p !== provider) : [...prev, provider]))
   }
 
   const buildLaunchSpec = (): Record<string, unknown> | undefined => {
-    if (!modules.includes("mcp")) return undefined
+    if (selectedType !== "mcp") return undefined
     if (mcpKind === "stdio") {
       return { kind: "stdio", command: mcpCommand.trim(), args: mcpArgs.split("\n").map((a) => a.trim()).filter(Boolean) }
     }
@@ -317,22 +365,20 @@ export function MarketplaceEditDialog({
     if (!leaderboardItem || !onLeaderboardSave) return false
     const spec = buildLaunchSpec()
     const install: Record<string, unknown> = {}
-    if (modules.includes("skill")) {
+    if (selectedType === "skill" || selectedType === "skills") {
       const cleanEntries = skillEntries
         .filter((e) => e.entry.trim())
         .map((e) => ({ name: e.name.trim(), path: e.path.trim(), entry: e.entry.trim(), editors: e.editors }))
-      install.skill = { install_method: skillInstallMethod, ref: skillRef.trim() || "main", entries: cleanEntries }
+      install.skill = { install_method: "github_clone", ref: skillRef.trim() || "main", entries: cleanEntries }
     }
-    if (modules.includes("plugin")) {
-      install.plugin = { download_url: pluginDownloadUrl.trim(), provider: pluginProvider.trim() }
+    if (selectedType === "plugin") {
+      install.plugin = {
+        download_url: `https://github.com/${leaderboardItem.repo_full_name}/archive/refs/heads/${skillRef.trim() || "main"}.zip`,
+        provider: pluginProvider.trim(),
+      }
     }
-    if (modules.includes("prompt")) {
+    if (selectedType === "prompt") {
       install.prompt = { content: promptContent, providers: promptProviders }
-    }
-    const statusValue = status as "draft" | "published" | "hidden"
-    if (statusValue === "published" && modules.length === 0) {
-      toast.error("可安装条目发布前需要勾选分类；仅浏览条目请保持不勾任何分类")
-      return false
     }
     let sortValue: number | null = null
     if (sortOrder.trim()) {
@@ -346,9 +392,8 @@ export function MarketplaceEditDialog({
     setSaving(true)
     try {
       await onLeaderboardSave({
-        target_modules: modules,
-        installable: modules.length > 0,
-        status: statusValue,
+        target_modules: selectedType ? [selectedType] : [],
+        installable: !!selectedType,
         sort_order: sortValue,
         name: name.trim(),
         display_name: displayName.trim(),
@@ -360,7 +405,9 @@ export function MarketplaceEditDialog({
         ...(spec ? { launch_spec: spec } : {}),
         ...(Object.keys(install).length > 0 ? { install_spec: install } : {}),
       })
-      toast.success(statusValue === "published" ? "已保存并发布，用户侧立即可见" : "已保存")
+      // 发布不在这里：点「发布」走推送队列，编辑保存只落表。可安装条目勾分类的
+      // 校验由推送 worker 门禁把关，失败原因在发布队列面板可见。
+      toast.success("已保存（发布请用列表页的「发布」按钮）")
       onOpenChange(false)
       return true
     } catch (err) {
@@ -408,6 +455,13 @@ export function MarketplaceEditDialog({
   const title = isLeaderboard
     ? `编辑资源：${leaderboardItem!.repo_full_name}`
     : item ? "编辑资源" : "新建资源"
+  // 市场变体的安装配置分区门禁：把 tab 决定的 mode 折算成 resource_type 等价值，
+  // 与榜单变体的 selectedType 走同一套渲染条件。
+  const marketType = mode === "mcp-remote" || mode === "mcp-stdio" ? "mcp"
+    : mode === "plugin" ? "plugin"
+    : mode === "prompt" ? "prompt"
+    : "skill"
+  const activeType = isLeaderboard ? selectedType : marketType
   // GitHub 跳转：榜单条目=仓库地址；市场资源=source_url（有才显示）。
   const githubUrl = isLeaderboard
     ? leaderboardItem!.repo_url
@@ -432,15 +486,20 @@ export function MarketplaceEditDialog({
                 <ExternalLink className="h-4 w-4" />
               </a>
             ) : null}
-            {modules.map((m) => (
-              <Badge key={m} variant="outline" className="shrink-0 text-[10px]">{MODULE_LABELS[m]}</Badge>
-            ))}
-            {modules.length === 0 ? (
+            {activeType ? (
+              <Badge variant="outline" className="shrink-0 text-[10px]">{MODULE_LABELS[activeType]}</Badge>
+            ) : (
               <Badge variant="outline" className="shrink-0 text-[10px] text-muted-foreground">仅浏览</Badge>
-            ) : null}
-            <Badge variant={status === "published" ? "default" : status === "hidden" ? "destructive" : "secondary"} className="shrink-0 text-[10px]">
-              {status === "published" ? "已发布" : status === "hidden" ? "隐藏" : "草稿"}
-            </Badge>
+            )}
+            {isLeaderboard ? (
+              <Badge variant={leaderboardItem!.status === "published" ? "default" : leaderboardItem!.status === "hidden" ? "destructive" : "secondary"} className="shrink-0 text-[10px]">
+                {leaderboardItem!.status === "published" ? "已发布" : leaderboardItem!.status === "hidden" ? "隐藏" : "草稿"}
+              </Badge>
+            ) : (
+              <Badge variant={status === "published" ? "default" : status === "hidden" ? "destructive" : "secondary"} className="shrink-0 text-[10px]">
+                {status === "published" ? "已发布" : status === "hidden" ? "隐藏" : "草稿"}
+              </Badge>
+            )}
           </DialogTitle>
         </DialogHeader>
 
@@ -504,34 +563,54 @@ export function MarketplaceEditDialog({
           <Field label="标签" action={syncAction("tags")} hint="搜索自由词（llm / agent / rag）；榜单默认取 GitHub topics">
             <LeaderboardTagInput value={tags} onChange={setTags} placeholder="输入标签，按 Enter 添加" />
           </Field>
-          <Field label="状态" hint="已发布=用户侧可见；草稿=仅管理端；隐藏=下架保留">
-            <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="draft">草稿</SelectItem>
-                <SelectItem value="published">已发布</SelectItem>
-                <SelectItem value="hidden">隐藏</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
+          {/* 状态选择器只属于市场变体（manifest.status，发布队列按它镜像 GitHub）。
+              榜单变体的状态是推送动作的产物：编辑不碰，点「发布」走推送队列翻状态。 */}
+          {!isLeaderboard ? (
+            <Field label="状态" hint="已发布=用户侧可见；草稿=仅管理端；隐藏=下架保留">
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="draft">草稿</SelectItem>
+                  <SelectItem value="published">已发布</SelectItem>
+                  <SelectItem value="hidden">隐藏</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : (
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              当前状态：{leaderboardItem!.status === "published" ? "已发布" : leaderboardItem!.status === "hidden" ? "隐藏" : "草稿"}
+              ——发布/撤回请用列表页的「发布」「撤回」按钮（推送队列异步生效）。
+            </div>
+          )}
 
           <Separator />
 
-          {/* 分类（多选）：榜单可勾；市场由所在 tab 决定，展示为只读徽标 */}
+          {/* 分类（单选按钮组）：对齐统一资源池 resource_type；选中哪个只展开哪个的安装配置。 */}
           <div className="space-y-2">
             <Field
               label="分类"
               action={syncAction("modules")}
-              hint="决定出现在用户侧哪个模块、给不给安装入口；可多选（比如同时是 MCP 和 Skill）；全不勾=仅浏览"
+              hint="决定出现在用户侧哪个模块、给不给安装入口；单选（一个资源一种安装形态）；仅浏览=无安装入口"
             >
               {isLeaderboard ? (
-                <div className="flex flex-wrap gap-4">
-                  {ALL_MODULES.map((m) => (
-                    <label key={m} className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox checked={modules.includes(m)} onCheckedChange={() => toggleModule(m)} />
-                      {MODULE_LABELS[m]}
-                    </label>
-                  ))}
+                <div className="flex flex-wrap gap-2">
+                  {TYPE_OPTIONS.map((opt) => {
+                    const active = selectedType === opt.value
+                    return (
+                      <button
+                        key={opt.value || "browse-only"}
+                        type="button"
+                        onClick={() => setSelectedType(opt.value)}
+                        className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                          active
+                            ? "border-primary bg-primary text-primary-foreground"
+                            : "border-border bg-background hover:bg-muted"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    )
+                  })}
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
@@ -541,30 +620,40 @@ export function MarketplaceEditDialog({
               )}
             </Field>
             {isLeaderboard ? (
-              <p className="text-xs text-muted-foreground">
-                {modules.length > 0
-                  ? `可安装：将出现在 ${modules.map((m) => MODULE_LABELS[m]).join("、")} 模块。`
-                  : "仅浏览：无安装入口，用户侧渲染成跳 GitHub 的卡片（开发框架 / 研究程序 / awesome 目录选这个）。"}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-muted-foreground">
+                  {selectedType
+                    ? `可安装：将出现在 ${MODULE_LABELS[selectedType]} 模块。`
+                    : "仅浏览：无安装入口，用户侧渲染成跳 GitHub 的卡片（开发框架 / 研究程序 / awesome 目录选这个）。"}
+                </p>
+                {onReprobe ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={reprobing}
+                    onClick={() => void handleReprobe()}
+                    className="ml-auto"
+                  >
+                    {reprobing ? "识别中..." : "重新识别"}
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
           {/* ── MCP 安装配置（两变体同一套字段） ── */}
-          {(isLeaderboard ? modules.includes("mcp") : mode === "mcp-remote" || mode === "mcp-stdio") && (
+          {(isLeaderboard ? selectedType === "mcp" : marketType === "mcp") && (
             <>
               <Separator />
               <div className="space-y-4 rounded-lg border bg-muted/10 p-4">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1 text-sm font-medium">
                     MCP 启动方式
-                    <Hint text="MCP 需要可连接的启动命令或地址，上游榜单不提供，得手填或让 agent 识别" />
+                    <Hint text="MCP 需要可连接的启动命令或地址；同步时由探针从 .mcp.json/README 确定性派生，也可在此手填" />
                   </div>
-                  {isLeaderboard && onFillLaunch ? (
-                    <Button size="sm" variant="outline" onClick={() => onFillLaunch(leaderboardItem!)}>
-                      <Sparkles className="mr-1 h-3 w-3" />让 agent 识别
-                    </Button>
-                  ) : null}
                 </div>
+                <p className="text-xs text-muted-foreground">MCP 对所有客户端通用，无适用客户端维度。</p>
                 {isLeaderboard && leaderboardItem!.launch_spec_status ? (
                   <div className="text-xs text-muted-foreground">识别状态：{leaderboardItem!.launch_spec_status}</div>
                 ) : null}
@@ -628,23 +717,12 @@ export function MarketplaceEditDialog({
             </>
           )}
 
-          {/* ── Skill 安装配置 ── */}
-          {(isLeaderboard ? modules.includes("skill") : mode === "skill") && (
+          {/* ── Skill / 技能集 安装配置 ── */}
+          {(isLeaderboard ? selectedType === "skill" || selectedType === "skills" : marketType === "skill") && (
             <>
               <Separator />
               <div className="space-y-4">
-                <Field label="下载方式" hint="GitHub 直连=节点 git clone；服务端镜像=预下载后离线可用">
-                  <Select
-                    value={isLeaderboard ? skillInstallMethod : form.install_method || "github_clone"}
-                    onValueChange={(v) => (isLeaderboard ? setSkillInstallMethod(v) : setForm({ ...form, install_method: v }))}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="github_clone">GitHub 直连（节点 git clone）</SelectItem>
-                      <SelectItem value="server_mirror">服务端镜像（预下载 + 离线可用）</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                {/* 榜单 skill 从条目仓库直装，源地址即仓库（外部数据，不重复摆输入框） */}
+                {/* 下载方式不由管理员选：榜单源恒 GitHub 直连（探针派生），服务端镜像走列表页镜像按钮。 */}
                 {!isLeaderboard ? (
                   <Field label="源地址（HTTPS）">
                     <Input
@@ -659,7 +737,7 @@ export function MarketplaceEditDialog({
                     onChange={(e) => (isLeaderboard ? setSkillRef(e.target.value) : setForm({ ...form, resource: { ...form.resource, ref: e.target.value } }))} />
                 </Field>
                 {isLeaderboard ? (
-                  <Field label="可安装条目" hint="一个仓库可产出多个 skill（技能包）；按编辑器形态认：SKILL.md=claude、.cursor/rules/*.mdc=cursor、AGENTS.md=codex+opencode">
+                  <Field label={selectedType === "skills" ? "技能列表（技能集）" : "可安装条目"} hint="一个仓库可产出多个 skill（技能包）；「适用客户端」按编辑器形态认：SKILL.md=claude、.cursor/rules/*.mdc=cursor、AGENTS.md=codex+opencode">
                     <div className="space-y-2">
                       {skillEntries.map((entry, idx) => (
                         <div key={idx} className="grid grid-cols-1 gap-2 rounded-md border p-2 sm:grid-cols-12">
@@ -676,20 +754,23 @@ export function MarketplaceEditDialog({
                             onClick={() => setSkillEntries((prev) => prev.filter((_, i) => i !== idx))}>
                             删除
                           </Button>
-                          <div className="sm:col-span-12 flex flex-wrap gap-3">
-                            {["claude", "codex", "opencode", "cursor", "gemini"].map((editor) => (
-                              <label key={editor} className="flex items-center gap-1.5 text-xs">
-                                <input type="checkbox" checked={entry.editors.includes(editor)}
-                                  onChange={(e) => setSkillEntries((prev) => prev.map((p, i) => {
-                                    if (i !== idx) return p
-                                    const editors = e.target.checked
-                                      ? [...p.editors, editor]
-                                      : p.editors.filter((x) => x !== editor)
-                                    return { ...p, editors }
-                                  }))} />
-                                {editor}
-                              </label>
-                            ))}
+                          <div className="sm:col-span-12">
+                            <div className="mb-1 text-[11px] text-muted-foreground">适用客户端</div>
+                            <div className="flex flex-wrap gap-3">
+                              {["claude", "codex", "opencode", "cursor", "gemini"].map((editor) => (
+                                <label key={editor} className="flex items-center gap-1.5 text-xs">
+                                  <input type="checkbox" checked={entry.editors.includes(editor)}
+                                    onChange={(e) => setSkillEntries((prev) => prev.map((p, i) => {
+                                      if (i !== idx) return p
+                                      const editors = e.target.checked
+                                        ? [...p.editors, editor]
+                                        : p.editors.filter((x) => x !== editor)
+                                      return { ...p, editors }
+                                    }))} />
+                                  {EDITOR_LABELS[editor] || editor}
+                                </label>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       ))}
@@ -712,28 +793,49 @@ export function MarketplaceEditDialog({
           )}
 
           {/* ── 插件安装配置 ── */}
-          {(isLeaderboard ? modules.includes("plugin") : mode === "plugin") && (
+          {(isLeaderboard ? selectedType === "plugin" : marketType === "plugin") && (
             <>
               <Separator />
               <div className="space-y-4">
-                <Field label="下载地址（HTTPS）" hint={isLeaderboard ? "默认取仓库 main 分支的 zip 归档" : undefined}>
+                <Field label="下载地址" hint="由条目仓库与分支自动生成（GitHub archive zip），不可编辑">
                   <Input
-                    value={isLeaderboard ? pluginDownloadUrl : form.download_url || ""}
-                    onChange={(e) => (isLeaderboard ? setPluginDownloadUrl(e.target.value) : setForm({ ...form, download_url: e.target.value }))}
-                    placeholder="https://github.com/user/repo/archive/refs/heads/main.zip" />
+                    value={isLeaderboard
+                      ? `https://github.com/${leaderboardItem!.repo_full_name}/archive/refs/heads/${skillRef.trim() || "main"}.zip`
+                      : form.download_url || ""}
+                    readOnly
+                    className="font-mono text-xs text-muted-foreground" />
                 </Field>
-                <Field label="目标编辑器" hint="claude / codex 等">
-                  <Input
-                    value={isLeaderboard ? pluginProvider : form.resource?.provider || ""}
-                    onChange={(e) => (isLeaderboard ? setPluginProvider(e.target.value) : setForm({ ...form, resource: { ...form.resource, provider: e.target.value } }))}
-                    placeholder="claude" />
+                <Field label="适用客户端" hint="插件的宿主编辑器（install_spec.plugin.provider）">
+                  {isLeaderboard ? (
+                    <div className="flex flex-wrap gap-2">
+                      {["claude", "codex", "opencode", "cursor", "gemini"].map((provider) => (
+                        <button
+                          key={provider}
+                          type="button"
+                          onClick={() => setPluginProvider(provider)}
+                          className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                            pluginProvider === provider
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-border bg-background hover:bg-muted"
+                          }`}
+                        >
+                          {EDITOR_LABELS[provider] || provider}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <Input
+                      value={form.resource?.provider || ""}
+                      onChange={(e) => setForm({ ...form, resource: { ...form.resource, provider: e.target.value } })}
+                      placeholder="claude" />
+                  )}
                 </Field>
               </div>
             </>
           )}
 
           {/* ── 提示词安装配置 ── */}
-          {(isLeaderboard ? modules.includes("prompt") : mode === "prompt") && (
+          {(isLeaderboard ? selectedType === "prompt" : marketType === "prompt") && (
             <>
               <Separator />
               <div className="space-y-4">
@@ -742,9 +844,9 @@ export function MarketplaceEditDialog({
                     value={isLeaderboard ? promptContent : form.resource?.content || ""}
                     onChange={(e) => (isLeaderboard ? setPromptContent(e.target.value) : setForm({ ...form, resource: { ...form.resource, content: e.target.value } }))} />
                 </Field>
-                <Field label="适用编辑器">
+                <Field label="适用客户端" hint="哪些客户端能消费这段提示词（install_spec.prompt.providers）">
                   <div className="flex flex-wrap gap-4">
-                    {["claude", "codex", "opencode", "cursor"].map((provider) => {
+                    {["claude", "codex", "opencode", "cursor", "gemini"].map((provider) => {
                       const active = isLeaderboard ? promptProviders.includes(provider)
                         : (Array.isArray(form.resource?.providers) ? form.resource.providers : []).includes(provider)
                       return (
@@ -761,7 +863,7 @@ export function MarketplaceEditDialog({
                                     : (form.resource?.providers || []).filter((v: string) => v !== provider),
                                 },
                               }))} />
-                          {provider}
+                          {EDITOR_LABELS[provider] || provider}
                         </label>
                       )
                     })}

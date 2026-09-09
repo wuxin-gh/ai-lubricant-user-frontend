@@ -4,7 +4,6 @@ import path from "node:path";
 import test from "node:test";
 
 /**
- * 套餐 / 钱包 / 签到 / 免费额度 / 余额这套从 MonkeyCode 商业版移植过来的功能已删除。
  * 这份契约测试确保活跃前端（排除从上游 swagger 生成的 Api.ts 快照）不再引用任何
  * 相关方法名、事件名或组件，否则控制台启动时会出现未映射请求或加载不到组件。
  */

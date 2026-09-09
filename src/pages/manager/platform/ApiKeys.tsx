@@ -66,6 +66,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { copyToClipboard } from "@/utils/clipboard"
 import {
   addApiKey,
   copyApiKey,
@@ -265,10 +266,9 @@ function dateInputToEpoch(value: string): number | null {
 }
 
 async function copyText(text: string, msg = "已复制") {
-  try {
-    await navigator.clipboard.writeText(text)
+  if (await copyToClipboard(text)) {
     toast.success(msg)
-  } catch {
+  } else {
     toast.error("复制失败")
   }
 }

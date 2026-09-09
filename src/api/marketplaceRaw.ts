@@ -75,7 +75,15 @@ export type MarketManifest = {
   }>
 }
 
-export type MarketModule = "mcp" | "plugins" | "skills" | "prompts" | "channels" | "node-versions"
+export type MarketModule =
+  | "mcp"
+  | "plugins"
+  | "skills"
+  | "prompts"
+  | "channels"
+  | "node-versions"
+  | "mobile-versions"
+  | "device-control-versions"
 
 // ---------- 缓存 ----------
 
@@ -190,6 +198,34 @@ export async function fetchMarketIndexAll(module: MarketModule, flush = false): 
     cacheSet(key, items)
     return items
   })
+}
+
+// ---------- 社区运营配置（技术交流群 + 社区通知） ----------
+//
+// 无鉴权公开端点，供用户控制台「技术交流群 / 社区信息」弹窗拉取。配置极少变，
+// 弹窗打开时才调、不缓存——保证管理员刚保存的改动立即可见。
+
+export interface CommunityGroupPublic {
+  id: string
+  type: string
+  label: string
+  qr_image: string
+}
+
+export interface CommunityNoticeEntryPublic {
+  id: string
+  kind: "text" | "image"
+  text?: string
+  image?: string
+}
+
+export interface CommunityConfigPublic {
+  groups: CommunityGroupPublic[]
+  notice: { enabled: boolean; entries: CommunityNoticeEntryPublic[] }
+}
+
+export async function fetchCommunityConfig(): Promise<CommunityConfigPublic | null> {
+  return fetchJson<CommunityConfigPublic>("/api/v1/marketplace/community-config")
 }
 
 /**

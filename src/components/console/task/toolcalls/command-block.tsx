@@ -8,6 +8,7 @@
 import { useMemo, useState } from "react"
 import { IconChevronRight, IconCopy } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import { copyToClipboard } from "@/utils/clipboard"
 import { taskDetailT } from "../task-i18n"
 
 /** 超过这个行数就默认折叠，只显示尾部 —— 命令输出动辄几百行。 */
@@ -33,13 +34,12 @@ export function CommandBlock({
   const failed = typeof exitCode === "number" && exitCode !== 0
 
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(command)
+    const ok = await copyToClipboard(command)
+    if (ok) {
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
-    } catch {
-      // 剪贴板不可用（非 https / 无权限）时静默：命令本身在页面上可以手动选中复制。
     }
+    // 剪贴板不可用（非 https / 无权限）时静默：命令本身在页面上可以手动选中复制。
   }
 
   return (

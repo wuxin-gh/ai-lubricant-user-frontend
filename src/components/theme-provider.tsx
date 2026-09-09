@@ -21,7 +21,6 @@ function getSystemTheme(): AppliedTheme {
   }
 }
 
-// 新 key 读不到时从旧 key「monkeycode-theme」一次性迁移过来。
 // index.html 的 pre-React 脚本只迁移了 localStorage，React 端（如另一台
 // 浏览器 profile 或脚本被跳过时）也要兜底，否则老用户首屏主题丢失。
 function getStoredTheme(storageKey: string, defaultTheme: Theme): Theme {

@@ -19,14 +19,12 @@ import {
   type MyMcpService,
   type CreateMyMcpPayload,
   type McpPrincipal,
-  type McpPrincipalParam,
-  type McpAuthorizationResource,
   createMcpPrincipal,
   deleteMcpPrincipal,
   listMcpAuthorizationOptions,
-  listMcpPrincipalParams,
+  listMcpPrincipalGrants,
   listMcpPrincipals,
-  replaceMcpPrincipalParams,
+  replaceMcpPrincipalGrants,
   rotateMcpPrincipalToken,
   updateMcpPrincipal,
 } from "@/api/mcpClient"
@@ -62,28 +60,18 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
-import { McpUserPermissionEditor, type PermissionEditorApi } from "@/components/console/mcp/McpUserPermissionEditor"
+import { type PermissionEditorApi } from "@/components/console/mcp/McpUserPermissionEditor"
 import { McpUserManagerDialog, type McpUserManagerApi } from "@/components/console/mcp/McpUserManagerDialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ResourceCenterShell } from "@/components/console/resource-center/resource-center-shell"
 import { ResourceMarketPanel } from "@/pages/manager/platform/ResourceMarketPanel"
+import { ResourceMarketBoard } from "@/pages/manager/platform/ResourceMarketBoard"
 import { PromptResourcePanel } from "@/pages/manager/platform/PromptResourcePanel"
-import { importPluginUpload, importPluginUrl, importSkillUpload, importSkillUrl, deletePluginResource, deleteSkillResource, fetchManagedPluginListing, fetchManagedSkillListing, fetchPluginListing, fetchSkillListing, updatePluginResource, updateSkillResource } from "@/lib/agent-resources-api"
+import { importPluginUpload, importPluginUrl, importSkillUpload, importSkillUrl, deletePluginResource, deleteSkillResource, fetchManagedPluginListing, fetchManagedSkillListing, updatePluginResource, updateSkillResource } from "@/lib/agent-resources-api"
 import { manifestToPluginSpec, manifestToSkillSpec } from "@/api/marketplaceRaw"
-import {
-  LeaderboardMarketCard,
-  useLeaderboardMarket,
-} from "@/components/marketplace/LeaderboardMarketCards"
+import { McpGithubImportDialog, type McpGithubImportPayload } from "@/components/manager/McpGithubImportDialog"
 import { getAgentByMcpUser } from "@/api/agentClient"
 import { toast } from "sonner"
-import {
-  fetchMarketIndex,
-  fetchMarketManifest,
-  isMarketplaceEnabled,
-  useMarketplaceEnabled,
-  type LeaderboardDiscoverItem,
-  type MarketItem,
-} from "@/api/marketplaceRaw"
 
 type EditorMode = "form" | "json"
 
@@ -229,6 +217,7 @@ export default function McpPage() {
   const [services, setServices] = useState<MyMcpService[]>([])
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [githubOpen, setGithubOpen] = useState(false)
   const [editing, setEditing] = useState<MyMcpService | null>(null)
   const [form, setForm] = useState<EditorForm>(EMPTY_FORM)
   const [mode, setMode] = useState<EditorMode>("form")
@@ -236,27 +225,18 @@ export default function McpPage() {
   const [syncingId, setSyncingId] = useState<number | null>(null)
   const [deletingId, setDeletingId] = useState<number | null>(null)
   const [togglingId, setTogglingId] = useState<number | null>(null)
-  const [marketItems, setMarketItems] = useState<MarketItem[]>([])
-  const [marketLoading, setMarketLoading] = useState(false)
   const [principals, setPrincipals] = useState<McpPrincipal[]>([])
   // MCP 用户管理统一弹框（列表 + CRUD + 配置权限 + Agent 详情）。
   const [principalManageOpen, setPrincipalManageOpen] = useState(false)
-  const marketEnabled = useMarketplaceEnabled()
-  // 外部榜单里已发布的 MCP 条目：和 index.json 市场项混在同一网格，只有这些带 star/fork 热度。
-  // 技术栈 tag 过滤（榜单条目带识别出的 stack_tags；「全部」=不过滤）。
-  const [stackTag, setStackTag] = useState("all")
-  const { items: boardMcpItems, loading: boardMcpLoading } = useLeaderboardMarket("mcp", {
-    stackTag: stackTag === "all" ? undefined : stackTag,
-  })
 
-  /** 通用权限编辑器注入的用户侧 API 适配器。 */
+  /** 通用授权编辑器注入的用户侧 API 适配器。 */
   const principalPermissionApi: PermissionEditorApi = {
     loadResources: async () => {
       const opts = await listMcpAuthorizationOptions()
-      return opts.resources
+      return { resources: opts.resources || [], param_kinds: opts.param_kinds || [] }
     },
-    loadParams: async (id: number) => (await listMcpPrincipalParams(id)).params,
-    saveParams: async (id: number, params) => (await replaceMcpPrincipalParams(id, params)).params,
+    loadGrants: async (id: number) => (await listMcpPrincipalGrants(id)).grants,
+    saveGrants: async (id: number, grants) => (await replaceMcpPrincipalGrants(id, grants)).grants,
   }
 
   /** MCP 用户管理弹框注入的用户侧 API 适配器。 */
@@ -306,83 +286,19 @@ export default function McpPage() {
     setDialogOpen(true)
   }
 
-  const loadMarketItems = useCallback(async () => {
-    if (!(await isMarketplaceEnabled())) return
-    setMarketLoading(true)
-    try {
-      setMarketItems(await fetchMarketIndex("mcp"))
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "加载市场失败")
-    } finally {
-      setMarketLoading(false)
+  const handleGithubCreate = async (p: McpGithubImportPayload) => {
+    if (p.transport !== "streamable-http" || !p.url) {
+      throw new Error("用户侧仅支持 SSE/HTTP MCP，请到管理端注册 stdio")
     }
-  }, [])
-
-  useEffect(() => {
-    void loadMarketItems()
-  }, [loadMarketItems])
-
-  const applyMarketItem = async (item: MarketItem) => {
-    const manifest = await fetchMarketManifest("mcp", item.id)
-    if (!manifest) {
-      toast.error("拉取 manifest 失败")
-      return
-    }
-    const r = manifest.resource || {}
-    const url = r.url || ""
-    if (r.type !== "remote_mcp" || !url) {
-      toast.error("个人 MCP 仅支持带远程 URL 的 SSE/HTTP 服务；stdio MCP 请在平台 MCP 页面下载")
-      return
-    }
-    try {
-      await createMyMcpService({
-        name: manifest.name || item.name || item.id,
-        display_name: manifest.display_name || manifest.name || item.name || item.id,
-        description: manifest.summary || manifest.description || "",
-        url,
-        token: r.token || "",
-        headers: {},
-        enabled: true,
-      })
-      toast.success("已下载。请到 MCP Tab 完成连接与权限管理。")
-      await reload()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "下载失败")
-    }
-  }
-
-  /**
-   * 下载榜单来的 MCP 条目。榜单条目没有 manifest，可用信息全在管理端补的
-   * ``launch_spec``（``{kind:"remote",url,transport}`` 或 ``{kind:"stdio",command,args}``）里。
-   * 本页只管用户自配的远程 SSE/HTTP MCP，stdio 形态在这里装不了，直说而不是静默失败。
-   */
-  const applyBoardMcpItem = async (item: LeaderboardDiscoverItem) => {
-    const spec = (item.launch_spec || {}) as { kind?: string; url?: string; transport?: string }
-    const url = typeof spec.url === "string" ? spec.url.trim() : ""
-    if (!url) {
-      toast.error(
-        spec.kind === "stdio"
-          ? "该 MCP 是 stdio 形态（本机命令启动），个人 MCP 只支持远程 SSE/HTTP 服务"
-          : "该条目还没补启动地址，请让管理员在榜单里补全启动方式",
-      )
-      return
-    }
-    const name = item.repo_full_name.split("/").pop() || item.repo_full_name
-    try {
-      await createMyMcpService({
-        name,
-        display_name: name,
-        description: item.description || "",
-        url,
-        token: "",
-        headers: {},
-        enabled: true,
-      })
-      toast.success("已下载。请到 MCP Tab 完成连接与权限管理。")
-      await reload()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "下载失败")
-    }
+    await createMyMcpService({
+      name: p.name,
+      display_name: p.display_name || undefined,
+      description: p.description || undefined,
+      url: p.url,
+      enabled: true,
+    })
+    await reload()
+    toast.success(`已从 GitHub 识别并创建 MCP「${p.name}」`)
   }
 
   const openEdit = (svc: MyMcpService) => {
@@ -571,6 +487,9 @@ export default function McpPage() {
             <Plus className="size-4" />
             管理 MCP 用户
           </Button>
+          <Button type="button" size="sm" variant="outline" onClick={() => setGithubOpen(true)}>
+            GitHub 识别
+          </Button>
           <Button type="button" size="sm" onClick={openCreate}>
             <Plus className="size-4" />
             新增
@@ -739,74 +658,6 @@ export default function McpPage() {
     </div>
   )
 
-  /** 「市场 > MCP」二级 Tab：市场仅下载；已下载项回 MCP Tab 管理。 */
-  const downloadedMcpNames = new Set(services.map((service) => service.name))
-  const marketMcpSection = (
-    <div className="flex flex-col gap-3">
-      {marketLoading || boardMcpLoading || marketEnabled === undefined ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner className="size-4" /> 加载市场中...</div>
-      ) : marketEnabled === false && boardMcpItems.length === 0 ? (
-        <div className="rounded-lg border border-dashed bg-muted/20 p-8 text-center text-sm text-muted-foreground">市场未启用：请在服务端 env.ini 的 [marketplace] 配置 GitHub 仓库。</div>
-      ) : marketItems.length === 0 && boardMcpItems.length === 0 ? (
-        <div className="rounded-lg border border-dashed bg-muted/20 p-8 text-center text-sm text-muted-foreground">市场暂无 MCP 资源。</div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          {/* 技术栈 tag 筛选：榜单条目带 stack_tags，按语言/形态快切。 */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {["all", "python", "typescript", "go", "rust", "web_frontend", "web_backend"].map((tag) => (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => setStackTag(tag)}
-                className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${
-                  stackTag === tag
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-background text-muted-foreground hover:bg-muted"
-                }`}
-              >
-                {tag === "all" ? "全部" : tag}
-              </button>
-            ))}
-          </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {boardMcpItems.map((item) => (
-            <LeaderboardMarketCard
-              key={`board-${item.id}`}
-              item={item}
-              icon={ServerCog}
-              installed={downloadedMcpNames.has(item.repo_full_name.split("/").pop() || item.repo_full_name)}
-              onInstall={(it) => void applyBoardMcpItem(it)}
-            />
-          ))}
-          {marketItems.map((item) => {
-            const downloaded = downloadedMcpNames.has(item.name || item.id)
-            return (
-            <div key={item.id} className="flex flex-col rounded-lg border bg-card p-4 shadow-sm">
-              <div className="flex items-start gap-3">
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted"><ServerCog className="size-4" /></div>
-                <div className="min-w-0">
-                  <div className="truncate font-medium">{item.display_name || item.name || item.id}</div>
-                  <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">{item.id}</div>
-                </div>
-              </div>
-              <p className="mt-3 line-clamp-2 min-h-10 text-xs text-muted-foreground">{item.summary || "暂无描述"}</p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {item.latest_version && <Badge variant="outline">v{item.latest_version}</Badge>}
-                {item.publisher && <Badge variant="secondary">{item.publisher}</Badge>}
-                {downloaded && <Badge variant="default">已下载</Badge>}
-              </div>
-              <Button className="mt-4" size="sm" disabled={downloaded} onClick={() => !downloaded && void applyMarketItem(item)}>
-                {downloaded ? "已下载" : "下载"}
-              </Button>
-            </div>
-            )
-          })}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <ResourceCenterShell
@@ -850,45 +701,7 @@ export default function McpPage() {
             ),
           },
           { value: "prompts", label: "项目提示词", content: <PromptResourcePanel userMode forcedView="local" /> },
-          { value: "market", label: "市场", content: null },
-        ]}
-        marketTabs={[
-          { value: "mcp", label: "MCP", content: marketMcpSection },
-          {
-            value: "skills",
-            label: "Skill",
-            content: (
-              <ResourceMarketPanel
-                userMode
-                forcedView="market"
-                noun="Skill"
-                icon={Sparkles}
-                fetchLocal={fetchSkillListing}
-                module="skills"
-                resourceType="skill"
-                manifestToSpec={manifestToSkillSpec}
-                specLabel="SkillSpec"
-              />
-            ),
-          },
-          {
-            value: "plugins",
-            label: "插件",
-            content: (
-              <ResourceMarketPanel
-                userMode
-                forcedView="market"
-                noun="插件"
-                icon={Package}
-                fetchLocal={fetchPluginListing}
-                module="plugins"
-                resourceType="plugin"
-                manifestToSpec={manifestToPluginSpec}
-                specLabel="NodePluginSpec"
-              />
-            ),
-          },
-          { value: "prompts", label: "项目提示词", content: <PromptResourcePanel userMode forcedView="market" /> },
+          { value: "market", label: "市场", content: <ResourceMarketBoard userMode /> },
         ]}
       />
       {mcpDialogs}
@@ -1054,6 +867,13 @@ export default function McpPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <McpGithubImportDialog
+        userMode
+        open={githubOpen}
+        onOpenChange={setGithubOpen}
+        onConfirm={handleGithubCreate}
+      />
     </div>
   )
 }

@@ -3,7 +3,7 @@
  *
  * 页面与详情弹框共用同一套 Agent 列表、配置表单和 CRUD 行为，宿主只负责外层容器。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react"
 import {
   listAgents,
   createAgent,
@@ -67,12 +67,13 @@ import { Bot, Plus, RefreshCw, Trash2, Check, ChevronsUpDown } from "lucide-reac
 import { toast } from "sonner"
 import {
   listMcpAuthorizationOptions,
-  listMcpPrincipalParams,
-  replaceMcpPrincipalParams,
+  listMcpPrincipalGrants,
+  replaceMcpPrincipalGrants,
   updateMcpPrincipal,
   type McpPrincipal,
 } from "@/api/mcpClient"
-import { McpUserPermissionEditor, type PermissionEditorApi, type PermissionEditorHandle } from "@/components/console/mcp/McpUserPermissionEditor"
+import { McpGrantPicker, type PickerGrant, type PickerParamKind, type PickerResource } from "@/components/console/mcp/McpGrantPicker"
+import { type PermissionEditorHandle } from "@/components/console/mcp/McpUserPermissionEditor"
 
 const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"]
 const DEFAULT_DENIED_PATTERNS = ["/etc/", "/var/", ".env", ".git/", "node_modules/"]
@@ -197,13 +198,50 @@ function AgentPrincipalSection({
   const [principal, setPrincipal] = useState<McpPrincipal | null>(null)
   const [loading, setLoading] = useState(false)
   const [toggling, setToggling] = useState(false)
+  // 添加式选择器的授权草稿 + 候选数据。加载时从 grants 端点初始化草稿；
+  // 外层「保存」按钮经 ref 触发 saveGrants（全量替换）。
+  const [draft, setDraft] = useState<PickerGrant[]>([])
+  const [pickerResources, setPickerResources] = useState<PickerResource[]>([])
+  const [paramKinds, setParamKinds] = useState<PickerParamKind[]>([])
+  const draftRef = useRef<PickerGrant[]>([])
 
   const load = useCallback(async () => {
-    if (!agentId || !boundId) { setPrincipal(null); return }
+    if (!agentId || !boundId) { setPrincipal(null); setDraft([]); return }
     setLoading(true)
     try {
-      const diag = await getAgentMcpDiagnostics(agentId)
+      const [diag, opts, grantsResult] = await Promise.all([
+        getAgentMcpDiagnostics(agentId),
+        listMcpAuthorizationOptions(),
+        listMcpPrincipalGrants(Number(boundId)).catch(() => ({ grants: [] as PickerGrant[] })),
+      ])
       setPrincipal((diag.principal as unknown as McpPrincipal | null))
+      const svcResources: PickerResource[] = (opts.resources || [])
+        .filter((r) => r.resource_kind === "service")
+        .map((r) => ({
+          resource_kind: "service",
+          resource_id: r.resource_id,
+          resource_type: r.resource_type,
+          name: r.name,
+          description: r.description,
+          tool_count: r.tool_count,
+          kind: r.kind,
+          stdio: r.stdio,
+          required_param: r.required_param,
+        }))
+      const instanceResources: PickerResource[] = (opts.resources || [])
+        .filter((r) => r.resource_kind === "builtin_resource")
+        .map((r) => ({
+          resource_kind: "builtin_resource",
+          resource_id: r.resource_id,
+          resource_type: r.resource_type,
+          name: r.name,
+          children: [],
+        }))
+      setPickerResources([...svcResources, ...instanceResources])
+      setParamKinds(opts.param_kinds || [])
+      const initial = (grantsResult.grants || []) as PickerGrant[]
+      setDraft(initial)
+      draftRef.current = initial
     } catch (e) {
       setPrincipal(null)
       toast.error(e instanceof Error ? e.message : "加载 Agent MCP 配置失败")
@@ -213,6 +251,21 @@ function AgentPrincipalSection({
   }, [agentId, boundId])
 
   useEffect(() => { void load() }, [load])
+
+  /** 外层「保存」按钮的统一入口：把草稿全量写回 principal grants。 */
+  useImperativeHandle(
+    editorRef,
+    () => ({
+      save: async () => {
+        if (!principal) return false
+        const saved = await replaceMcpPrincipalGrants(principal.id, draftRef.current)
+        draftRef.current = (saved.grants || []) as PickerGrant[]
+        setDraft(draftRef.current)
+        return true
+      },
+    }),
+    [principal],
+  )
 
   const toggleEnabled = async () => {
     if (!principal) return
@@ -225,13 +278,6 @@ function AgentPrincipalSection({
     } finally {
       setToggling(false)
     }
-  }
-
-  /** 通用权限编辑器注入的用户侧 API 适配器（agent principal 同走 principal 契约）。 */
-  const permissionApi: PermissionEditorApi = {
-    loadResources: async () => (await listMcpAuthorizationOptions()).resources,
-    loadParams: async (id: number) => (await listMcpPrincipalParams(id)).params,
-    saveParams: async (id: number, params) => (await replaceMcpPrincipalParams(id, params)).params,
   }
 
   if (loading) {
@@ -278,13 +324,16 @@ function AgentPrincipalSection({
           <Switch checked={principal.enabled} onCheckedChange={() => void toggleEnabled()} disabled={toggling} />
         </div>
       </div>
-      {/* 只渲染 MCP 编辑器本身：保存由 Agent 配置的「保存」按钮统一触发。 */}
-      <McpUserPermissionEditor
-        ref={editorRef}
-        principalId={principal.id}
-        api={permissionApi}
-        title={`配置「${principal.name}」可使用的 MCP`}
-      />
+      {/* 添加式选择器：草稿本地持有，「保存」按钮统一写回 grants（useImperativeHandle）。 */}
+      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <McpGrantPicker
+          grants={draft}
+          onChange={(next) => { draftRef.current = next; setDraft(next) }}
+          resources={pickerResources}
+          paramKinds={paramKinds}
+          title={`配置「${principal.name}」可使用的 MCP`}
+        />
+      </div>
     </div>
   )
 }

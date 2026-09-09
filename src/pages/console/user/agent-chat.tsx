@@ -59,7 +59,7 @@ import { AgentHistoryPanel } from "@/components/console/agent/agent-history-pane
 import { ScheduledTasksDialog } from "@/components/console/agent/scheduled-tasks-dialog"
 import {
   AgentMessageBubble,
-  mergeAgentToolResults,
+  agentMessagesToDisplay,
   type AgentDisplayMessage,
 } from "@/components/console/agent/agent-message-list"
 // 事件归约走共享模块：与 agent-conversation.tsx（节点终端 AI 面板）同一套语义，
@@ -226,31 +226,13 @@ export default function AgentChatPage() {
     return null
   }, [])
 
-  const toDisplayMessages = useCallback((history: Awaited<ReturnType<typeof listConversationMessagesPage>>["messages"]): AgentDisplayMessage[] => (
-    history
-      .filter((message) => message.role === "user" || message.role === "assistant")
-      .map((message) => {
-        // 历史回灌里若仍带 streaming 状态，说明上一轮没正常结束（进程重启/断线/仍在后台挂起）。
-        // 此时本页没有对应 SSE 实时流，留着 streaming 会永远显示「思考中…」——降级为中断态。
-        const rawStatus = (message.status as AgentDisplayMessage["status"]) || "done"
-        const stuckStreaming = rawStatus === "streaming" || rawStatus === "pending"
-        return {
-          id: String(message.id),
-          role: message.role as "user" | "assistant",
-          content: message.content || "",
-          status: stuckStreaming ? "error" : rawStatus,
-          error: stuckStreaming ? "任务未正常结束（可能已中断或在后台继续运行，重新发送即可恢复）" : message.error || undefined,
-          model: message.model || undefined,
-          createdAt: message.created_at,
-          reasoning: message.reasoning || undefined,
-          toolCalls: mergeAgentToolResults(message.tool_calls || [], message.tool_results),
-          subagents: [],
-          approvals: [],
-          media: message.media || undefined,
-          usage: message.usage || undefined,
-        }
-      })
-  ), [])
+  // 历史回灌映射走共享模块 agentMessagesToDisplay（agent-message-list.tsx），
+  // 与定时任务执行记录详情同一份口径。
+  const toDisplayMessages = useCallback(
+    (history: Awaited<ReturnType<typeof listConversationMessagesPage>>["messages"]): AgentDisplayMessage[] =>
+      agentMessagesToDisplay(history),
+    [],
+  )
 
   const selectConversation = useCallback(async (convId: string) => {
     setComposerResetKey((current) => current + 1)

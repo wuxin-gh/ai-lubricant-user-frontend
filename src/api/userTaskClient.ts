@@ -80,18 +80,26 @@ export interface UserTaskSummary {
 
 export interface UserTaskDetail extends UserTaskSummary {
   log_store?: string | null
-  /** 任务侧 MCP principal 只读视图（id/enabled/grants）；token 永不返回。 */
+  /**
+   * 任务侧 MCP principal 只读视图（id/enabled/params）；token 永不返回。
+   * params 是 principal 绑定的内置资源实例（param_key=cdp_client_id/
+   * mail_account_id/device_id，param_value=builtin_tool_resources 行 id）。
+   * grants（含 service 授权行）编辑走统一授权端点
+   * （PUT /users/mcp-principals/{id}/grants）；诊断区服务行需另调
+   * listMcpPrincipalGrants（本 DTO 不含 service 行）。
+   */
   mcp_principal?: {
     principal_id: number
     usage_type: "task"
     enabled: boolean
-    grants: Array<{
-      resource_kind: "service" | "builtin_instance"
-      resource_id: number
-      child_mode: "all" | "selected" | "none"
-      enabled: boolean
-    }>
+    params: Array<{ param_key: string; param_value: string }>
+    /** 预留：后端 detail DTO 之后的版本若直接下发 grants 视图则填充。 */
+    grants?: Array<{ grant_key: string; grant_value: string }>
   } | null
+  /** 创建时勾选的 MCP 服务 wire spec（服务端已脱敏/去密）；详情页诊断区渲染。 */
+  mcp_config?: Array<Record<string, unknown>>
+  skill_config?: Array<Record<string, unknown>>
+  plugin_config?: Array<Record<string, unknown>>
 }
 
 export interface CreateUserTaskPayload {
@@ -106,9 +114,22 @@ export interface CreateUserTaskPayload {
   env_mode?: "isolated" | "shared" | "system"
   env_id?: string
   env_name?: string
+  // 环境自带资源的激活子集（环境清单里的名字）：只激活列出的技能/插件，
+  // 其余环境已装项本次任务不启用。省略/空 = 全激活。节点侧 skill 真正生效；
+  // plugin 已随协议下发但节点暂不消费（物理存在的插件 runner 直读）。
+  active_skills?: string[]
+  active_plugins?: string[]
   git_identity_id?: string
   repo?: { repo_url?: string; branch?: string; commit?: string; branch_mode?: "default" | "existing" | "auto" }
-  extra?: { project_id?: string; issue_id?: string; skill_ids?: string[]; plugin_ids?: string[] }
+  // skill_ids 普通项传引用 id 字符串；技能集合/新表引用传
+  // {resource_id|reference_id, entries:[子技能名…]}（服务端按 entries 过滤，
+  // 只下发勾选的子技能；缺省=整个集合）。
+  extra?: {
+    project_id?: string
+    issue_id?: string
+    skill_ids?: Array<string | { resource_id?: string; reference_id?: string; entries?: string[] }>
+    plugin_ids?: string[]
+  }
   mode?: string
   reasoning_effort?: "" | "low" | "medium" | "high" | "xhigh"
   parent_api_key_id?: number

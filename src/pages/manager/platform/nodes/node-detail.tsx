@@ -37,7 +37,7 @@ import {
 import { copyText } from "./install-guide"
 import { NodeShellApproval } from "./node-shell-approval"
 import { NodeTunnels } from "./node-tunnels"
-import { NodePrerequisiteGuide } from "./node-prerequisite-guide"
+import { NodeJSInstallButton, NodePrerequisiteGuide, XcodeDetectButton } from "./node-prerequisite-guide"
 import { NodeUpgradeDialog } from "../NodeUpgradeDialog"
 
 /** 机器信息主行（带兜底文案），用于客户端列表的子项副行。 */
@@ -310,39 +310,86 @@ function NodeEnvironment({
   const caps = node.capabilities || {}
   const runtimeVersion = (caps.runtime_version || "").trim()
   const clientVersion = (caps.client_version || "").trim()
-
-  const environmentRows = [
-    { label: "Go 节点程序", value: clientVersion },
-    { label: "Node.js", value: (caps.node_version || "").trim() },
-    { label: "npm", value: (caps.npm_version || "").trim() },
-  ]
+  const nodeMissing = !(caps.node_version || "").trim()
+  const npmMissing = !(caps.npm_version || "").trim()
+  // 装完 Node.js 后刷新详情：onChanged 拉全量节点列表，快照即更新。
+  const refreshNode = () => onChanged?.()
 
   return (
     <div className="flex flex-col gap-5">
       <NodeUpgradeCard node={node} upgrade={upgrade} release={release} onChanged={onChanged} />
       <NodeEgressProxyCard node={node} />
-      <NodePrerequisiteGuide node={node} />
+      <NodePrerequisiteGuide node={node} onRefresh={refreshNode} />
       <div className="overflow-hidden rounded border">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/40 text-xs text-muted-foreground">
               <th className="px-3 py-2 text-left font-medium">组件</th>
               <th className="px-3 py-2 text-left font-medium">当前版本</th>
+              <th className="px-3 py-2 text-left font-medium">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {environmentRows.map((row) => (
-              <tr key={row.label}>
-                <td className="px-3 py-2 font-medium">{row.label}</td>
-                <td className={`px-3 py-2 ${row.value ? "font-mono" : "text-destructive"}`}>
-                  {row.value ? `v${cleanVersion(row.value)}` : "未安装或未上报"}
+            <tr>
+              <td className="px-3 py-2 font-medium">Go 节点程序</td>
+              <td className={`px-3 py-2 ${clientVersion ? "font-mono" : "text-destructive"}`}>
+                {clientVersion ? `v${cleanVersion(clientVersion)}` : "未安装或未上报"}
+              </td>
+              <td className="px-3 py-2" />
+            </tr>
+            <tr>
+              <td className="px-3 py-2 font-medium">
+                Node.js
+                {nodeMissing ? (
+                  <Badge variant="outline" className="ml-1.5 border-destructive text-destructive">必装</Badge>
+                ) : null}
+              </td>
+              <td className={`px-3 py-2 ${nodeMissing ? "text-destructive" : "font-mono"}`}>
+                {nodeMissing ? "未安装或未上报" : `v${cleanVersion(caps.node_version || "")}`}
+              </td>
+              <td className="px-3 py-2">
+                {nodeMissing ? <NodeJSInstallButton node={node} onRefresh={refreshNode} compact /> : null}
+              </td>
+            </tr>
+            <tr>
+              <td className="px-3 py-2 font-medium">
+                npm
+                {npmMissing ? (
+                  <Badge variant="outline" className="ml-1.5 border-destructive text-destructive">必装</Badge>
+                ) : null}
+              </td>
+              <td className={`px-3 py-2 ${npmMissing ? "text-destructive" : "font-mono"}`}>
+                {npmMissing ? "未安装或未上报" : `v${cleanVersion(caps.npm_version || "")}`}
+              </td>
+              <td className="px-3 py-2">
+                {npmMissing ? <NodeJSInstallButton node={node} onRefresh={refreshNode} compact /> : null}
+              </td>
+            </tr>
+            {/* Xcode（xcodebuild）只在 macOS 节点有意义：项目页「构建」tab 按
+                xcodebuild_version 挑构建节点；缺失时给检测入口（无法自动安装，
+                点了会给出 App Store 手动安装的原因，见 XcodeDetectButton；
+                新版节点检测成功后服务端即时折进标签并刷新本表）。 */}
+            {String(caps.os || "").toLowerCase() === "darwin" && (
+              <tr>
+                <td className="px-3 py-2 font-medium">
+                  Xcode（xcodebuild）
+                  <Badge variant="outline" className="ml-1.5">iOS 构建</Badge>
+                </td>
+                <td className={`px-3 py-2 ${(caps.xcodebuild_version || "").trim() ? "font-mono" : "text-muted-foreground"}`}>
+                  {(caps.xcodebuild_version || "").trim() || "未检测到（需完整 Xcode，无法自动安装）"}
+                </td>
+                <td className="px-3 py-2">
+                  <XcodeDetectButton node={node} onRefresh={refreshNode} />
                 </td>
               </tr>
-            ))}
+            )}
             <tr>
               <td className="px-3 py-2 font-medium">agent-compose runtime</td>
               <td className={`px-3 py-2 ${runtimeVersion ? "font-mono" : "text-destructive"}`}>
                 {runtimeVersion ? `v${cleanVersion(runtimeVersion)}` : "未安装"}
+              </td>
+              <td className="px-3 py-2 text-xs text-muted-foreground">
+                由节点安装脚本自动下载
               </td>
             </tr>
             {/* 系统内置环境（env_mode=system）能力位：节点注册时上报，宿主机安装默认开、
@@ -352,6 +399,7 @@ function NodeEnvironment({
               <td className={`px-3 py-2 ${caps.system_env === "true" ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}`}>
                 {caps.system_env === "true" ? "已开启" : "未开启"}
               </td>
+              <td className="px-3 py-2" />
             </tr>
           </tbody>
         </table>
@@ -400,10 +448,6 @@ function NodeOverview({
             <span className="text-sm">{spec.value}</span>
           </div>
         ))}
-        <div className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">运行中会话</span>
-          <span className="text-sm">{node.active_session_ids.length} 个</span>
-        </div>
         <div className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">最近心跳</span>
           <span className="text-sm">{node.last_heartbeat_at || "尚未上报"}</span>

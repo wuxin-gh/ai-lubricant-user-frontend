@@ -68,6 +68,16 @@ interface StreamEvent {
 
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
+/**
+ * Live frames carry no wall-clock time — the SSE bridge forwards the runtime's
+ * frames the moment they happen, so arrival time IS the honest timestamp. The
+ * replay path instead parses the persisted row's ``created_at``; both meet in
+ * ``item.created_at`` and flow onto ``message.time``.
+ */
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
 /** Fold a streaming tool call into a sub-agent's tool list, matching by name+order. */
 function mergeToolCall(
   existing: EditorSessionSubAgent["toolCalls"],
@@ -329,7 +339,7 @@ export class EditorSessionStreamClient {
     this.patch({
       messages: [
         ...filtered,
-        { id, time: 0, role: "user", type: "user_input", data: { content: text } },
+        { id, time: nowSeconds(), role: "user", type: "user_input", data: { content: text } },
       ],
       running: true,
     })
@@ -390,7 +400,7 @@ export class EditorSessionStreamClient {
           message = data
         }
         this.patch({
-          messages: [...this.state.messages, { id: `stream-error-${this.state.messages.length}`, time: 0, role: "agent", type: "error_message", data: { text: message } }],
+          messages: [...this.state.messages, { id: `stream-error-${this.state.messages.length}`, time: nowSeconds(), role: "agent", type: "error_message", data: { text: message } }],
           error: message,
           running: false,
         })
@@ -480,7 +490,7 @@ export class EditorSessionStreamClient {
       this.patch({
         messages: [...this.state.messages, {
           id: `llm-retry-${payload.seq ?? this.state.messages.length}`,
-          time: 0,
+          time: nowSeconds(),
           role: "system",
           type: "alert_message",
           data: {
@@ -497,7 +507,7 @@ export class EditorSessionStreamClient {
       this.patch({
         messages: [...this.state.messages, {
           id: `compact-${payload.seq ?? this.state.messages.length}`,
-          time: 0,
+          time: nowSeconds(),
           role: "system",
           type: "alert_message",
           data: { level: "info", text },
@@ -527,7 +537,7 @@ export class EditorSessionStreamClient {
         this.patch({
           messages: this.state.messages.map((m) => (
             m.type === "agent_message_chunk" && String(m.data.content || "") === message
-              ? { id: `error-${payload.seq ?? this.state.messages.length}`, time: 0, role: "agent" as const, type: "error_message" as const, data: { text: message } }
+              ? { id: `error-${payload.seq ?? this.state.messages.length}`, time: nowSeconds(), role: "agent" as const, type: "error_message" as const, data: { text: message } }
               : m
           )),
           running: false,
@@ -536,7 +546,7 @@ export class EditorSessionStreamClient {
         return
       }
       this.patch({
-        messages: [...this.state.messages, { id: `error-${payload.seq ?? this.state.messages.length}`, time: 0, role: "agent", type: "error_message", data: { text: message } }],
+        messages: [...this.state.messages, { id: `error-${payload.seq ?? this.state.messages.length}`, time: nowSeconds(), role: "agent", type: "error_message", data: { text: message } }],
         running: false,
         error: message,
       })
@@ -642,7 +652,7 @@ export class EditorSessionStreamClient {
                 ...this.state.messages.filter((message) => message.id !== entryId),
                 {
                   id: entryId,
-                  time: 0,
+                  time: nowSeconds(),
                   role: "system" as const,
                   type: "system_message" as const,
                   data: { text: updated.name, toolCallId: agentId },
@@ -662,6 +672,10 @@ export class EditorSessionStreamClient {
       item.logical_event_id ?? payload.logical_event_id ?? item.id ?? payload.seq ?? this.state.messages.length,
     )
     const normalized = item as unknown as NormalizedItem
+    // Live frames carry no wall-clock; arrival time is the honest timestamp
+    // (see nowSeconds). Stamp BEFORE merging so a completion frame's fresher
+    // time wins and the card shows when it finished, not when it opened.
+    normalized.created_at = nowSeconds()
     const previous = this.rawById.get(itemKey)
     const merged = previous ? mergeItems(previous, normalized) : normalized
     this.rawById.set(itemKey, merged)

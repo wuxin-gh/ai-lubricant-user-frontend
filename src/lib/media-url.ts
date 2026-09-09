@@ -23,6 +23,19 @@ export function isSafeImageSource(value: string | undefined | null): value is st
   return !hasControlChars(trimmed)
 }
 
+/**
+ * Inline ``data:image/…`` sources: only non-SVG raster types. Same posture as the
+ * SVG exclusion above — ``svg+xml`` can carry active content, the rest is inert
+ * pixel data. Meant for trusted admin-configured content (community QR codes),
+ * opted in per call site, not folded into {@link isSafeImageSource}.
+ */
+export function isSafeDataImageUrl(value: string | undefined | null): value is string {
+  if (!value || typeof value !== "string") return false
+  const trimmed = value.trim()
+  if (!trimmed || trimmed !== value || hasControlChars(trimmed)) return false
+  return trimmed.toLowerCase().startsWith("data:image/") && !trimmed.toLowerCase().startsWith("data:image/svg")
+}
+
 const PREVIEWABLE_IMAGE_MIMES = new Set([
   "image/png",
   "image/jpeg",

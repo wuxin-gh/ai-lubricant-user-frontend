@@ -6,18 +6,19 @@
  * `renderExecutionActions` 注入。这是两侧权限差异的唯一落点：用户侧不注入审批/
  * 移动/删除，这些操作就天然不存在，不需要在表格内部写 `mode === "admin"` 分支。
  *
- * 列集合用 `columns` 声明（管理端 3 列 + 用户侧 6 列的差异），避免条件渲染散落。
+ * 列集合由共用的 `NODE_LIST_COLUMNS` 声明；两侧只通过操作回调注入权限差异，避免管理端与用户侧
+ * 因各自传参产生视觉分叉。
+ *
+ * 每个分组（管理节点父行）可折叠：父行节点列带 chevron，折叠时隐藏子行与
+ * 「暂无执行节点」占位行。折叠状态是组件内部 UI 态，列表刷新（同实例重渲染）不丢。
  */
-import { Fragment, type ReactNode } from "react"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { Fragment, useState, type ReactNode } from "react"
+import { Minus, Plus } from "lucide-react"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { cn } from "@/lib/utils"
 import { ROLE_LABEL } from "@/pages/manager/platform/nodes/types"
 import {
   EditorsCell,
@@ -30,6 +31,15 @@ import type { NodeGroup, NodeView } from "./node-view"
 
 /** 可选列。`node` 与 `actions` 恒在，不在这里声明。 */
 export type NodeColumn = "system" | "cpu" | "memory" | "version" | "editors" | "status"
+
+/**
+ * 节点列表统一列集合：节点客户端版本、编辑器、状态。系统/CPU/内存等机器详情放在
+ * 「详情」弹框查看，不在列表重复占宽——管理端与用户侧共用同一集合，保持一致。
+ */
+export const NODE_LIST_COLUMNS: NodeColumn[] = ["version", "editors", "status"]
+
+/** 操作区域统一宽度：两侧按钮数量不同，但列宽固定，页面布局不随权限跳变。 */
+export const NODE_ACTIONS_WIDTH = "w-[440px]"
 
 const COLUMN_META: Record<NodeColumn, { label: string; width: string }> = {
   system: { label: "系统", width: "w-[150px]" },
@@ -63,7 +73,7 @@ export function NodeTreeTable({
   noExecutionHint = "该管理节点下暂无执行节点。",
   renderManagerActions,
   renderExecutionActions,
-  actionsWidth = "w-[440px]",
+  actionsWidth = NODE_ACTIONS_WIDTH,
 }: {
   groups: NodeGroup[]
   columns: NodeColumn[]
@@ -78,6 +88,16 @@ export function NodeTreeTable({
   actionsWidth?: string
 }) {
   const totalColumns = columns.length + 2
+  // 折叠的分组 key 集合。默认全展开；toggleGroup 切换某组。跨列表刷新保留
+  // （NodeTreeTable 在 Nodes 页是同实例重渲染，useState 不重置）。
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => new Set())
+  const toggleGroup = (key: string) =>
+    setCollapsedKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
 
   return (
     <Table className="table-fixed">
@@ -108,32 +128,70 @@ export function NodeTreeTable({
         ) : (
           groups.map((group) => {
             const manager = group.manager
+            const collapsed = collapsedKeys.has(group.key)
+            const childCount = group.children.length
+            const countTag =
+              childCount > 0
+                ? { label: `${childCount} 个执行节点`, className: "text-slate-500 dark:text-slate-400" }
+                : undefined
             return (
               <Fragment key={group.key}>
                 {/* 父行：管理节点（分组容器 / 管理客户端）或未受管合成组。 */}
                 <TableRow className="bg-muted/40">
-                  <TableCell className="align-middle text-center whitespace-normal">
-                    {manager ? (
-                      <NodeCell
-                        view={manager}
-                        kindLabel={ROLE_LABEL.management}
-                        badgeClass="text-purple-600 dark:text-purple-400"
-                        subTag={
-                          manager.displayOnly
-                            ? { label: "仅归属展示", className: "text-slate-500 dark:text-slate-400" }
-                            : manager.isPassive
-                              ? { label: "不可管理", className: "text-slate-600 dark:text-slate-300" }
-                              : { label: "可管理", className: "text-emerald-600 dark:text-emerald-400" }
-                        }
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center gap-1 text-center">
-                        <span className="font-medium text-muted-foreground">未受管 / 直连</span>
-                        <span className="text-xs text-muted-foreground">
-                          未归属任何管理节点的执行节点
-                        </span>
-                      </div>
-                    )}
+                  <TableCell className="align-middle whitespace-normal">
+                    <div className="flex items-start gap-2.5">
+                      {/* 无子节点的分组不给折叠钮——折叠只会藏掉「暂无执行节点」提示，没有意义。
+                          占一个等宽空位，让各父行名称左缘对齐。展开态用主色描边，更醒目。 */}
+                      {childCount > 0 ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon-xs"
+                          onClick={() => toggleGroup(group.key)}
+                          aria-label={collapsed ? "展开子节点" : "折叠子节点"}
+                          aria-expanded={!collapsed}
+                          title={collapsed ? "展开子节点" : "折叠子节点"}
+                          className={cn(
+                            "mt-0.5 shrink-0 text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground",
+                            collapsed ? "" : "border-primary/40 text-primary hover:border-primary/60 hover:text-primary",
+                          )}
+                        >
+                          {collapsed ? <Plus className="size-3.5" /> : <Minus className="size-3.5" />}
+                        </Button>
+                      ) : (
+                        <span className="mt-0.5 size-6 shrink-0" aria-hidden />
+                      )}
+                      {manager ? (
+                        <NodeCell
+                          view={manager}
+                          kindLabel={ROLE_LABEL.management}
+                          badgeClass="text-purple-600 dark:text-purple-400"
+                          align="start"
+                          subTag={
+                            manager.displayOnly
+                              ? { label: "仅归属展示", className: "text-slate-500 dark:text-slate-400" }
+                              : manager.isPassive
+                                ? { label: "不可管理", className: "text-slate-600 dark:text-slate-300" }
+                                : { label: "可管理", className: "text-emerald-600 dark:text-emerald-400" }
+                          }
+                          extraTag={countTag}
+                        />
+                      ) : (
+                        <div className="flex flex-col items-start gap-1 text-left">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-muted-foreground">未受管 / 直连</span>
+                            {countTag ? (
+                              <Badge variant="secondary" className={countTag.className}>
+                                {countTag.label}
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <span className="text-xs text-muted-foreground">
+                            未归属任何管理节点的执行节点
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </TableCell>
                   {columns.map((column) => (
                     <TableCell key={column} className="align-middle text-center whitespace-normal">
@@ -147,8 +205,8 @@ export function NodeTreeTable({
                   </TableCell>
                 </TableRow>
 
-                {/* 子行：该管理节点下的执行节点。 */}
-                {group.children.length === 0 ? (
+                {/* 子行：该管理节点下的执行节点。折叠时整组隐藏（含占位行）。 */}
+                {collapsed ? null : group.children.length === 0 ? (
                   <TableRow>
                     <TableCell
                       colSpan={totalColumns}
@@ -160,11 +218,12 @@ export function NodeTreeTable({
                 ) : (
                   group.children.map((node) => (
                     <TableRow key={node.nodeId}>
-                      <TableCell className="align-middle pl-10 text-center whitespace-normal">
+                      <TableCell className="align-middle pl-10 whitespace-normal">
                         <NodeCell
                           view={node}
                           kindLabel={ROLE_LABEL.execution}
                           badgeClass="text-blue-600 dark:text-blue-400"
+                          align="start"
                         />
                       </TableCell>
                       {columns.map((column) => (

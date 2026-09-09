@@ -14,16 +14,18 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { getMarketplaceSourceConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
-import { syncAgentscope, fetchAgentscopeLastSync } from "@/api/marketplaceAdmin"
-import { INTERVAL_OPTIONS } from "./leaderboard-labels"
+import { syncAgentscope, fetchAgentscopeLastSync, type SourceSyncStatus } from "@/api/marketplaceAdmin"
+import { INTERVAL_OPTIONS, fmtSyncAt } from "./leaderboard-labels"
 import { toast } from "sonner"
 
 export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
+  const [config, setConfig] = useState<Awaited<ReturnType<typeof getMarketplaceSourceConfig>> | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [syncing, setSyncing] = useState(false)
-  const [last, setLast] = useState<{ ran_at: string; ok: boolean | null; detail: string; progress?: { running: boolean; phase: string; current: number; total: number; current_item: string }; logs?: Array<{ ts: string; phase: string; detail: string }> } | null>(null)
-  const [showLogs, setShowLogs] = useState(false)
+  const [last, setLast] = useState<SourceSyncStatus | null>(null)
+  // 打开面板默认展开执行日志（重启后靠 DB 记录也能直接看到最近一次）
+  const [showLogs, setShowLogs] = useState(true)
   const [enabled, setEnabled] = useState(false)
   const [interval, setInterval] = useState(24)
 
@@ -34,6 +36,7 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
         getMarketplaceSourceConfig(),
         fetchAgentscopeLastSync().catch(() => null),
       ])
+      setConfig(src)
       setLast(lastSync)
       setEnabled(!!src.agentscope_enabled)
       const iv = src.agentscope_interval_hours || 24
@@ -51,27 +54,32 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
     setSyncing(true)
     setShowLogs(true)
     try {
-      // 同步启动后立即返回——后端在后台跑，前端轮询 last-sync 拿实时进度
+      // 后端异步执行：POST 立即返回 {started: true}，不等同步完成
+      const res = await syncAgentscope()
+      if (!res.started) {
+        toast.error(res.detail || "启动同步失败")
+        return
+      }
+      // 轮询 last-sync 端点拿实时进度+日志
       const poll = window.setInterval(async () => {
         try {
           const st = await fetchAgentscopeLastSync()
           setLast(st)
-          if (!st.progress?.running) window.clearInterval(poll)
-        } catch { /* 轮询失败静默 */ }
+          // 同步完成（progress.running 变 false 且有 ran_at）
+          if (!st.progress?.running && st.ran_at) {
+            window.clearInterval(poll)
+            setSyncing(false)
+            if (st.ok === false) {
+              toast.error("同步失败", { description: st.detail })
+            } else if (st.ok === true) {
+              toast.success(st.detail || "同步完成")
+              onSaved?.()
+            }
+          }
+        } catch { /* 轮询失败静默，继续 */ }
       }, 2000)
-      try {
-        const report = await syncAgentscope()
-        // 同步接口返回时（同步已完成），最后拉一次状态
-        const st = await fetchAgentscopeLastSync().catch(() => null)
-        setLast(st)
-        toast.success(report.detail || `同步 ${report.converted} 条`)
-        onSaved?.()
-      } finally {
-        window.clearInterval(poll)
-      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步失败")
-    } finally {
       setSyncing(false)
     }
   }
@@ -104,11 +112,16 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
               <span className="text-muted-foreground">仓库 <span className="font-mono text-foreground">platform.agentscope.io</span></span>
               <span className="text-muted-foreground">每 {interval} 小时同步</span>
-              {last ? (
+              {last?.ran_at ? (
                 <span className="text-muted-foreground">
-                  上次 {last.ran_at || "-"}
+                  上次 {fmtSyncAt(last.ran_at)}
                   {last.ok === false ? <span className="text-destructive"> 失败</span> : null}
                   {last.detail ? <span className="ml-1">· {last.detail}</span> : null}
+                </span>
+              ) : config?.agentscope_last_sync_at ? (
+                // 重启后内存没了：回落配置里持久化的上次同步时间
+                <span className="text-muted-foreground">
+                  上次 {fmtSyncAt(config.agentscope_last_sync_at)}（历史记录）
                 </span>
               ) : <span className="text-muted-foreground">尚未同步</span>}
               {/* 同步中：实时进度条 */}

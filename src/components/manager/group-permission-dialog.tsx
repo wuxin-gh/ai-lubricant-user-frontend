@@ -41,10 +41,14 @@ import {
 } from "@/pages/manager/platform/nodes/types"
 import { apiRequest } from "@/utils/requestUtils"
 import {
+  listGroupReferencesV2,
   listGroupResources,
+  listReferencesV2,
   listResourceReferences,
+  setGroupReferencesV2,
   setGroupResources,
   type ResourceReference,
+  type ResourceReferenceV2,
   type ResourceType,
 } from "@/api/resourceReferences"
 
@@ -123,6 +127,10 @@ export function GroupPermissionDialog({
   const [selectedPromptIds, setSelectedPromptIds] = useState<Set<string>>(new Set())
   const [promptsLoading, setPromptsLoading] = useState(false)
 
+  // v2 引用（统一资源池）——Skills/插件 Tab 需要合并旧引用展示
+  const [v2Skills, setV2Skills] = useState<ResourceReferenceV2[]>([])
+  const [v2Plugins, setV2Plugins] = useState<ResourceReferenceV2[]>([])
+
   const groupId = group?.id || ""
 
   useEffect(() => {
@@ -185,12 +193,17 @@ export function GroupPermissionDialog({
   const loadSkills = async (gid: string) => {
     setSkillsLoading(true)
     try {
-      const [available, selected] = await Promise.all([
+      const [available, selected, v2Available, v2Granted] = await Promise.all([
         listResourceReferences("skill"),
         listGroupResources(gid, "skill"),
+        listReferencesV2("skill").catch(() => [] as ResourceReferenceV2[]),
+        listGroupReferencesV2(gid, "skill").catch(() => [] as ResourceReferenceV2[]),
       ])
       setSkills(available)
-      setSelectedSkillIds(new Set(selected.map((item) => item.id)))
+      setV2Skills(v2Available)
+      // 合并：旧引用 ID + v2 分组授权的引用 ID
+      const v2GrantedIds = new Set(v2Granted.map((r) => r.id))
+      setSelectedSkillIds(new Set([...selected.map((item) => item.id), ...v2GrantedIds]))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "获取技能列表失败")
     } finally {
@@ -202,16 +215,20 @@ export function GroupPermissionDialog({
     const setLoading = type === "plugin" ? setPluginsLoading : setPromptsLoading
     setLoading(true)
     try {
-      const [available, selected] = await Promise.all([
+      const [available, selected, v2Available, v2Granted] = await Promise.all([
         listResourceReferences(type),
         listGroupResources(gid, type),
+        listReferencesV2(type).catch(() => [] as ResourceReferenceV2[]),
+        listGroupReferencesV2(gid, type).catch(() => [] as ResourceReferenceV2[]),
       ])
+      const v2GrantedIds = new Set(v2Granted.map((r) => r.id))
       if (type === "plugin") {
         setPlugins(available)
-        setSelectedPluginIds(new Set(selected.map((item) => item.id)))
+        setV2Plugins(v2Available)
+        setSelectedPluginIds(new Set([...selected.map((item) => item.id), ...v2GrantedIds]))
       } else {
         setPrompts(available)
-        setSelectedPromptIds(new Set(selected.map((item) => item.id)))
+        setSelectedPromptIds(new Set([...selected.map((item) => item.id), ...v2GrantedIds]))
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "获取资源列表失败")
@@ -219,6 +236,31 @@ export function GroupPermissionDialog({
       setLoading(false)
     }
   }
+
+  // v2 引用 → 旧 ResourceReference 形状（枚举值映射：skills→skill / prompt→project_prompt）。
+  const v2ToDisplay = (row: ResourceReferenceV2): ResourceReference => ({
+    id: row.id,
+    team_id: row.team_id,
+    resource_type: row.resource.resource_type === "skills" ? "skill"
+      : row.resource.resource_type === "prompt" ? "project_prompt"
+      : row.resource.resource_type,
+    market_module: "skills",
+    market_id: `v2:${row.resource_id}`,
+    name: row.resource.name,
+    display_name: row.display_name || row.resource.display_name || row.resource.name,
+    version: row.version || row.resource.version,
+    manifest: {
+      type: row.resource.resource_type,
+      entries: row.resource.resource_data?.entries || [],
+      description: row.description || row.resource.description,
+    },
+    owned_entity_type: null,
+    owned_entity_id: null,
+    status: "active",
+    group_ids: [],
+  })
+  const v2SkillDisplay = v2Skills.map(v2ToDisplay)
+  const v2PluginDisplay = v2Plugins.map(v2ToDisplay)
 
   const handleClose = () => onOpenChange(false)
 
@@ -256,7 +298,13 @@ export function GroupPermissionDialog({
       )
     } else if (activeTab === "skills") {
       try {
-        await setGroupResources(groupId, "skill", Array.from(selectedSkillIds))
+        // IDs 分流：v2SkillRows 中的 id 走新 resource_grants；其余走旧 mc_resource_grants。
+        const v2Ids = new Set(v2Skills.map((r) => r.id))
+        const selectedAll = Array.from(selectedSkillIds)
+        await Promise.all([
+          setGroupResources(groupId, "skill", selectedAll.filter((id) => !v2Ids.has(id))),
+          setGroupReferencesV2(groupId, selectedAll.filter((id) => v2Ids.has(id)), "skill"),
+        ])
         toast.success("分组可用的 Skills 已更新")
         await loadSkills(groupId)
       } catch (error) {
@@ -266,7 +314,17 @@ export function GroupPermissionDialog({
       const type: ResourceType = activeTab === "plugins" ? "plugin" : "project_prompt"
       const selected = activeTab === "plugins" ? selectedPluginIds : selectedPromptIds
       try {
-        await setGroupResources(groupId, type, Array.from(selected))
+        // 插件 tab 有 v2 引用来源需分流；提示词目前只有旧表来源。
+        const v2Ids = activeTab === "plugins" ? new Set(v2Plugins.map((r) => r.id)) : new Set<string>()
+        const selectedAll = Array.from(selected)
+        if (v2Ids.size > 0) {
+          await Promise.all([
+            setGroupResources(groupId, type, selectedAll.filter((id) => !v2Ids.has(id))),
+            setGroupReferencesV2(groupId, selectedAll.filter((id) => v2Ids.has(id)), type),
+          ])
+        } else {
+          await setGroupResources(groupId, type, selectedAll)
+        }
         toast.success(activeTab === "plugins" ? "分组可用的插件已更新" : "分组可用的项目提示词已更新")
         await loadReferenceResources(groupId, type)
       } catch (error) {
@@ -369,7 +427,7 @@ export function GroupPermissionDialog({
             <TabsContent value="skills" className="mt-3 min-h-0 flex-1 data-[state=inactive]:hidden">
               <SkillsPanel
                 loading={skillsLoading}
-                rows={skills}
+                rows={[...skills, ...v2SkillDisplay]}
                 selected={selectedSkillIds}
                 onToggle={(id, checked) =>
                   setSelectedSkillIds((prev) => toggleSet(prev, id, checked))
@@ -380,7 +438,7 @@ export function GroupPermissionDialog({
               <ReferencedResourcePanel
                 noun="插件"
                 loading={pluginsLoading}
-                rows={plugins}
+                rows={[...plugins, ...v2PluginDisplay]}
                 selected={selectedPluginIds}
                 onToggle={(id, checked) => setSelectedPluginIds((prev) => toggleSet(prev, id, checked))}
               />

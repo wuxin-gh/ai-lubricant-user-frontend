@@ -37,6 +37,10 @@ interface MessageType {
     status?: string
     title?: string
     toolCallId?: string
+    /** 该消息所用模型；只 assistant 帧带（runtime 从 SDK 的 message.model 取）。 */
+    model?: string
+    /** 该次 API 调用的 token 用量；只 assistant 帧带，用于在时间旁显示。 */
+    usage?: { input: number; output: number; cache_read: number; cache_creation: number; total: number }
 
     rawInput?: any
 
@@ -116,11 +120,25 @@ const MessageItem = ({ message, cli, isLatest = false }: { message: MessageType,
     return null
   }
 
+  // assistant 消息在时间旁边带上这次调用的模型与 token 用量——用户不必去
+  // 请求日志页面对账。用量缺失（旧帧/非 assistant）时只显示时间。
+  // 模型与用量常驻可见（用户要求对话消息标出所用模型）；时间戳仍只在悬停时
+  // 显出，避免每条消息都顶一行 10px 时间噪声。
+  const usage = message.data?.usage
+  const usageLabel = usage
+    ? `${message.data.model ? `${message.data.model} · ` : ""}${usage.total.toLocaleString()} tokens`
+    : message.data?.model || ""
+
   return (
     <div className="flex flex-col w-full group" data-message-id={message.id} data-message-type={message.type} data-message-role={message.role}>
-      {message.role !== 'system' && <div className="text-[10px] text-transparent group-hover:text-muted-foreground transition-colors px-1 text-left">
-        {dayjs.unix(normalizeTimestampToSeconds(message.time)).format('MM-DD HH:mm:ss')}
-      </div>}
+      {message.role !== 'system' && (
+        <div className="flex items-center gap-2 text-[10px] px-1 text-left">
+          <span className="text-transparent group-hover:text-muted-foreground transition-colors">
+            {dayjs.unix(normalizeTimestampToSeconds(message.time)).format('MM-DD HH:mm:ss')}
+          </span>
+          {usageLabel ? <span className="text-muted-foreground">{usageLabel}</span> : null}
+        </div>
+      )}
       <div className="flex text-sm w-full mr-auto justify-start">
         {renderMessage(message)}
       </div>
