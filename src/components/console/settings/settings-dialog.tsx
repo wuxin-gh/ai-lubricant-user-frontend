@@ -61,7 +61,9 @@ function SettingsContent({ section }: { section: SettingsSectionId }) {
     case "identities":
       return <Identities />
     case "nodes":
-      return <Nodes />
+      // 弹框内的分区需要标题与刷新入口；顶级页面（/console/nodes）自带页头，
+      // 不传 showHeader 即可避免双标题栏。
+      return <Nodes showHeader />
     default:
       return <Identities />
   }

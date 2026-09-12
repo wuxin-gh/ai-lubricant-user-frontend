@@ -12,13 +12,18 @@ import { AlertCircle, Copy } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "sonner"
 import { copyToClipboard } from "@/utils/clipboard"
 import {
+  cancelNodeXcodeInstallJob,
+  getNodeXcodeInstallJob,
   installNodeHostTool,
   listNodes,
+  startNodeXcodeInstall,
   type NodeInfo,
+  type XcodeInstallJobSnapshot,
 } from "@/@admin-port/api/nodes"
 import { nodeBelowFloor, npmBelowFloor, NODE_FLOOR_MAJOR } from "./types"
 
@@ -197,13 +202,40 @@ export function NodePrerequisiteGuide({
 }
 
 /**
- * Xcode 检测入口（仅 macOS 节点且未上报 xcodebuild_version 时渲染）。
+ * Xcode 自动安装入口（仅 macOS 节点且未上报 xcodebuild_version 时渲染）。
  *
- * Xcode 是 App Store 专供（约 7GB、Apple ID 登录、交互式许可），节点无法自动
- * 安装。这里下发检测型 InstallHostTool：节点探测到 xcodebuild 后，服务端将版本
- * 立即折进 capabilities，按钮成功返回后刷新本地节点快照，构建页无需等待重启。
+ * 2026-09 定稿：不再只检测——服务端解析 xcodereleases 目录选出 .xip 直链，
+ * 下发异步 HostToolJob（节点后台下载/解压/激活，动辄数十分钟），前端轮询
+ * 进度快照并支持取消。节点侧对「已满足目标版本」直接短路成功，已装未激活
+ * 的场景同样被这个按钮覆盖（替代旧的检测型 InstallHostTool 入口）。装完后
+ * 服务端把 xcodebuild_version 即时折进 capabilities，构建页无需等重启。
  */
-export function XcodeDetectButton({
+const XCODE_STAGE_LABELS: Record<string, string> = {
+  checking: "检查主机条件",
+  downloading: "下载 .xip 安装包",
+  verifying: "校验安装包",
+  extracting: "解压（xip，较慢）",
+  moving: "移动到应用程序目录",
+  activating: "激活工具链",
+  probing: "探测 xcodebuild 版本",
+  completed: "完成",
+}
+
+const XCODE_JOB_POLL_MS = 3000
+
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return ""
+  const units = ["B", "KB", "MB", "GB"]
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+export function XcodeInstallButton({
   node,
   onRefresh,
 }: {
@@ -211,42 +243,158 @@ export function XcodeDetectButton({
   onRefresh?: (node: NodeInfo) => void
 }) {
   const caps = node.capabilities || {}
-  const [detecting, setDetecting] = useState(false)
+  const nodeId = node.node_id || ""
+  const [starting, setStarting] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [jobId, setJobId] = useState("")
+  const [snapshot, setSnapshot] = useState<XcodeInstallJobSnapshot | null>(null)
+  const pollRef = useRef<number | null>(null)
+
+  useEffect(() => () => {
+    if (pollRef.current !== null) window.clearInterval(pollRef.current)
+  }, [])
+
+  const stopPolling = () => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  const refreshNodeAfterDone = (version: string) => {
+    void listNodes()
+      .then((list) => {
+        const fresh = list.find((n) => n.node_id === nodeId)
+        if (fresh) onRefresh?.(fresh)
+      })
+      .catch(() => {})
+    toast.success(version ? `Xcode 安装完成（${version}），构建能力标签已刷新` : "Xcode 安装完成")
+  }
+
+  const poll = (id: string) => {
+    stopPolling()
+    pollRef.current = window.setInterval(() => {
+      void getNodeXcodeInstallJob(nodeId, id)
+        .then((snap) => {
+          setSnapshot(snap)
+          if (snap.status === "completed") {
+            stopPolling()
+            refreshNodeAfterDone((snap.xcodebuild_version || "").trim())
+          } else if (snap.status === "failed") {
+            stopPolling()
+          }
+        })
+        .catch(() => {
+          // 单次轮询失败静默；节点短暂掉线时快照会在连接恢复后继续更新。
+        })
+    }, XCODE_JOB_POLL_MS)
+  }
+
+  const start = async () => {
+    if (!nodeId || starting) return
+    setStarting(true)
+    try {
+      const accepted = await startNodeXcodeInstall(nodeId)
+      setJobId(accepted.job_id)
+      setSnapshot(null)
+      toast.success(
+        `Xcode ${accepted.target_version} 安装任务已启动${
+          accepted.download_size_bytes ? `（约 ${formatBytes(accepted.download_size_bytes)}）` : ""
+        }`,
+      )
+      poll(accepted.job_id)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "启动 Xcode 安装失败")
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  const cancel = async () => {
+    if (!nodeId || !jobId || cancelling) return
+    setCancelling(true)
+    try {
+      await cancelNodeXcodeInstallJob(nodeId, jobId)
+      toast.info("已请求取消，节点会在当前阶段结束后停止")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "取消失败")
+    } finally {
+      setCancelling(false)
+    }
+  }
+
   if (String(caps.os || "").toLowerCase() !== "darwin") return null
   if ((caps.xcodebuild_version || "").trim()) return null
   if (!node.connected) {
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground" title="节点离线，无法远程检测">
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground" title="节点离线，无法远程安装">
         <AlertCircle className="size-3.5" />
         离线
       </span>
     )
   }
-  const detect = async () => {
-    if (!node.node_id || detecting) return
-    setDetecting(true)
-    try {
-      const result = await installNodeHostTool(node.node_id, "xcode")
-      if (result.xcodebuild_version?.trim()) {
-        const freshList = await listNodes()
-        const fresh = freshList.find((item) => item.node_id === node.node_id)
-        if (fresh) onRefresh?.(fresh)
-        toast.success(`已检测到完整 Xcode（${result.xcodebuild_version.trim()}），构建能力标签已刷新`)
-      } else {
-        // 旧版节点没有回报 xcodebuild_version 字段，只能重启后重新注册刷新标签。
-        toast.success("已检测到完整 Xcode；当前节点程序较旧，请重启节点进程以刷新构建能力标签")
-      }
-    } catch (err) {
-      // 节点 ack 的错误就是给用户看的原因（无法自动安装 + App Store 步骤），原样展示。
-      toast.error(err instanceof Error ? err.message : "Xcode 检测失败")
-    } finally {
-      setDetecting(false)
-    }
+
+  const running = snapshot !== null && snapshot.status === "running"
+  const failed = snapshot !== null && snapshot.status === "failed"
+
+  if (running || failed) {
+    const stageLabel = XCODE_STAGE_LABELS[snapshot.stage] || snapshot.stage
+    const bytesText =
+      snapshot.total_bytes > 0
+        ? `${formatBytes(snapshot.current_bytes)} / ${formatBytes(snapshot.total_bytes)}`
+        : ""
+    return (
+      <div className="flex w-full max-w-md flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          {failed ? (
+            <AlertCircle className="size-3.5 shrink-0 text-destructive" />
+          ) : (
+            <Spinner className="shrink-0" />
+          )}
+          <span className={`text-xs ${failed ? "text-destructive" : ""}`}>
+            {failed ? `安装失败（${stageLabel}）` : `${stageLabel}… ${snapshot.percent}%`}
+          </span>
+          {bytesText ? <span className="text-xs text-muted-foreground">{bytesText}</span> : null}
+        </div>
+        <Progress value={Math.min(Math.max(snapshot.percent, 0), 100)} />
+        {snapshot.message ? (
+          <div className="break-all text-xs text-muted-foreground">{snapshot.message}</div>
+        ) : null}
+        {failed && snapshot.log_tail ? (
+          // 节点回传的失败阶段 stderr（xip/磁盘/签名等真实原因），随 message 一起展示。
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-muted px-2 py-1.5 font-mono text-xs text-muted-foreground">
+            {snapshot.log_tail}
+          </pre>
+        ) : null}
+        {failed ? (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={starting} onClick={() => void start()}>
+              {starting ? <Spinner /> : null}
+              重试
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {snapshot.retryable ? "该错误可重试（如网络中断）" : "请根据错误信息处理后再重试"}
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={cancelling} onClick={() => void cancel()}>
+              {cancelling ? <Spinner /> : null}
+              取消
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              下载+解压可能数十分钟，可离开本页，任务在节点后台继续。
+            </span>
+          </div>
+        )}
+      </div>
+    )
   }
+
   return (
-    <Button size="sm" variant="outline" disabled={detecting} onClick={() => void detect()}>
-      {detecting ? <Spinner /> : null}
-      {detecting ? "检测中…" : "检测 Xcode"}
+    <Button size="sm" variant="outline" disabled={starting} onClick={() => void start()}>
+      {starting ? <Spinner /> : null}
+      {starting ? "启动中…" : "自动安装 Xcode"}
     </Button>
   )
 }

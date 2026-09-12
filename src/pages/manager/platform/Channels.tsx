@@ -98,7 +98,7 @@ import { UsageChart, type MetricType } from './UsageCharts'
 import { ChannelCatalogSelector } from './channel-catalog/ChannelCatalogSelector'
 import { ChannelIcon, isChannelIconConfigured } from './channel-catalog/ChannelIcon'
 import { FreezePolicyEditor, normalizeFreezeRuleInput } from './FreezePolicyEditor'
-import { ModelIdRewriteEditor, normalizeModelIdRewriteRules } from './ModelIdRewriteEditor'
+import { ModelIdRewriteEditor, expandModelIdRewriteRules, normalizeModelIdRewriteRules } from './ModelIdRewriteEditor'
 import { CodeChannelEditorTabs } from './CodeChannelEditorTabs'
 
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip } from 'recharts'
@@ -202,6 +202,8 @@ type ProviderTypeFilter = 'all' | 'generic' | 'custom' | 'builtin'
 type ProviderProtocolFilter = 'all' | 'openai' | 'anthropic' | 'responses' | 'gemini' | 'cloudflare' | 'other'
 const KNOWN_PROTOCOL_FILTERS = ['openai', 'anthropic', 'responses', 'gemini', 'cloudflare']
 type ProviderSortKey = 'updated' | 'id' | 'name' | 'accounts' | 'models'
+// 「定时更新模型」开关筛选：on = 只看开启自动更新的渠道，off = 只看关闭的。
+type ProviderAutoUpdateFilter = 'all' | 'on' | 'off'
 
 const PROVIDER_SORT_OPTIONS: { value: ProviderSortKey; label: string }[] = [
   { value: 'updated', label: '更新时间' },
@@ -386,6 +388,7 @@ function buildModelRow(model?: ProviderModelEntry): ProviderModelEntry {
     model_id: safeString(model?.model_id || model?.upstream_model_id || model?.id || model?.name),
     name: model?.name,
     extra_config: parseJsonObject(stringifyJson(model?.extra_config ?? {}), {}),
+    enabled: model?.enabled !== false,
   }
 }
 
@@ -426,6 +429,7 @@ function compactProviderModelRow(row: ProviderModelEntry): ProviderModelEntry {
     upstream_model_id: safeString(row.upstream_model_id).trim(),
     model_id: safeString(row.model_id).trim() || safeString(row.upstream_model_id).trim(),
     extra_config: parseJsonObject(stringifyJson(row.extra_config ?? {}), {}),
+    enabled: row.enabled !== false,
   }
 }
 
@@ -1017,6 +1021,7 @@ function ProviderModelTable({
   onDeleteRow,
   onEditRow,
   onDetectModel,
+  onToggleEnabled,
 }: {
   entries: ModelTableEntry[]
   emptyText: string
@@ -1026,8 +1031,10 @@ function ProviderModelTable({
   onDeleteRow?: (row: ProviderModelEntry, index: number) => void | Promise<void>
   onEditRow?: (row: ProviderModelEntry, index: number) => void | Promise<void>
   onDetectModel?: (row: ProviderModelEntry) => void | Promise<void>
+  /** 行级启用开关列（模型列表草稿态用）。不传不渲染该列（上游导入视图）。 */
+  onToggleEnabled?: (row: ProviderModelEntry, index: number) => void
 }) {
-  const colSpan = selectable ? 4 : 3
+  const colSpan = 3 + (selectable ? 1 : 0) + (onToggleEnabled ? 1 : 0)
 
   return (
     <div style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', border: '1px solid var(--admin-border)', borderRadius: 'var(--admin-radius)', background: 'var(--bg2)' }}>
@@ -1037,6 +1044,7 @@ function ProviderModelTable({
             {selectable && <th style={{ padding: '4px 8px', textAlign: 'left', width: 36 }} />}
             <th style={{ padding: '4px 8px', textAlign: 'left', whiteSpace: 'nowrap' }}>上游模型</th>
             <th style={{ padding: '4px 8px', textAlign: 'left', whiteSpace: 'nowrap' }}>模型 ID</th>
+            {onToggleEnabled && <th style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>启用</th>}
             <th style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>操作</th>
           </tr>
         </thead>
@@ -1045,8 +1053,9 @@ function ProviderModelTable({
             <tr><td colSpan={colSpan} style={{ padding: '20px', textAlign: 'center', color: 'var(--text2)' }}>{emptyText}</td></tr>
           ) : entries.map(({ row, index }) => {
             const rowKey = modelDraftKey(row, index)
+            const rowEnabled = row.enabled !== false
             return (
-              <tr key={`${rowKey}-${index}`} style={{ borderBottom: '1px solid var(--admin-border)' }}>
+              <tr key={`${rowKey}-${index}`} style={{ borderBottom: '1px solid var(--admin-border)', opacity: rowEnabled ? undefined : 0.55 }}>
                 {selectable && (
                   <td style={{ padding: '2px 4px', textAlign: 'center' }}>
                     <input type="checkbox" checked={!!selected?.has(rowKey)} onChange={(e) => onToggleSelected?.(rowKey, e.target.checked)} />
@@ -1056,6 +1065,17 @@ function ProviderModelTable({
                 <td style={{ padding: '6px 8px', fontSize: '13px', color: safeString(row.model_id) === safeString(row.upstream_model_id) ? 'var(--text2)' : 'var(--text)', fontFamily: 'var(--fontM)' }}>
                   {safeString(row._display_model_id) || safeString(row.model_id) || safeString(row.upstream_model_id) || '—'}
                 </td>
+                {onToggleEnabled && (
+                  <td style={{ padding: '2px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                    {/* 行级开关：停用 = 模型保留在表但不路由（保存后生效），整行降透明度提示。 */}
+                    <span
+                      role="button"
+                      title={rowEnabled ? '已启用：参与请求路由与对外模型列表' : '已停用：不参与路由与对外模型列表，行保留可随时重开'}
+                      onClick={() => onToggleEnabled(row, index)}
+                      style={{ ...btnBase, padding: '3px 12px', background: rowEnabled ? 'var(--green)' : 'var(--bg3)', borderColor: rowEnabled ? 'var(--green)' : 'var(--admin-border)', color: rowEnabled ? '#fff' : 'var(--text2)', height: 26, fontSize: 12 }}
+                    >{rowEnabled ? '开' : '关'}</span>
+                  </td>
+                )}
                 <td style={{ padding: '4px 8px', textAlign: 'center', whiteSpace: 'nowrap' }}>
                   <button onClick={() => void onEditRow?.(row, index)} style={{ ...btnPrimary, padding: '4px 10px', marginRight: '4px' }}>编辑</button>
                   {onDetectModel && safeString(row.upstream_model_id).trim() && (
@@ -1518,10 +1538,13 @@ function AccountsTab({
   providerId,
   builtinType,
   active,
+  onEditingChange,
 }: {
   providerId: string
   builtinType: string
   active: boolean
+  /** 上报「新增账号 / 编辑账号」表单态：父弹框据此在关闭 / 切 Tab 前确认丢弃未保存表单。 */
+  onEditingChange?: (editing: boolean) => void
 }) {
   const [accounts, setAccounts] = useState<ProviderAccount[]>([])
   const [proxies, setProxies] = useState<ProxyEntry[]>([])
@@ -1603,6 +1626,15 @@ function AccountsTab({
     }
     // 切到其他 tab 时不清空账号数据，避免来回切换时反复拉接口
   }, [active, loadAccounts])
+
+  // 上报编辑态给父弹框：进入/退出表单、以及组件卸载（切 Tab/关弹框）都要同步，
+  // 否则父层会拿着已卸载表单的 editing=true 永久拦截后续操作。
+  useEffect(() => {
+    onEditingChange?.(isEditing)
+    return () => onEditingChange?.(false)
+    // onEditingChange 由父层 useCallback 固定引用，不随 render 抖动
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEditing, onEditingChange])
 
   // 加载内置渠道的文档链接（仅部分渠道有，如 Cloudflare）
   useEffect(() => {
@@ -3836,6 +3868,11 @@ export function UnifiedProviderModal({
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  // 账号管理 Tab 有未提交的「新增账号 / 编辑账号」表单时的丢弃确认：
+  // 关弹框（× / 遮罩 / 取消）与切 Tab 都会卸载 AccountsTab，表单内容会静默丢失。
+  const [discardAccountEditOpen, setDiscardAccountEditOpen] = useState(false)
+  const accountEditInProgressRef = useRef(false)
+  const pendingDiscardActionRef = useRef<(() => void) | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [saveNotice, setSaveNotice] = useState<string | null>(null)
 
@@ -4764,6 +4801,33 @@ export function UnifiedProviderModal({
     setDeleteConfirmOpen(true)
   }
 
+  // AccountsTab 的编辑态上报回调：只写 ref 不写 state，避免每次进出表单都重渲染整个弹框。
+  const handleAccountEditingChange = useCallback((editing: boolean) => {
+    accountEditInProgressRef.current = editing
+  }, [])
+
+  // 编辑中的账号表单存在时，拦截「会丢弃表单」的动作（关弹框 / 切 Tab），先弹确认。
+  const guardAccountEditDiscard = (action: () => void) => {
+    if (accountEditInProgressRef.current) {
+      pendingDiscardActionRef.current = action
+      setDiscardAccountEditOpen(true)
+      return
+    }
+    action()
+  }
+
+  const confirmDiscardAccountEdit = () => {
+    const action = pendingDiscardActionRef.current
+    pendingDiscardActionRef.current = null
+    setDiscardAccountEditOpen(false)
+    action?.()
+  }
+
+  const cancelDiscardAccountEdit = () => {
+    pendingDiscardActionRef.current = null
+    setDiscardAccountEditOpen(false)
+  }
+
   const confirmDeleteProvider = async () => {
     if (!resolvedId) return
     setDeleting(true)
@@ -4936,15 +5000,21 @@ export function UnifiedProviderModal({
   //   开 → 只显示 is_regex=true 的行，model_id 列显示替换后的 regex_model_id。
   //   关 → 显示全部行，model_id 列显示上游原始 raw_model_id。
   // 纯显示切换：不改 model_id、不改勾选、不重新拉取——草稿数据始终在内存里。
-  // 没配规则（或规则没命中任何行）时 hasRegexHit=false，开关开也不过滤，避免清空列表。
-  const hasRegexHit = upstreamDraftModels.some((row) => row.is_regex === true)
+  // 没配规则时开关开了也不过滤（自动更新本来就不滤）；配了规则但一行没命中时
+  // 照样滤成空列表——那就是自动更新后的真实结果，不再回退成「显示全部」把
+  // 「规则不生效」糊弄过去。判定与后端 has_model_id_rewrite_rules 同源（展开后
+  // 任一条启用即算配了规则，含「只搜索」规则）。
+  const hasRewriteRules = expandModelIdRewriteRules(
+    detail?.model_id_rewrite_rules ?? [],
+    modelRuleTemplates,
+  ).some((rule) => rule.enabled)
   const displayModelId = (row: ProviderModelEntry) =>
     previewApplyRewrite
       ? (safeString(row.regex_model_id).trim() || safeString(row.model_id).trim())
       : (safeString(row.raw_model_id).trim() || safeString(row.model_id).trim())
   const upstreamVisibleEntries = upstreamDraftModels
     .map((row, index) => ({ row: { ...row, _display_model_id: displayModelId(row) }, index }))
-    .filter(({ row }) => !(previewApplyRewrite && hasRegexHit && row.is_regex !== true))
+    .filter(({ row }) => !(previewApplyRewrite && hasRewriteRules && row.is_regex !== true))
     .filter(({ row }) => modelMatchesSearch(row, upstreamSearch))
   const upstreamVisibleKeys = upstreamVisibleEntries.map(({ row, index }) => modelDraftKey(row, index))
   const upstreamVisibleSelectedCount = upstreamVisibleKeys.filter((key) => upstreamSelected.has(key)).length
@@ -5003,7 +5073,7 @@ export function UnifiedProviderModal({
           <ExternalLink style={{ ...btnIcon, margin: 0 }} />
         </button>
       ) : undefined}
-      onClose={onClose}
+      onClose={() => guardAccountEditDiscard(onClose)}
       maxWidth={1180}
       fixedHeight="88vh"
       contentOverflow="hidden"
@@ -5047,7 +5117,7 @@ export function UnifiedProviderModal({
             )}
             <div style={{ display: 'flex', gap: '10px' }}>
               <button onClick={() => { void loadData() }} disabled={loading || saving} style={btnGhost}><RefreshCw style={btnIcon} />{loading ? '刷新中...' : '刷新'}</button>
-              <button onClick={onClose} disabled={saving} style={btnGhost}><X style={btnIcon} />取消</button>
+              <button onClick={() => guardAccountEditDiscard(onClose)} disabled={saving} style={btnGhost}><X style={btnIcon} />取消</button>
               <button onClick={() => void handleSave()} disabled={saving || loading} style={btnPrimary}><Check style={btnIcon} />{saving ? '保存中...' : '保存'}</button>
             </div>
           </div>
@@ -5069,7 +5139,11 @@ export function UnifiedProviderModal({
             {tabs.map((tab) => (
               <button
                 key={tab.key}
-                onClick={() => { setActiveTab(tab.key); setSaveNotice(null); setError(null) }}
+                onClick={() => {
+                  if (tab.key === activeTab) return
+                  // 账号编辑态下切 Tab 会卸载表单，与关弹框同路：先确认丢弃。
+                  guardAccountEditDiscard(() => { setActiveTab(tab.key); setSaveNotice(null); setError(null) })
+                }}
                 style={{
                   ...btnGhost,
                   height: '32px',
@@ -5805,7 +5879,7 @@ export function UnifiedProviderModal({
                   </div>
                   <ProviderModelTable
                     entries={upstreamVisibleEntries}
-                    emptyText="没有匹配的上游模型"
+                    emptyText={previewApplyRewrite && hasRewriteRules ? '没有命中规则的上游模型——自动更新后这些都不会进库' : '没有匹配的上游模型'}
                     selectable
                     selected={upstreamSelected}
                     onToggleSelected={(key, checked) => setUpstreamSelected((prev) => {
@@ -5838,11 +5912,24 @@ export function UnifiedProviderModal({
                       <input type="checkbox" checked={!!detail.auto_update_models} onChange={(e) => setDetail((prev) => prev ? { ...prev, auto_update_models: e.target.checked } : prev)} />
                       定时更新
                     </label>
-                    <span style={{ fontSize: '13px', color: 'var(--text2)' }}>共 {models.length} 个模型</span>
+                    {/* 行级启用开关在表格内：停用行不参与路由，但行保留在表，保存后生效。 */}
+                    {(() => {
+                      const disabledCount = models.filter((row) => row.enabled === false).length
+                      const enabledCount = models.length - disabledCount
+                      return (
+                        <span style={{ fontSize: '13px', color: 'var(--text2)' }}>
+                          共 {models.length} 个模型{disabledCount > 0 ? `，启用 ${enabledCount} / 停用 ${disabledCount}` : ''}
+                        </span>
+                      )
+                    })()}
                   </div>
                   <ProviderModelTable
                     entries={models.map((row, index) => ({ row, index }))}
                     emptyText="暂无模型，请新增或从上游获取"
+                    onToggleEnabled={(_, index) => {
+                      // 草稿态翻转：enabled === false 即停用；随弹框「保存」一起提交。
+                      setModels((prev) => prev.map((item, i) => i === index ? { ...item, enabled: item.enabled === false } : item))
+                    }}
                     onEditRow={(row, index) => setEditingModel({ row, index, isNew: false })}
                     onDetectModel={handleDetectRealModel}
                     onDeleteRow={async (model, index) => {
@@ -5934,7 +6021,7 @@ export function UnifiedProviderModal({
               // 渠道已落库（编辑态 / 创建态点过保存后）→ 用完整账号管理组件；
               // 创建态尚未落库 → 用创建态账号编辑器，先填好用户名/凭据，点保存时随渠道一起提交（见 buildCreateAccountsPayload）。
               resolvedId
-                ? <AccountsTab providerId={resolvedId} builtinType={detail.builtin_type || ''} active={open && activeTab === 'accounts'} />
+                ? <AccountsTab providerId={resolvedId} builtinType={detail.builtin_type || ''} active={open && activeTab === 'accounts'} onEditingChange={handleAccountEditingChange} />
                 : (
                   <CreateAccountsEditor
                     accounts={createAccounts}
@@ -6131,6 +6218,25 @@ export function UnifiedProviderModal({
         />
       </Modal>
       </div>
+
+      {/* 账号编辑未保存时的丢弃确认：关闭弹框 / 切换 Tab 前拦截。 */}
+      <AlertDialog open={discardAccountEditOpen} onOpenChange={(open) => { if (!open) cancelDiscardAccountEdit() }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>账号正在添加或编辑，是否丢弃这个操作？</AlertDialogTitle>
+            <AlertDialogDescription>关闭后当前填写的账号表单内容将丢失，且不会保存。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={cancelDiscardAccountEdit}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={(e) => { e.preventDefault(); confirmDiscardAccountEdit() }}
+            >
+              丢弃
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Modal>
   )
 }
@@ -6539,6 +6645,7 @@ export function Channels() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'frozen' | 'authenticated' | 'unauthenticated' | 'expired'>('all')
   const [typeFilter, setTypeFilter] = useState<ProviderTypeFilter>('all')
   const [protocolFilter, setProtocolFilter] = useState<ProviderProtocolFilter>('all')
+  const [autoUpdateFilter, setAutoUpdateFilter] = useState<ProviderAutoUpdateFilter>('all')
   const [sortBy, setSortBy] = useState<ProviderSortKey>('updated')
   const [modelFilter, setModelFilter] = useState('')
   const [selectedTags, setSelectedTags] = useState<ProviderTagFilterValue[]>([])
@@ -6597,6 +6704,7 @@ export function Channels() {
     setStatusFilter('all')
     setTypeFilter('all')
     setProtocolFilter('all')
+    setAutoUpdateFilter('all')
     setSelectedTags([])
   }, [searchParams])
 
@@ -6782,6 +6890,13 @@ export function Channels() {
     return protocol === filter
   }
 
+  const matchesAutoUpdateFilter = (p: ProviderSummary, filter: ProviderAutoUpdateFilter) => {
+    if (filter === 'all') return true
+    // 缺省视为开启：与运行时口径一致（refresh_models 对未配置的渠道默认自动更新）。
+    const autoUpdate = p.auto_update_models !== false
+    return filter === 'on' ? autoUpdate : !autoUpdate
+  }
+
   const availableTags = useMemo(() => {
     const tags = providers.flatMap((provider) => normalizeProviderTags(provider.tags))
     return Array.from(new Set(tags)).sort((a, b) => a.localeCompare(b, 'zh-CN'))
@@ -6806,6 +6921,7 @@ export function Channels() {
     result = result.filter((p) => matchesStatusFilter(p, statusFilter))
     result = result.filter((p) => matchesTypeFilter(p, typeFilter))
     result = result.filter((p) => matchesProtocolFilter(p, protocolFilter))
+    result = result.filter((p) => matchesAutoUpdateFilter(p, autoUpdateFilter))
 
     if (selectedTags.length > 0) {
       result = result.filter((provider) => {
@@ -6836,7 +6952,7 @@ export function Channels() {
       }
     })
     return sorted
-  }, [providers, search, modelFilter, selectedTags, statusFilter, typeFilter, protocolFilter, sortBy])
+  }, [providers, search, modelFilter, selectedTags, statusFilter, typeFilter, protocolFilter, autoUpdateFilter, sortBy])
 
   const summary = useMemo(() => {
     const totalProviders = providers.length
@@ -6859,7 +6975,7 @@ export function Channels() {
   }, [providers])
 
   const activeProviderQuery = searchParams.get('provider')?.trim() || ''
-  const hasActiveFilter = search || modelFilter || selectedTags.length > 0 || statusFilter !== 'all' || typeFilter !== 'all' || protocolFilter !== 'all' || providerParam
+  const hasActiveFilter = search || modelFilter || selectedTags.length > 0 || statusFilter !== 'all' || typeFilter !== 'all' || protocolFilter !== 'all' || autoUpdateFilter !== 'all' || providerParam
 
   return (
     <AdminPage
@@ -6922,7 +7038,7 @@ export function Channels() {
                 }, { replace: true })
               }}
               placeholder="搜索名称 / 备注 / 渠道地址 / 协议"
-              style={{ ...inputStyle, width: '360px', minWidth: '320px' }}
+              style={{ ...inputStyle, width: '240px', minWidth: '200px' }}
             />
             <input
               type="text"
@@ -6969,6 +7085,16 @@ export function Channels() {
               <option value="other">其他协议</option>
             </select>
             <select
+              value={autoUpdateFilter}
+              onChange={(e) => setAutoUpdateFilter(e.target.value as ProviderAutoUpdateFilter)}
+              style={{ ...selectStyle, width: '136px', minWidth: '136px' }}
+              title="按「定时更新模型」开关过滤渠道"
+            >
+              <option value="all">自动更新：全部</option>
+              <option value="on">自动更新：开</option>
+              <option value="off">自动更新：关</option>
+            </select>
+            <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as ProviderSortKey)}
               style={{ ...selectStyle, width: '190px', minWidth: '190px' }}
@@ -6992,6 +7118,7 @@ export function Channels() {
                   setStatusFilter('all')
                   setTypeFilter('all')
                   setProtocolFilter('all')
+                  setAutoUpdateFilter('all')
                   setSortBy('updated')
                   if (providerParam) setSearchParams((current) => {
                     const next = new URLSearchParams(current)

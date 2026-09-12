@@ -51,11 +51,11 @@ import { toast } from "sonner"
 
 export type EditMode = "mcp-remote" | "mcp-stdio" | "plugin" | "skill" | "prompt"
 
-/** 分类单选选项（对齐后端 resource_type；unknown=仅浏览）。 */
+/** 分类单选选项（对齐后端 resource_type；unknown=仅浏览）。skills 已归入 plugin
+ * 容器（技能集本质是多技能的插件包），存量 skills 行编辑时由类型归一映射到 plugin。 */
 const TYPE_OPTIONS = [
-  { value: "skills", label: "技能集" },
+  { value: "plugin", label: "插件（含技能集）" },
   { value: "skill", label: "Skill" },
-  { value: "plugin", label: "插件" },
   { value: "mcp", label: "MCP" },
   { value: "prompt", label: "提示词" },
   { value: "", label: "仅浏览" },
@@ -113,11 +113,12 @@ function SyncButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-/** 榜单草稿保存时回传的收口 patch（由 LeaderboardItemsView 转成 updateLeaderboardItem）。
- *  不含 status——发布是独立的推送动作（列表页「发布」按钮入队），编辑只落表。 */
+/** 榜单草稿保存时回传的收口 patch（由 LeaderboardItemsView 转成 updateLeaderboardItem）。 */
 export type LeaderboardCurationPatch = {
   target_modules: string[]
   installable: boolean
+  /** 直改状态（draft|published|hidden）——与列表页发布队列/撤回并存的捷径。 */
+  status?: string
   install_spec?: Record<string, unknown>
   launch_spec?: Record<string, unknown>
   sort_order?: number | null
@@ -185,7 +186,8 @@ export function MarketplaceEditDialog({
   const [skillEntries, setSkillEntries] = useState<SkillEntry[]>([])
   // plugin 安装参数（install_spec.plugin）。download_url 不是表单字段：由
   // repo_full_name + ref 派生（GitHub archive zip），保存时现算、只读展示。
-  const [pluginProvider, setPluginProvider] = useState("claude")
+  // 适用客户端=多选（同一插件包可装多个客户端）；provider 存首选值兼容旧读侧。
+  const [pluginEditors, setPluginEditors] = useState<string[]>(["claude"])
   // prompt 安装参数（install_spec.prompt）
   const [promptContent, setPromptContent] = useState("")
   const [promptProviders, setPromptProviders] = useState<string[]>(["claude", "codex", "opencode", "cursor", "gemini"])
@@ -205,15 +207,21 @@ export function MarketplaceEditDialog({
         const skill = normalizeSkillInstallSpec(install)
         if (skill.entries.length > 0) setSkillEntries(skill.entries)
         if (skill.ref) setSkillRef(skill.ref)
-        const plugin = install.plugin || {}
-        if (plugin.provider) setPluginProvider(String(plugin.provider))
+        const plugin = (install.plugin || {}) as Record<string, unknown>
+        {
+          const rawEditors = Array.isArray(plugin.editors) ? plugin.editors.map(String).filter(Boolean) : []
+          const provider = String(plugin.provider || "")
+          const eds = rawEditors.length > 0 ? rawEditors : (provider ? [provider] : ["claude"])
+          setPluginEditors(eds)
+        }
         const prompt = install.prompt || {}
         if (prompt.content !== undefined) setPromptContent(String(prompt.content))
         if (Array.isArray(prompt.providers) && prompt.providers.length) setPromptProviders(prompt.providers as string[])
         const spec = (updated.launch_spec || {}) as Record<string, any>
         if (spec.kind) { setMcpKind(String(spec.kind)); setMcpCommand(String(spec.command || "")); setMcpUrl(String(spec.url || "")); setMcpTransport(String(spec.transport || "sse")) }
         const newType = normalizeModules(updated.target_modules, updated.target_module)[0] || ""
-        if (newType) setSelectedType(newType)
+        // 存量 skills → plugin 容器归一（reprobe 已在服务端归一，这里兜底）。
+        setSelectedType(newType === "skills" ? "plugin" : newType)
         toast.success("已按所选类型重新识别")
       }
     } catch (e) {
@@ -240,10 +248,11 @@ export function MarketplaceEditDialog({
       setTags(toStringArray(it.tags))
       const initialModules = normalizeModules(it.target_modules, it.target_module)
       // 存量/旧后端可能没有 target_modules，按 external_data 的榜单类型自动推导默认值；
-      // 注意：只填表单默认值，仍要保存才落库。
-      setSelectedType((initialModules.length > 0
+      // 注意：只填表单默认值，仍要保存才落库。存量 skills 行归一成 plugin（容器）。
+      const rawType = (initialModules.length > 0
         ? initialModules
-        : deriveModulesFromExternal(it.external_data, it.board, it.upstream_category))[0] || "")
+        : deriveModulesFromExternal(it.external_data, it.board, it.upstream_category))[0] || ""
+      setSelectedType(rawType === "skills" ? "plugin" : rawType)
       setStatus(it.status || "draft")
       setMcpKind(String(spec.kind || "none"))
       setMcpCommand(String(spec.command || ""))
@@ -253,8 +262,12 @@ export function MarketplaceEditDialog({
       const skill = normalizeSkillInstallSpec(install)
       setSkillRef(skill.ref || "main")
       setSkillEntries(skill.entries.length > 0 ? skill.entries : [{ name: "", path: "", entry: "SKILL.md", editors: ["claude"] }])
-      const plugin = install.plugin || {}
-      setPluginProvider(String(plugin.provider || "claude"))
+      const plugin = (install.plugin || {}) as Record<string, unknown>
+      {
+        const rawEditors = Array.isArray(plugin.editors) ? plugin.editors.map(String).filter(Boolean) : []
+        const provider = String(plugin.provider || "")
+        setPluginEditors(rawEditors.length > 0 ? rawEditors : (provider ? [provider] : ["claude"]))
+      }
       const prompt = install.prompt || {}
       setPromptContent(String(prompt.content || ""))
       setPromptProviders(Array.isArray(prompt.providers) && prompt.providers.length ? prompt.providers : ["claude", "codex", "opencode", "cursor", "gemini"])
@@ -368,13 +381,22 @@ export function MarketplaceEditDialog({
     if (selectedType === "skill" || selectedType === "skills") {
       const cleanEntries = skillEntries
         .filter((e) => e.entry.trim())
-        .map((e) => ({ name: e.name.trim(), path: e.path.trim(), entry: e.entry.trim(), editors: e.editors }))
+        .map((e) => ({ name: e.name.trim(), path: e.path.trim(), entry: e.entry.trim(), editors: e.editors, description: e.description ?? "" }))
       install.skill = { install_method: "github_clone", ref: skillRef.trim() || "main", entries: cleanEntries }
     }
     if (selectedType === "plugin") {
+      // plugin 容器：download_url + entries（带 entries = 多技能插件，原技能集）。
+      // 服务端 _resource_data_for_item 在 plugin 类型 + skill.entries 在场时按容器存。
+      const cleanEntries = skillEntries
+        .filter((e) => e.entry.trim())
+        .map((e) => ({ name: e.name.trim(), path: e.path.trim(), entry: e.entry.trim(), editors: e.editors, description: e.description ?? "" }))
       install.plugin = {
         download_url: `https://github.com/${leaderboardItem.repo_full_name}/archive/refs/heads/${skillRef.trim() || "main"}.zip`,
-        provider: pluginProvider.trim(),
+        provider: pluginEditors[0] || "claude",
+        editors: pluginEditors,
+      }
+      if (cleanEntries.length > 0) {
+        install.skill = { install_method: "github_clone", ref: skillRef.trim() || "main", entries: cleanEntries }
       }
     }
     if (selectedType === "prompt") {
@@ -394,6 +416,7 @@ export function MarketplaceEditDialog({
       await onLeaderboardSave({
         target_modules: selectedType ? [selectedType] : [],
         installable: !!selectedType,
+        status,
         sort_order: sortValue,
         name: name.trim(),
         display_name: displayName.trim(),
@@ -405,8 +428,8 @@ export function MarketplaceEditDialog({
         ...(spec ? { launch_spec: spec } : {}),
         ...(Object.keys(install).length > 0 ? { install_spec: install } : {}),
       })
-      // 发布不在这里：点「发布」走推送队列，编辑保存只落表。可安装条目勾分类的
-      // 校验由推送 worker 门禁把关，失败原因在发布队列面板可见。
+      // 列表页的「发布」按钮走推送队列（异步 GitHub 镜像）；这里的 status 直改仅翻
+      // 库状态——两条路并存，队列路径依旧是正式发布口径。
       toast.success("已保存（发布请用列表页的「发布」按钮）")
       onOpenChange(false)
       return true
@@ -563,25 +586,18 @@ export function MarketplaceEditDialog({
           <Field label="标签" action={syncAction("tags")} hint="搜索自由词（llm / agent / rag）；榜单默认取 GitHub topics">
             <LeaderboardTagInput value={tags} onChange={setTags} placeholder="输入标签，按 Enter 添加" />
           </Field>
-          {/* 状态选择器只属于市场变体（manifest.status，发布队列按它镜像 GitHub）。
-              榜单变体的状态是推送动作的产物：编辑不碰，点「发布」走推送队列翻状态。 */}
-          {!isLeaderboard ? (
-            <Field label="状态" hint="已发布=用户侧可见；草稿=仅管理端；隐藏=下架保留">
-              <Select value={status} onValueChange={setStatus}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="draft">草稿</SelectItem>
-                  <SelectItem value="published">已发布</SelectItem>
-                  <SelectItem value="hidden">隐藏</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-          ) : (
-            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              当前状态：{leaderboardItem!.status === "published" ? "已发布" : leaderboardItem!.status === "hidden" ? "隐藏" : "草稿"}
-              ——发布/撤回请用列表页的「发布」「撤回」按钮（推送队列异步生效）。
-            </div>
-          )}
+          {/* 状态：两个变体同一选择器。市场=manifest.status（发布队列镜像 GitHub）；
+              榜单=直改库状态（与列表页发布/撤回等效，不走推送队列）。 */}
+          <Field label="状态" hint="已发布=用户侧可见；草稿=仅管理端；隐藏=下架保留。榜单也可在此直接改，与列表页「发布/撤回」按钮效果相同（发布不进 GitHub 推送队列，仅翻状态）">
+            <Select value={status} onValueChange={setStatus}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="draft">草稿</SelectItem>
+                <SelectItem value="published">已发布</SelectItem>
+                <SelectItem value="hidden">隐藏</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
 
           <Separator />
 
@@ -717,8 +733,8 @@ export function MarketplaceEditDialog({
             </>
           )}
 
-          {/* ── Skill / 技能集 安装配置 ── */}
-          {(isLeaderboard ? selectedType === "skill" || selectedType === "skills" : marketType === "skill") && (
+          {/* ── Skill / 插件容器（entries） 安装配置 ── */}
+          {(isLeaderboard ? selectedType === "skill" || selectedType === "skills" || selectedType === "plugin" : marketType === "skill") && (
             <>
               <Separator />
               <div className="space-y-4">
@@ -737,7 +753,7 @@ export function MarketplaceEditDialog({
                     onChange={(e) => (isLeaderboard ? setSkillRef(e.target.value) : setForm({ ...form, resource: { ...form.resource, ref: e.target.value } }))} />
                 </Field>
                 {isLeaderboard ? (
-                  <Field label={selectedType === "skills" ? "技能列表（技能集）" : "可安装条目"} hint="一个仓库可产出多个 skill（技能包）；「适用客户端」按编辑器形态认：SKILL.md=claude、.cursor/rules/*.mdc=cursor、AGENTS.md=codex+opencode">
+                  <Field label={selectedType === "plugin" ? "技能列表（插件容器）" : "可安装条目"} hint="一个仓库可产出多个 skill（技能包）；「适用客户端」按编辑器形态认：SKILL.md=claude、.cursor/rules/*.mdc=cursor、AGENTS.md=codex+opencode。插件容器（含 ≥2 技能）按 entries 展开装，同时也带整包 zip。">
                     <div className="space-y-2">
                       {skillEntries.map((entry, idx) => (
                         <div key={idx} className="grid grid-cols-1 gap-2 rounded-md border p-2 sm:grid-cols-12">
@@ -772,6 +788,12 @@ export function MarketplaceEditDialog({
                               ))}
                             </div>
                           </div>
+                          <div className="sm:col-span-12">
+                            <div className="mb-1 text-[11px] text-muted-foreground">说明</div>
+                            <Input value={entry.description ?? ""}
+                              onChange={(e) => setSkillEntries((prev) => prev.map((p, i) => i === idx ? { ...p, description: e.target.value } : p))}
+                              placeholder="识别自 SKILL.md frontmatter；可改写" />
+                          </div>
                         </div>
                       ))}
                       <Button size="sm" variant="outline"
@@ -805,22 +827,19 @@ export function MarketplaceEditDialog({
                     readOnly
                     className="font-mono text-xs text-muted-foreground" />
                 </Field>
-                <Field label="适用客户端" hint="插件的宿主编辑器（install_spec.plugin.provider）">
+                <Field label="适用客户端" hint="插件的宿主编辑器；同一插件包可装多个客户端（多选）">
                   {isLeaderboard ? (
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-3">
                       {["claude", "codex", "opencode", "cursor", "gemini"].map((provider) => (
-                        <button
-                          key={provider}
-                          type="button"
-                          onClick={() => setPluginProvider(provider)}
-                          className={`rounded-md border px-3 py-1.5 text-sm transition-colors ${
-                            pluginProvider === provider
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border bg-background hover:bg-muted"
-                          }`}
-                        >
+                        <label key={provider} className="flex items-center gap-1.5 text-xs">
+                          <input type="checkbox" checked={pluginEditors.includes(provider)}
+                            onChange={(e) => setPluginEditors((prev) => {
+                              const has = prev.includes(provider)
+                              if (e.target.checked) return has ? prev : [...prev, provider]
+                              return prev.filter((x) => x !== provider)
+                            })} />
                           {EDITOR_LABELS[provider] || provider}
-                        </button>
+                        </label>
                       ))}
                     </div>
                   ) : (

@@ -61,13 +61,24 @@ export function NodeUpgradeDialog({
     const os = node.capabilities?.os
     const arch = node.capabilities?.arch
     const role = (node.role || "").trim()
-    const wantedNodeRole = role === "management" ? "management" : "execution"
+    // 与服务端 node_release_catalog.select_upgrade_assets 同口径：ios_host 只认
+    // node-ios 资产（role=ios_host）且不跑 JS runtime（通用 runtime 包跳过）。
+    // 此前 ios_host 落进 else → execution，升级预览错拿 node-execution 资产，
+    // 或（该平台只有 node-ios 时）显示「节点程序：该版本未提供」。
+    const wantedNodeRole = role === "ios_host" ? "ios_host" : role === "management" ? "management" : "execution"
     let runtimeAsset: NodeReleaseAsset | null = null
     let nodeAsset: NodeReleaseAsset | null = null
     for (const asset of release.assets) {
-      if (asset.platform !== os || asset.arch !== arch) continue
-      if (asset.role === "runtime") runtimeAsset = asset
-      else if (asset.role === wantedNodeRole) nodeAsset = asset
+      if (asset.role === wantedNodeRole && asset.platform === os && asset.arch === arch) {
+        nodeAsset = asset
+        continue
+      }
+      // 通用 runtime 包 platform/arch 恒为 any；ios_host 不跑 JS runtime，永不预览。
+      if (asset.role === "runtime" && role !== "ios_host") {
+        if ((asset.platform === "any" && asset.arch === "any") || (asset.platform === os && asset.arch === arch)) {
+          runtimeAsset = asset
+        }
+      }
     }
     return { runtimeAsset, nodeAsset }
   }, [release, node])

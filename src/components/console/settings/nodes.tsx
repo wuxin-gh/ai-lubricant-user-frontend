@@ -1,9 +1,19 @@
-import { useMemo, useState } from "react"
-import { Copy, Plus, RefreshCw, Server, Terminal as TerminalIcon } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { Copy, Plus, RefreshCw, Server, Terminal as TerminalIcon, Trash2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { copyToClipboard } from "@/utils/clipboard"
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,6 +25,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -25,11 +36,25 @@ import {
 } from "@/components/nodes/node-view"
 import { NodeTreeTable, NODE_LIST_COLUMNS } from "@/components/nodes/node-tree-table"
 import { NodeTerminalDialog } from "@/components/nodes/node-terminal-dialog"
+import { UserNodeRuntime } from "@/components/nodes/user-node-runtime"
 import { useCommonData } from "@/components/console/data-provider"
 import { EnvironmentPanel } from "@/components/console/environment/environment-panel"
 import { SystemEnvPanel } from "@/components/console/environment/system-env-panel"
+import { NodeTunnels } from "@/pages/manager/platform/nodes/node-tunnels"
 import { nodeAvailability, nodeEditorOccupancyLabel, type NodeInfo } from "@/api/nodes"
-import { approveGroupNode, createGroupExecutionNode, type CreateGroupExecutionNodeResult } from "@/api/reviewClient"
+import {
+  approveGroupNode,
+  createGroupExecutionNode,
+  deleteUserNode,
+  getLatestUserNodeRelease,
+  getUserNodeDetail,
+  listTeamProxies,
+  type CreateGroupExecutionNodeResult,
+  type TeamProxyEntry,
+  type UserNodeDetailNode,
+  type UserNodeLatestRelease,
+  type UserNodeUpgradeStatus,
+} from "@/api/reviewClient"
 import {
   formatBytes,
   machineFactRows,
@@ -44,9 +69,10 @@ import {
 // 子行 + 末尾「未受管」组），数据来自 GET /api/v1/teams/my-nodes——只含自己所属分组
 // 被授权的节点，以及为了画出归属关系而附带的父管理节点（display_only）。
 //
-// 使用侧能力与管理端一致：详情、终端（终端内含文件浏览器与 AI 助手）。治理侧不给：
-// 入驻 / 审批 / 移动分组 / 设为不可用 / 删除只在管理端，这里连按钮都不注入。服务端
-// 同样按 GroupNode 授权把关，不依赖前端隐藏。
+// 使用侧能力：详情、终端（终端内含文件浏览器与 AI 助手）、执行节点的删除与
+// 运行时管理（详情「运行时」tab：节点程序/Runtime 统一升级、编辑器安装/升级、
+// 升级代理绑定）。治理侧仍不给：入驻/审批管理节点/移动分组/设为不可用只在管理端。
+// 服务端按 GroupNode 授权 + 「仅执行节点」硬闸把关，不依赖前端隐藏。
 //
 // 列表直接展示：节点 / 系统 / CPU / 内存 / 节点客户端版本 / 编辑器 / 状态，
 // 用户无需打开详情即可核对接口返回的机器字段。
@@ -112,16 +138,21 @@ function NodeStatus({ node }: { node: NodeInfo }) {
   )
 }
 
-export default function Nodes() {
+export default function Nodes({ showHeader = false }: { showHeader?: boolean }) {
   const { t } = useTranslation()
   const { nodes, loadingNodes, nodesInited, reloadNodes } = useCommonData()
   const [detailNode, setDetailNode] = useState<NodeInfo | null>(null)
   const [terminalNode, setTerminalNode] = useState<NodeInfo | null>(null)
   const [createManager, setCreateManager] = useState<NodeInfo | null>(null)
   const [createNodeName, setCreateNodeName] = useState("")
+  const [createProxyId, setCreateProxyId] = useState("")
+  const [teamProxies, setTeamProxies] = useState<TeamProxyEntry[]>([])
   const [actionNodeId, setActionNodeId] = useState<string | null>(null)
   // 不可管理管理节点添加的执行节点无法自动拉起：需要展示手动安装凭证（一键命令）。
   const [manualInstall, setManualInstall] = useState<CreateGroupExecutionNodeResult | null>(null)
+  // 删除二次确认的目标执行节点（管理节点不提供删除）。
+  const [deleteTarget, setDeleteTarget] = useState<NodeInfo | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   // 待审批节点必须留在用户侧列表：有管理节点权限的成员可以在此完成审批。
   const visibleNodes = useMemo(
@@ -158,9 +189,11 @@ export default function Nodes() {
       const result = await createGroupExecutionNode(createManager.group_id, {
         startup_method: createManager.startup_method || "docker",
         node_name: createNodeName.trim() || undefined,
+        proxy_config_id: createProxyId || undefined,
       })
       setCreateManager(null)
       setCreateNodeName("")
+      setCreateProxyId("")
       if (result.launched) {
         toast.success(t("consoleSettings.nodes.executionCreated", "执行节点已由管理节点自动拉起"))
       } else {
@@ -175,6 +208,34 @@ export default function Nodes() {
       setActionNodeId(null)
     }
   }
+
+  // 删除执行节点，与管理端同口径：pending（从未上线）→ 撤销入驻；其余 → 硬删除。
+  // 管理节点不给删除入口（renderActions 只对执行节点渲染按钮，服务端另有硬闸）。
+  const deleteExecutionNode = async (node: NodeInfo) => {
+    if (deleting) return
+    setDeleting(true)
+    setActionNodeId(node.node_id)
+    try {
+      await deleteUserNode(node.node_id)
+      toast.success(t("consoleSettings.nodes.deleted", "已删除节点"))
+      setDeleteTarget(null)
+      await reloadNodes()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("consoleSettings.nodes.deleteFailed", "删除失败"))
+    } finally {
+      setDeleting(false)
+      setActionNodeId(null)
+    }
+  }
+
+  // 添加执行节点弹框打开时拉取代理池精简列表（只 id+name+mode）。
+  useEffect(() => {
+    if (!createManager) return
+    if (teamProxies.length > 0) return
+    void listTeamProxies()
+      .then((list) => setTeamProxies(list || []))
+      .catch(() => setTeamProxies([]))
+  }, [createManager, teamProxies.length])
 
   /** 用户侧有管理节点权限时开放创建/审批；仅归属展示的父行不开放操作。
    * 不可管理（passive）的管理节点也允许添加执行节点：它仍能归拢/挂载执行节点，
@@ -214,30 +275,44 @@ export default function Nodes() {
             {t("consoleSettings.nodes.terminal", "终端")}
           </Button>
         ) : null}
+        {!manager ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-destructive"
+            disabled={actionNodeId === node.node_id}
+            onClick={() => setDeleteTarget(node)}
+          >
+            {actionNodeId === node.node_id && deleteTarget?.node_id === node.node_id ? <Spinner /> : <Trash2 />}
+            {t("consoleSettings.nodes.delete", "删除")}
+          </Button>
+        ) : null}
       </>
     )
   }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <div className="flex flex-col gap-0.5">
-          <h2 className="flex items-center gap-2 text-base font-semibold">
-            <Server className="size-4" />
-            {t("consoleSettings.nodes.title", "节点")}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {t(
-              "consoleSettings.nodes.description",
-              "你所属分组被授权的节点。管理节点归拢执行节点，创建任务时选择一个空闲执行节点运行。",
-            )}
-          </p>
+      {showHeader ? (
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-0.5">
+            <h2 className="flex items-center gap-2 text-base font-semibold">
+              <Server className="size-4" />
+              {t("consoleSettings.nodes.title", "节点")}
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              {t(
+                "consoleSettings.nodes.description",
+                "你所属分组被授权的节点。管理节点归拢执行节点，创建任务时选择一个空闲执行节点运行。",
+              )}
+            </p>
+          </div>
+          <Button variant="outline" size="sm" disabled={loadingNodes} onClick={() => void reloadNodes().catch((error) => toast.error(error instanceof Error ? error.message : "刷新节点失败"))}>
+            <RefreshCw className={loadingNodes ? "animate-spin" : undefined} />
+            {t("consoleSettings.nodes.refresh", "刷新")}
+          </Button>
         </div>
-        <Button variant="outline" size="sm" disabled={loadingNodes} onClick={() => void reloadNodes().catch((error) => toast.error(error instanceof Error ? error.message : "刷新节点失败"))}>
-          <RefreshCw className={loadingNodes ? "animate-spin" : undefined} />
-          {t("consoleSettings.nodes.refresh", "刷新")}
-        </Button>
-      </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-auto rounded-md border">
         <NodeTreeTable
@@ -256,7 +331,51 @@ export default function Nodes() {
         node={detailNode}
         nodes={nodes}
         onClose={() => setDetailNode(null)}
+        onChanged={() => void reloadNodes()}
       />
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("consoleSettings.nodes.deleteConfirmTitle", "删除执行节点？")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                "consoleSettings.nodes.deleteConfirmDesc",
+                "将删除节点记录并解除全部分组授权，不可恢复。节点上正在运行的任务会话会中断：",
+              )}
+              {deleteTarget ? (
+                <span className="ml-1 font-medium text-foreground">
+                  {deleteTarget.node_name || deleteTarget.node_id}
+                </span>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>
+              {t("common.cancel", "取消")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleting}
+              onClick={(event) => {
+                // 阻止默认关闭：删除完成后再由 handler 关闭，失败保留弹框。
+                event.preventDefault()
+                if (deleteTarget) void deleteExecutionNode(deleteTarget)
+              }}
+            >
+              {deleting ? <Spinner /> : null}
+              {t("consoleSettings.nodes.deleteConfirm", "删除")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog
         open={createManager !== null}
@@ -286,8 +405,22 @@ export default function Nodes() {
               disabled={actionNodeId !== null}
             />
           </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>{t("consoleSettings.nodes.downloadProxy", "下载代理")}</Label>
+            <Select value={createProxyId} onValueChange={setCreateProxyId} disabled={actionNodeId !== null || teamProxies.length === 0}>
+              <SelectTrigger><SelectValue placeholder={teamProxies.length === 0 ? "直连（无可选代理）" : "直连（不使用代理）"} /></SelectTrigger>
+              <SelectContent>
+                {teamProxies.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>{p.name || p.id}（{p.mode}）</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {t("consoleSettings.nodes.proxyHint", "节点从 GitHub 下载运行程序时使用的代理；与节点绑定，可随后在节点详情修改。")}
+            </p>
+          </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setCreateManager(null); setCreateNodeName("") }} disabled={actionNodeId !== null}>
+            <Button variant="outline" onClick={() => { setCreateManager(null); setCreateNodeName(""); setCreateProxyId("") }} disabled={actionNodeId !== null}>
               {t("common.cancel", "取消")}
             </Button>
             <Button onClick={() => void createExecutionNode()} disabled={actionNodeId !== null}>
@@ -361,13 +494,55 @@ function NodeDetailDialog({
   node,
   nodes,
   onClose,
+  onChanged,
 }: {
   open: boolean
   node: NodeInfo | null
   nodes: NodeInfo[]
   onClose: () => void
+  /** 运行时 tab 的升级/装编辑器成功后触发，父层据此刷新节点列表。 */
+  onChanged?: () => void
 }) {
   const { t } = useTranslation()
+  // 运行时 tab 的数据源：detail 接口给单节点最新快照 + 服务端版本判定（节点程序/
+  // runtime 两条线），latestRelease 给升级弹窗预览将下发的资产。升级/装编辑器后
+  // onChanged 会触发父层 reloadNodes，弹框重开时数据自更新。
+  const [runtimeDetail, setRuntimeDetail] = useState<{
+    node: UserNodeDetailNode
+    upgrade: UserNodeUpgradeStatus
+  } | null>(null)
+  const [latestRelease, setLatestRelease] = useState<UserNodeLatestRelease | null>(null)
+
+  const canManageRuntime = Boolean(
+    node && !node.display_only && !isContainer(node) && !isManagement(node),
+  )
+
+  useEffect(() => {
+    if (!open || !node || !canManageRuntime) {
+      setRuntimeDetail(null)
+      setLatestRelease(null)
+      return
+    }
+    let cancelled = false
+    void Promise.all([getUserNodeDetail(node.node_id), getLatestUserNodeRelease()])
+      .then(([detail, release]) => {
+        if (!cancelled) {
+          setRuntimeDetail(detail)
+          setLatestRelease(release)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRuntimeDetail(null)
+          setLatestRelease(null)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+    // onChanged 变化 = 刚发生过一次运行时操作 → 重拉版本判定。
+  }, [open, node?.node_id, canManageRuntime, onChanged])
+
   if (!node) return null
 
   const container = isContainer(node)
@@ -529,7 +704,7 @@ function NodeDetailDialog({
             </table>
           </div>
           <p className="text-xs text-muted-foreground">
-            {t("consoleSettings.nodes.detail.readonlyHint", "这里只展示节点上报的信息；安装和升级由管理员操作。")}
+            {t("consoleSettings.nodes.detail.readonlyHint", "这里展示节点上报的版本；安装与升级在「运行时」tab 操作。")}
           </p>
         </div>
       ) : null}
@@ -549,6 +724,7 @@ function NodeDetailDialog({
             <TabsList className="shrink-0">
               <TabsTrigger value="overview">{t("consoleSettings.nodes.detail.overview", "概览")}</TabsTrigger>
               <TabsTrigger value="executions">{t("consoleSettings.nodes.detail.executionNodes", "执行节点")}</TabsTrigger>
+              <TabsTrigger value="tunnels">{t("consoleSettings.nodes.detail.tunnels", "穿透")}</TabsTrigger>
             </TabsList>
             <TabsContent value="overview" className="min-h-0 flex-1 overflow-y-auto pt-4">{overview}</TabsContent>
             <TabsContent value="executions" className="min-h-0 flex-1 overflow-y-auto pt-4">
@@ -575,15 +751,38 @@ function NodeDetailDialog({
                 </p>
               )}
             </TabsContent>
+            <TabsContent value="tunnels" className="min-h-0 flex-1 overflow-y-auto pt-4">
+              <NodeTunnels nodeId={node.node_id} />
+            </TabsContent>
           </Tabs>
         ) : (
           <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
             <TabsList className="shrink-0">
               <TabsTrigger value="overview">{t("consoleSettings.nodes.detail.overview", "概览")}</TabsTrigger>
+              {canManageRuntime ? (
+                <TabsTrigger value="runtime">{t("consoleSettings.nodes.detail.runtime", "运行时")}</TabsTrigger>
+              ) : null}
               <TabsTrigger value="environments">{t("consoleSettings.nodes.detail.environments", "环境")}</TabsTrigger>
               <TabsTrigger value="system-env">{t("consoleSettings.nodes.detail.systemEnv", "系统内置环境")}</TabsTrigger>
+              <TabsTrigger value="tunnels">{t("consoleSettings.nodes.detail.tunnels", "穿透")}</TabsTrigger>
             </TabsList>
             <TabsContent value="overview" className="min-h-0 flex-1 overflow-y-auto pt-4">{overview}</TabsContent>
+            {canManageRuntime ? (
+              <TabsContent value="runtime" className="min-h-0 flex-1 overflow-y-auto pt-4">
+                {runtimeDetail ? (
+                  <UserNodeRuntime
+                    node={runtimeDetail.node}
+                    upgrade={runtimeDetail.upgrade}
+                    release={latestRelease}
+                    onChanged={onChanged}
+                  />
+                ) : (
+                  <div className="flex justify-center py-8">
+                    <Spinner />
+                  </div>
+                )}
+              </TabsContent>
+            ) : null}
             <TabsContent value="environments" className="min-h-0 flex-1 overflow-y-auto pt-4">
               <EnvironmentPanel nodeId={node.node_id} />
             </TabsContent>
@@ -591,6 +790,9 @@ function NodeDetailDialog({
                 是两回事，故并列而非合并：一个按 env_id 管，一个按节点管。 */}
             <TabsContent value="system-env" className="min-h-0 flex-1 overflow-y-auto pt-4">
               <SystemEnvPanel nodeId={node.node_id} />
+            </TabsContent>
+            <TabsContent value="tunnels" className="min-h-0 flex-1 overflow-y-auto pt-4">
+              <NodeTunnels nodeId={node.node_id} />
             </TabsContent>
           </Tabs>
         )}

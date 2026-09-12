@@ -41,8 +41,6 @@ function missingApprovalEnvironment(node: NodeInfo): string[] {
   if (node.is_passive || node.role === "management") return []
   const caps = node.capabilities || {}
   const missing: string[] = []
-  // Node.js/npm 低于下限也按缺失拦截：旧版（如 macOS 自带 Node 10）连编辑器 CLI 的
-  // postinstall 都跑不起来，必须先升级（环境 Tab 的 InstallHostTool = 装 LTS 即升级）。
   if (nodeBelowFloor(caps)) {
     missing.push(`Node.js（需 ≥ v${NODE_FLOOR_MAJOR}）`)
   }
@@ -50,7 +48,13 @@ function missingApprovalEnvironment(node: NodeInfo): string[] {
     missing.push(`npm（需 ≥ v${NPM_FLOOR_MAJOR}）`)
   }
   if (!(caps.runtime_version || "").trim()) missing.push("agent-compose runtime")
-  if (!(caps.providers || "").trim()) missing.push("至少一个编辑器客户端")
+  // 编辑器「是否已装」真相源是 capabilities.editors 数组（节点注册探测）；
+  // 回退 providers 逗号串、再回退 editor_version_*。任一信号非空即视为已装，
+  // 不能只读 providers——某些节点漏报 providers 串导致装了仍被判未装。
+  const rawEditors = (caps as Record<string, unknown>).editors
+  const hasEditor = Array.isArray(rawEditors) && rawEditors.length > 0
+  const hasProviders = Boolean((caps.providers || "").trim())
+  if (!hasEditor && !hasProviders) missing.push("至少一个编辑器客户端")
   return missing
 }
 

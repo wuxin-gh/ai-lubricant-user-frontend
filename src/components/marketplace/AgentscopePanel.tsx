@@ -16,16 +16,28 @@ import { Spinner } from "@/components/ui/spinner"
 import { getMarketplaceSourceConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
 import { syncAgentscope, fetchAgentscopeLastSync, type SourceSyncStatus } from "@/api/marketplaceAdmin"
 import { INTERVAL_OPTIONS, fmtSyncAt } from "./leaderboard-labels"
+import { SyncOverwriteDialog } from "./SyncOverwriteDialog"
+import { useSourceSyncPoll } from "./useSourceSyncPoll"
 import { toast } from "sonner"
 
 export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
   const [config, setConfig] = useState<Awaited<ReturnType<typeof getMarketplaceSourceConfig>> | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [syncing, setSyncing] = useState(false)
-  const [last, setLast] = useState<SourceSyncStatus | null>(null)
+  // 同步状态由 useSourceSyncPoll 统一管理：running 认后端 _progress.running 真值
+  // （刷新后/load 时发现后端在跑也认），按钮禁用、进度条、轮询都由它驱动。
+  const { last, setLast, syncing, setSyncing, running } = useSourceSyncPoll<SourceSyncStatus>(
+    () => fetchAgentscopeLastSync(),
+    (st) => !!st?.progress?.running,
+    (st) => {
+      if (st.ok === false) toast.error("同步失败", { description: st.detail })
+      else if (st.ok === true) { toast.success(st.detail || "同步完成"); onSaved?.() }
+    },
+  )
   // 打开面板默认展开执行日志（重启后靠 DB 记录也能直接看到最近一次）
   const [showLogs, setShowLogs] = useState(true)
+  // 「立即同步」弹框：覆盖策略勾选（与 Agent-Leaderboard 同一套语义）
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false)
   const [enabled, setEnabled] = useState(false)
   const [interval, setInterval] = useState(24)
 
@@ -50,34 +62,25 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
 
   useEffect(() => { void load() }, [load])
 
-  const handleSync = async () => {
+  const handleSync = async (opts: { overwriteDraft: boolean; overwritePublished: boolean }) => {
     setSyncing(true)
     setShowLogs(true)
+    setSyncDialogOpen(false)
     try {
       // 后端异步执行：POST 立即返回 {started: true}，不等同步完成
-      const res = await syncAgentscope()
+      const res = await syncAgentscope(
+        opts.overwritePublished || opts.overwriteDraft
+          ? { overwrite_published: opts.overwritePublished, overwrite_draft: opts.overwriteDraft }
+          : undefined,
+      )
       if (!res.started) {
         toast.error(res.detail || "启动同步失败")
+        setSyncing(false)
         return
       }
-      // 轮询 last-sync 端点拿实时进度+日志
-      const poll = window.setInterval(async () => {
-        try {
-          const st = await fetchAgentscopeLastSync()
-          setLast(st)
-          // 同步完成（progress.running 变 false 且有 ran_at）
-          if (!st.progress?.running && st.ran_at) {
-            window.clearInterval(poll)
-            setSyncing(false)
-            if (st.ok === false) {
-              toast.error("同步失败", { description: st.detail })
-            } else if (st.ok === true) {
-              toast.success(st.detail || "同步完成")
-              onSaved?.()
-            }
-          }
-        } catch { /* 轮询失败静默，继续 */ }
-      }, 2000)
+      // 后端已起任务，_progress.running 马上变 true，轮询 hook 接管实时进度。
+      // 立即拉一次，避免等 2s 才显示进度（也覆盖 create_task 还没置 running 的空窗）。
+      try { setLast(await fetchAgentscopeLastSync()) } catch { /* 静默，hook 继续轮询 */ }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "同步失败")
       setSyncing(false)
@@ -124,8 +127,8 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
                   上次 {fmtSyncAt(config.agentscope_last_sync_at)}（历史记录）
                 </span>
               ) : <span className="text-muted-foreground">尚未同步</span>}
-              {/* 同步中：实时进度条 */}
-              {syncing && last?.progress?.running ? (
+              {/* 同步中：实时进度条（认后端 running 真值，刷新后仍在跑也显示） */}
+              {last?.progress?.running ? (
                 <span className="inline-flex items-center gap-2 text-xs">
                   <span className="font-medium text-foreground">
                     {last.progress.phase === "fetch_list" ? "拉取列表…"
@@ -143,9 +146,9 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
                 </span>
               ) : null}
             </div>
-            <Button size="sm" variant="outline" disabled={syncing} onClick={() => void handleSync()}>
-              <RefreshCw className={`mr-1 h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-              {syncing ? "同步中..." : "立即同步"}
+            <Button size="sm" variant="outline" disabled={syncing || running} onClick={() => setSyncDialogOpen(true)}>
+              <RefreshCw className={`mr-1 h-4 w-4 ${syncing || running ? "animate-spin" : ""}`} />
+              {syncing || running ? "同步中..." : "立即同步"}
             </Button>
           </div>
           {/* 执行日志：折叠面板 */}
@@ -158,7 +161,7 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
               >
                 {showLogs ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                 执行日志（{last.logs.length} 条）
-                {syncing ? <Spinner className="ml-auto size-3" /> : null}
+                {(syncing || running) ? <Spinner className="ml-auto size-3" /> : null}
               </button>
               {showLogs ? (
                 <div className="max-h-64 overflow-y-auto border-t bg-muted/10 px-3 py-2 font-mono text-[11px] leading-5">
@@ -194,6 +197,15 @@ export function AgentscopePanel({ onSaved }: { onSaved?: () => void }) {
           </div>
         </CardContent>
       </Card>
+
+      {/* 「立即同步」弹框：覆盖策略勾选（所有内容源共用同一套语义），默认不勾=不覆盖。 */}
+      <SyncOverwriteDialog
+        open={syncDialogOpen}
+        onOpenChange={setSyncDialogOpen}
+        onConfirm={(opts) => void handleSync(opts)}
+        busy={syncing}
+        title="立即同步 agentscope"
+      />
     </div>
   )
 }

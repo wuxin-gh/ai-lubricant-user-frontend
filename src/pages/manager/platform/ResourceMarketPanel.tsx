@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import type { LucideIcon } from "lucide-react"
+import { Star } from "lucide-react"
 import { ManagerRefreshButton } from "@/components/manager/manager-header-actions"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -47,6 +48,8 @@ import {
   LeaderboardMarketCard,
   filterLeaderboardItems,
   useLeaderboardMarket,
+  MarketPager,
+  MARKET_PAGE_SIZE,
 } from "@/components/marketplace/LeaderboardMarketCards"
 import type { LeaderboardDiscoverItem } from "@/api/marketplaceRaw"
 import { toast } from "sonner"
@@ -56,6 +59,50 @@ import { GithubRecognizeImporter, type GithubConfirmPayload } from "@/components
 import type { GithubRecognizeResult } from "@/api/githubRecognition"
 
 type View = "local" | "market"
+
+/** v2 引用 source_type → 来源标签（统一资源池池行来源口径）。 */
+const REFERENCE_SOURCE_LABELS: Record<string, string> = {
+  leaderboard_sync: "榜单",
+  github_recognize: "GitHub",
+  manual: "手动",
+  personal_upload: "上传",
+  market_mirror: "市场镜像",
+}
+
+/** 从 source_url（github 归档/仓库地址）提取 owner/repo 段；取不到回退 host。 */
+function repoOwnerFromUrl(url: string | null | undefined): string {
+  if (!url) return ""
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split("/").filter(Boolean)
+    if (parts.length >= 2) return `${parts[0]}/${parts[1].replace(/\.git$/, "")}`
+    return u.host
+  } catch {
+    return url.replace(/^https?:\/\/(www\.)?github\.com\//i, "").replace(/\.zip.*$/, "")
+  }
+}
+
+/** 已下载 skill/plugin 卡的来源行：GitHub owner/repo 或「上传」。 */
+function deriveLocalSource(item: { source_type?: unknown; source_url?: unknown }): { label: string; tooltip: string } | null {
+  const st = item.source_type as string | null | undefined
+  if (!st) return null
+  const url = item.source_url as string | null | undefined
+  if (st === "github") {
+    const owner = repoOwnerFromUrl(url)
+    return { label: owner ? `GitHub · ${owner}` : "GitHub", tooltip: url || "" }
+  }
+  if (st === "upload") return { label: "本地上传", tooltip: "" }
+  if (st === "npm") return { label: `npm${url ? " · " + url : ""}`, tooltip: url || "" }
+  return { label: st, tooltip: url || "" }
+}
+
+/** 格式化时间戳（ISO → 本地简短显示）。 */
+function fmtTime(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString()
+}
 
 /**
  * Skill / 插件 市场 + 本地资源的共用面板。两者数据与服务端引用链路完全同构，
@@ -123,6 +170,8 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   const [detail, setDetail] = useState<MarketManifest | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [onlyReferenced, setOnlyReferenced] = useState(false)
+  // 已下载 + 引用同网格展示，按标签筛选（全部 / 已下载 / 引用）。
+  const [localFilter, setLocalFilter] = useState<"all" | "downloaded" | "referenced">("all")
   const [references, setReferences] = useState<ResourceReference[]>([])
   // 新表引用（统一资源池）：GitHub 识别走 from-github-v2 落 resources + references。
   const [v2Refs, setV2Refs] = useState<ResourceReferenceV2[]>([])
@@ -145,6 +194,14 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   const [parseStep, setParseStep] = useState<"input" | "confirm">("input")
   const [parsing, setParsing] = useState(false)
   const [parsedMeta, setParsedMeta] = useState<ParsedResource | null>(null)
+  // 查看详情弹框：已下载（LocalItem）或引用（ResourceReferenceV2）。
+  const [viewDetail, setViewDetail] = useState<
+    | { kind: "local"; item: LocalItem }
+    | { kind: "reference"; reference: ResourceReferenceV2 }
+    | null
+  >(null)
+  // 翻页：本地视图（已下载+引用合并网格）与市场视图各自翻页，筛选变化回第 1 页。
+  const [page, setPage] = useState(1)
   // undefined=探测中，false=服务端未配 [marketplace]，true=可用
   const marketEnabled = useMarketplaceEnabled()
   // 外部榜单条目：与 index.json 市场项混在同一网格，只有这些有 star/fork 热度。
@@ -265,6 +322,10 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   // 资源中心直接展示：集合带 skill 列表 + 重新识别刷新 entries。
   const ownedReferences = useMemo(() => v2Refs, [v2Refs])
 
+  // 合并视图：已下载与引用同一个网格，卡片右上角打「已下载 / 引用」标签，
+  // 顶部筛选（localFilter）控制显隐——不再拆两个区块。
+  const refsShown = view === "local" && localFilter !== "downloaded" ? ownedReferences : []
+
   const current: Array<MarketItem | LocalItem> = view === "local" ? localItems : marketItems
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -297,6 +358,29 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
     if (onlyReferenced || mirrorFilter !== "all") return []
     return filterLeaderboardItems(boardItems, query)
   }, [view, onlyReferenced, mirrorFilter, boardItems, query])
+
+  // ── 翻页（已下载+引用合并网格 / 市场项+榜单合并网格）─────────────────────
+  // 「已下载」子集受 localFilter 控制（localFilter=referenced 时隐藏已下载卡）。
+  const localsShown = view === "local" && localFilter !== "referenced" ? filtered : []
+  // 本地视图合并展示总数（分页用）：已下载 + 引用。
+  const localTotal = localsShown.length + refsShown.length
+  const localTotalPages = Math.max(1, Math.ceil(localTotal / MARKET_PAGE_SIZE))
+  const localPage = Math.min(page, localTotalPages)
+  const localStart = (localPage - 1) * MARKET_PAGE_SIZE
+  // 已下载在前、引用在后，slice 切两段。
+  const localsPage = localsShown.slice(localStart, localStart + MARKET_PAGE_SIZE)
+  const refsPage = refsShown.slice(Math.max(0, localStart - localsShown.length), Math.max(0, localStart - localsShown.length) + MARKET_PAGE_SIZE)
+
+  // 市场视图总数 = 市场项 + 榜单条目；翻页切两段。
+  const marketTotal = view === "market" ? filtered.length + boardFiltered.length : 0
+  const marketTotalPages = Math.max(1, Math.ceil(marketTotal / MARKET_PAGE_SIZE))
+  const marketPage = Math.min(page, marketTotalPages)
+  const marketStart = (marketPage - 1) * MARKET_PAGE_SIZE
+  const marketFilteredPage = filtered.slice(marketStart, marketStart + MARKET_PAGE_SIZE)
+  const boardFilteredPage = boardFiltered.slice(Math.max(0, marketStart - filtered.length), Math.max(0, marketStart - filtered.length) + MARKET_PAGE_SIZE)
+
+  // 筛选/视图/搜索变化时回第 1 页。
+  useEffect(() => { setPage(1) }, [view, localFilter, query, onlyReferenced, mirrorFilter])
 
   /**
    * 安装榜单条目：把它当作一次「URL 导入」走本地导入链路（下载归档 → 解析 → 落库）。
@@ -555,6 +639,8 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
   // 引用；安装=钉 commit 的集合引用（服务端镜像存档后续补）。子技能挑选在任务期做。
   // 引用模式走 v2（先落池 resources 再建引用）；安装模式维持本地入库链路不变。
   const onGithubConfirm = async (result: GithubRecognizeResult, payload: GithubConfirmPayload) => {
+    // skills（技能集）已归 plugin 容器：引用/安装语义不变（服务端 kind=skills
+    // 归一成 plugin 容器，entries 完整保留）。
     if (payload.mode === "reference" || payload.type === "skills") {
       // v2 引用：服务端重探 → resources upsert（按 repo 去重）→ resource_references FK。
       const pinned = payload.mode === "install" || payload.pinCommit
@@ -644,7 +730,7 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
       <div className="flex flex-wrap items-center gap-3">
         {!forcedView && <Tabs value={view} onValueChange={(value) => setView(value as View)}>
           <TabsList>
-            <TabsTrigger value="local">本地可用（{localItems.length}）</TabsTrigger>
+            <TabsTrigger value="local">已下载（{localItems.length}）</TabsTrigger>
             <TabsTrigger value="market">市场（{marketItems.length}）</TabsTrigger>
           </TabsList>
         </Tabs>}
@@ -655,9 +741,23 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
           className="max-w-sm"
         />
         <div className="ml-auto flex items-center gap-3">
-          {view === "local" && localCrud && (
-            <Button size="sm" onClick={openLocalCreate}>导入{noun}</Button>
-          )}
+          {view === "local" ? (
+            <>
+              <ToggleGroup
+                type="single"
+                value={localFilter}
+                onValueChange={(v) => v && setLocalFilter(v as "all" | "downloaded" | "referenced")}
+                size="sm"
+              >
+                <ToggleGroupItem value="all" aria-label="全部">全部</ToggleGroupItem>
+                <ToggleGroupItem value="downloaded" aria-label="已下载">已下载</ToggleGroupItem>
+                <ToggleGroupItem value="referenced" aria-label="引用">引用</ToggleGroupItem>
+              </ToggleGroup>
+              {localCrud && (
+                <Button size="sm" onClick={openLocalCreate}>导入{noun}</Button>
+              )}
+            </>
+          ) : null}
           {view === "market" && !userMode ? (
             <>
               <ToggleGroup
@@ -695,23 +795,26 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
           <div>市场未启用</div>
           <div className="text-xs text-muted-foreground">在服务端 env.ini 的 [marketplace] 配置 GitHub 仓库后即可使用</div>
         </Empty>
-      ) : filtered.length === 0 && boardFiltered.length === 0 ? (
+      ) : localTotal === 0 && marketTotal === 0 ? (
         <Empty>
           {view === "local"
-            ? `暂无本地${noun}`
+            ? `暂无已下载或引用的${noun}`
             : onlyReferenced
               ? `暂无已引用的${noun}`
               : `市场暂无${noun}`}
         </Empty>
       ) : (
+        <>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((item) => {
+          {(view === "local" ? localsPage : marketFilteredPage).map((item) => {
             const market = item as MarketItem
             const isMarket = view === "market"
             const reference = isMarket ? referenceByMarket.get(market.id) : undefined
             const exists = !!reference
             const mirror = isMarket ? mirrorByMarket.get(market.id) : undefined
             const mirrored = !!mirror && mirror.status === "ready"
+            // 已下载卡的来源（skill/plugin 列表新带出来源；旧数据无则缺省）。
+            const localSource = !isMarket ? deriveLocalSource(item as { source_type?: unknown; source_url?: unknown }) : null
             return (
               <Card key={item.id} size="sm" className="shadow-none">
                 <CardContent className="flex h-full flex-col p-4">
@@ -722,10 +825,8 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{market.display_name || item.name || item.id}</span>
-                        {isMarket ? (
-                          <Badge variant="outline" className="text-[10px]">
-                            GitHub
-                          </Badge>
+                        {!isMarket ? (
+                          <Badge variant="outline" className="ml-auto shrink-0 text-[10px]">已下载</Badge>
                         ) : null}
                         {exists ? (
                           <Badge variant="secondary" className="text-[10px]">
@@ -747,6 +848,10 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                           {market.latest_version ? `v${market.latest_version}` : ""}
                           {market.publisher ? ` · ${market.publisher}` : ""}
                         </span>
+                      ) : localSource ? (
+                        <span className="truncate text-[11px] text-muted-foreground" title={localSource.tooltip}>
+                          {localSource.label}
+                        </span>
                       ) : null}
                     </div>
                   </div>
@@ -754,10 +859,15 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                     {market.summary || (item as LocalItem).description || "暂无描述"}
                   </p>
                   <div className="mt-auto flex flex-wrap gap-2">
+                    {!isMarket ? (
+                      <Button size="sm" variant="outline" onClick={() => setViewDetail({ kind: "local", item: item as LocalItem })}>
+                        查看详情
+                      </Button>
+                    ) : null}
                     {isMarket ? (
                       <>
                         <Button size="sm" variant="outline" onClick={() => void openDetail(market)}>
-                          查看与下载
+                          查看详情
                         </Button>
                         {!userMode && (
                           <Button
@@ -789,15 +899,13 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
                         <Button size="sm" variant="outline" onClick={() => openLocalEdit(item as LocalItem)}>编辑</Button>
                         <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void removeLocal(item as LocalItem)}>删除</Button>
                       </>
-                    ) : (
-                      <Badge variant="outline">本地资源</Badge>
-                    )}
+                    ) : null}
                   </div>
                 </CardContent>
               </Card>
             )
           })}
-          {boardFiltered.map((item) => (
+          {(view === "market" ? boardFilteredPage : []).map((item) => (
             <LeaderboardMarketCard
               key={`board-${item.id}`}
               item={item}
@@ -808,73 +916,84 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
               installLabel={boardInstalling === item.id ? "安装中..." : "安装"}
             />
           ))}
-        </div>
-      )}
-
-      {/* GitHub 识别建成的引用（新表，含技能集合）：资源中心直接展示，集合带 skill 列表
-          + 重新识别（重探仓库刷新 entries，仓库新增技能自动纳入）。 */}
-      {ownedReferences.length > 0 ? (
-        <div className="space-y-2">
-          <div className="text-sm font-medium">GitHub 引用（{ownedReferences.length}）</div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {ownedReferences.map((reference) => {
-              const res = reference.resource
-              const entries = Array.isArray(res.resource_data?.entries) ? res.resource_data.entries : []
-              const isCollection = res.resource_type === "skills" && entries.length > 0
-              const dataRef = String(res.resource_data?.ref || "")
-              return (
-                <Card key={reference.id} size="sm" className="shadow-none">
-                  <CardContent className="flex h-full flex-col p-4">
-                    <div className="mb-1 flex items-center gap-1.5">
-                      <span className="truncate text-sm font-medium">{reference.display_name || res.display_name || res.name}</span>
-                      {isCollection ? (
-                        <Badge variant="secondary" className="shrink-0 text-[10px]">技能集 · {entries.length}</Badge>
-                      ) : (
-                        <Badge variant="outline" className="shrink-0 text-[10px]">GitHub</Badge>
-                      )}
+          {(view === "local" ? refsPage : []).map((reference) => {
+            const res = reference.resource
+            const entries = Array.isArray(res.resource_data?.entries) ? res.resource_data.entries : []
+            const isCollection = (res.resource_type === "skills" || res.resource_type === "plugin") && entries.length > 0
+            const dataRef = String(res.resource_data?.ref || "")
+            const repoFull = String(res.source_data?.repo_full_name || "")
+            const sourceLabel = REFERENCE_SOURCE_LABELS[res.source_type] || res.source_type
+            // GitHub 来源且有 star：leaderboard_sync 池行带 source_data.stars。
+            const stars = res.source_type === "leaderboard_sync" ? Number(res.source_data?.stars) || 0 : 0
+            return (
+              <Card key={reference.id} size="sm" className="shadow-none">
+                <CardContent className="flex h-full flex-col p-4">
+                  <div className="mb-2 flex items-start gap-2">
+                    <div className="flex size-9 items-center justify-center rounded-md bg-muted">
+                      <Icon className="size-4" />
                     </div>
-                    {dataRef || reference.version ? (
-                      <div className="text-[11px] text-muted-foreground">
-                        {reference.version && reference.version !== dataRef
-                          ? `${dataRef} @ ${reference.version.slice(0, 7)}`
-                          : dataRef || reference.version}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium">{reference.display_name || res.display_name || res.name}</span>
+                        {stars > 0 ? (
+                          <span className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground" title={`${stars.toLocaleString()} stars`}>
+                            <Star className="size-3" />{stars.toLocaleString()}
+                          </span>
+                        ) : null}
                       </div>
-                    ) : null}
-                    {reference.description || res.description ? (
-                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                        {reference.description || res.description}
-                      </p>
-                    ) : null}
-                    {isCollection ? (
-                      <details className="mt-2 text-xs">
-                        <summary className="cursor-pointer text-muted-foreground">展开 skill 列表（{entries.length}）</summary>
-                        <div className="mt-1 max-h-32 space-y-0.5 overflow-y-auto text-muted-foreground">
-                          {entries.map((entry: { name?: string; path?: string; entry?: string }, i: number) => (
-                            <div key={i} className="truncate">
-                              <span className="text-foreground">{entry.name}</span>
-                              <span className="ml-2 font-mono">{entry.path}/{entry.entry}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    ) : null}
-                    <div className="mt-auto flex flex-wrap gap-2 pt-2">
-                      <Button size="sm" variant="outline" disabled={referencing === reference.id} onClick={() => void deleteReferenceV2(reference.id).then(() => load()).catch((e) => toast.error(e?.message || "取消引用失败"))}>
-                        取消引用
-                      </Button>
-                      {isCollection ? (
-                        <Button size="sm" disabled={referencing === reference.id} onClick={() => void refreshCollection(reference)}>
-                          {referencing === reference.id ? "识别中..." : "重新识别"}
-                        </Button>
-                      ) : null}
+                      <div className="truncate text-[11px] text-muted-foreground" title={repoFull || sourceLabel}>
+                        {repoFull || dataRef || reference.version || sourceLabel}
+                      </div>
                     </div>
-                  </CardContent>
-                </Card>
-              )
-            })}
-          </div>
+                    <Badge variant="secondary" className="ml-auto shrink-0 text-[10px]">
+                      {isCollection ? `插件 · ${entries.length} 技能` : "引用"}
+                    </Badge>
+                  </div>
+                  {reference.description || res.description ? (
+                    <p className="mb-3 line-clamp-2 text-xs text-muted-foreground">
+                      {reference.description || res.description}
+                    </p>
+                  ) : null}
+                  {isCollection ? (
+                    <details className="mb-2 text-xs">
+                      <summary className="cursor-pointer text-muted-foreground">展开 skill 列表（{entries.length}）</summary>
+                      <div className="mt-1 max-h-32 space-y-0.5 overflow-y-auto text-muted-foreground">
+                        {entries.map((entry: { name?: string; description?: string }, i: number) => (
+                          <div key={i} className="flex min-w-0 items-baseline">
+                            <span className="shrink-0 text-foreground">{entry.name}</span>
+                            {entry.description ? (
+                              <span className="ml-2 min-w-0 line-clamp-1">{entry.description}</span>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                  <div className="mt-auto flex flex-wrap gap-2 pt-2">
+                    <Button size="sm" variant="outline" onClick={() => setViewDetail({ kind: "reference", reference })}>
+                      查看详情
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={referencing === reference.id} onClick={() => void deleteReferenceV2(reference.id).then(() => load()).catch((e) => toast.error(e?.message || "取消引用失败"))}>
+                      取消引用
+                    </Button>
+                    {isCollection ? (
+                      <Button size="sm" disabled={referencing === reference.id} onClick={() => void refreshCollection(reference)}>
+                        {referencing === reference.id ? "识别中..." : "重新识别"}
+                      </Button>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })}
         </div>
-      ) : null}
+        {view === "local" ? (
+          <MarketPager page={localPage} pageSize={MARKET_PAGE_SIZE} total={localTotal} onPageChange={setPage} />
+        ) : (
+          <MarketPager page={marketPage} pageSize={MARKET_PAGE_SIZE} total={marketTotal} onPageChange={setPage} />
+        )}
+        </>
+      )}
 
       <Dialog open={localEditing !== undefined} onOpenChange={(open) => { if (!open) { setLocalEditing(undefined); setParsedMeta(null); setParseStep("input") } }}>
         <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
@@ -1031,6 +1150,119 @@ export function ResourceMarketPanel<LocalItem extends { id?: string; name?: stri
           ) : null}
         </DialogContent>
       </Dialog>
+
+      {/* 查看详情弹框：已下载 skill/plugin 或 v2 引用。技能集引用 → 子 skill 用卡片网格展示。 */}
+      <Dialog open={!!viewDetail} onOpenChange={(open) => { if (!open) setViewDetail(null) }}>
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-3xl">
+          {viewDetail?.kind === "local" ? (
+            <LocalDetailBody item={viewDetail.item} icon={Icon} noun={noun} />
+          ) : viewDetail?.kind === "reference" ? (
+            <ReferenceDetailBody reference={viewDetail.reference} icon={Icon} />
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
+  )
+}
+
+// ── 详情弹框子组件 ────────────────────────────────────────────────────────────
+
+function LocalDetailBody<T extends { id?: string; name?: string; description?: string }>({
+  item, icon: Icon, noun,
+}: { item: T; icon: LucideIcon; noun: string }) {
+  const local = item as T & {
+    description?: string
+    source_type?: string | null
+    source_url?: string | null
+    updated_at?: string | null
+    created_at?: string | null
+    enabled?: boolean
+  }
+  const source = deriveLocalSource(local)
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <Icon className="size-4" />
+          {local.name || local.id || `${noun}详情`}
+          <Badge variant="outline" className="text-[10px]">已下载</Badge>
+        </DialogTitle>
+      </DialogHeader>
+      <div className="flex flex-col gap-3 text-sm">
+        <p className="text-muted-foreground">{local.description || "暂无描述"}</p>
+        <div className="grid grid-cols-2 gap-2">
+          <div>来源：{source ? source.label : "—"}</div>
+          <div>更新时间：{fmtTime(local.updated_at)}</div>
+          <div>创建时间：{fmtTime(local.created_at)}</div>
+          <div>状态：{local.enabled === false ? "已停用" : "启用"}</div>
+          {source?.tooltip ? <div className="col-span-2 break-all text-muted-foreground">URL：<a className="text-foreground hover:underline" href={source.tooltip} target="_blank" rel="noreferrer noopener">{source.tooltip}</a></div> : null}
+        </div>
+      </div>
+    </>
+  )
+}
+
+function ReferenceDetailBody({
+  reference, icon: Icon,
+}: { reference: ResourceReferenceV2; icon: LucideIcon }) {
+  const res = reference.resource
+  const entries = Array.isArray(res.resource_data?.entries) ? res.resource_data.entries as Array<{ name?: string; description?: string; path?: string; entry?: string }> : []
+  const isCollection = (res.resource_type === "skills" || res.resource_type === "plugin") && entries.length > 0
+  const repoFull = String(res.source_data?.repo_full_name || "")
+  const dataRef = String(res.resource_data?.ref || "")
+  const sourceLabel = REFERENCE_SOURCE_LABELS[res.source_type] || res.source_type
+  const stars = res.source_type === "leaderboard_sync" ? Number(res.source_data?.stars) || 0 : 0
+  const repoUrl = String(res.source_data?.repo_url || "") || (repoFull ? `https://github.com/${repoFull}` : "")
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <Icon className="size-4" />
+          {reference.display_name || res.display_name || res.name}
+          <Badge variant="secondary" className="text-[10px]">{isCollection ? `技能集 · ${entries.length}` : "引用"}</Badge>
+          <Badge variant="outline" className="text-[10px]">{sourceLabel}</Badge>
+        </DialogTitle>
+      </DialogHeader>
+      <div className="flex flex-col gap-3 text-sm">
+        <p className="text-muted-foreground">{reference.description || res.description || "暂无描述"}</p>
+        <div className="grid grid-cols-2 gap-2">
+          {repoFull ? (
+            <div className="col-span-2 break-all">仓库：
+              <a className="text-foreground hover:underline" href={repoUrl} target="_blank" rel="noreferrer noopener">{repoFull}</a>
+            </div>
+          ) : null}
+          <div>引用：{dataRef || reference.version || "—"}</div>
+          <div>更新时间：{fmtTime(reference.updated_at || res.updated_at)}</div>
+          {stars > 0 ? <div className="inline-flex items-center gap-1"><Star className="size-3" />{stars.toLocaleString()} stars</div> : null}
+        </div>
+        {isCollection ? (
+          <div className="flex flex-col gap-2">
+            <div className="text-xs font-medium text-muted-foreground">包含 {entries.length} 个子 skill</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {entries.map((entry, i) => (
+                <Card key={i} size="sm" className="shadow-none">
+                  <CardContent className="flex flex-col gap-1 p-3">
+                    <div className="flex items-center gap-1.5">
+                      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate text-sm font-medium">{entry.name || `#${i + 1}`}</span>
+                    </div>
+                    {entry.description ? (
+                      <p className="line-clamp-2 text-xs text-muted-foreground">{entry.description}</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground/60">暂无描述</p>
+                    )}
+                    {entry.path || entry.entry ? (
+                      <span className="truncate font-mono text-[10px] text-muted-foreground/70" title={`${entry.path || ""}/${entry.entry || ""}`}>
+                        {entry.path ? `${entry.path}/` : ""}{entry.entry || ""}
+                      </span>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </>
   )
 }

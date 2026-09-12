@@ -11,6 +11,8 @@ export interface ResourceReference {
   display_name: string
   version: string
   manifest: Record<string, unknown>
+  /** v2 映射行携带：引用描述（卡片显示用；旧表行描述在 manifest.description）。 */
+  description?: string
   owned_entity_type?: string | null
   owned_entity_id?: string | null
   status: string
@@ -61,6 +63,8 @@ export type ResourceReferenceV2 = {
   description: string
   version: string
   enabled: boolean
+  created_at?: string | null
+  updated_at?: string | null
   resource: {
     id: number
     resource_type: "skills" | "skill" | "plugin" | "mcp" | "prompt"
@@ -74,6 +78,9 @@ export type ResourceReferenceV2 = {
     description: string
     version: string
     status: string
+    published_at?: string | null
+    created_at?: string | null
+    updated_at?: string | null
   }
 }
 
@@ -86,6 +93,17 @@ export function listReferencesV2(resourceType?: string): Promise<ResourceReferen
 /** 取消团队引用（新表）。有分组授权时 409。 */
 export function deleteReferenceV2(id: string): Promise<{ deleted: boolean }> {
   return request<{ deleted: boolean }>(`/v2/references/${encodeURIComponent(id)}`, { method: "DELETE" })
+}
+
+/** 引用统一资源池中已有的资源（例如已发布榜单条目），不重复执行 GitHub 识别。 */
+export function createReferenceFromResource(payload: {
+  resource_id: number
+  params?: Record<string, unknown>
+}): Promise<ResourceReferenceV2> {
+  return request<ResourceReferenceV2>("/v2/references/from-resource", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
 }
 
 /** GitHub 识别 v2：先落池（resources upsert by repo）再建引用（FK 池行）。 */

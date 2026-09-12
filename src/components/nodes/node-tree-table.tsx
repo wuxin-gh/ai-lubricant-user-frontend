@@ -25,18 +25,20 @@ import {
   MachineFactCell,
   NodeCell,
   NodeStatusBadge,
+  StartupMethodCell,
   VersionCell,
 } from "./node-cells"
 import type { NodeGroup, NodeView } from "./node-view"
 
 /** 可选列。`node` 与 `actions` 恒在，不在这里声明。 */
-export type NodeColumn = "system" | "cpu" | "memory" | "version" | "editors" | "status"
+export type NodeColumn = "system" | "cpu" | "memory" | "version" | "startup" | "editors" | "status"
 
 /**
- * 节点列表统一列集合：节点客户端版本、编辑器、状态。系统/CPU/内存等机器详情放在
- * 「详情」弹框查看，不在列表重复占宽——管理端与用户侧共用同一集合，保持一致。
+ * 节点列表统一列集合：节点客户端版本、启动方式、编辑器、状态。系统/CPU/内存等
+ * 机器详情放在「详情」弹框查看，不在列表重复占宽——管理端与用户侧共用同一集合，
+ * 保持一致。
  */
-export const NODE_LIST_COLUMNS: NodeColumn[] = ["version", "editors", "status"]
+export const NODE_LIST_COLUMNS: NodeColumn[] = ["version", "startup", "editors", "status"]
 
 /** 操作区域统一宽度：两侧按钮数量不同，但列宽固定，页面布局不随权限跳变。 */
 export const NODE_ACTIONS_WIDTH = "w-[440px]"
@@ -46,6 +48,7 @@ const COLUMN_META: Record<NodeColumn, { label: string; width: string }> = {
   cpu: { label: "CPU", width: "w-[180px]" },
   memory: { label: "内存", width: "w-[110px]" },
   version: { label: "节点客户端版本", width: "w-[130px]" },
+  startup: { label: "启动方式", width: "w-[110px]" },
   editors: { label: "支持的编辑器", width: "w-[180px]" },
   status: { label: "状态", width: "w-[120px]" },
 }
@@ -58,6 +61,8 @@ function ColumnCell({ view, column }: { view: NodeView | null; column: NodeColum
       return <MachineFactCell view={view} fact={column} />
     case "version":
       return <VersionCell view={view} />
+    case "startup":
+      return <StartupMethodCell view={view} />
     case "editors":
       return <EditorsCell view={view} />
     case "status":

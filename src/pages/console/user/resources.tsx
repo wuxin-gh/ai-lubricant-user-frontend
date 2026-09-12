@@ -43,6 +43,7 @@ import {
   type IosSigningProfile,
   type IosWdaJobSnapshot,
 } from "@/api/builtinToolsClient"
+import { listTeamProxies, type TeamProxyEntry } from "@/api/reviewClient"
 import { UserPageActions } from "@/components/console/user-header-actions"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -1568,6 +1569,12 @@ function IosSigningProfileDialog({
   const [applePassword, setApplePassword] = useState("")
   const [appleCode, setAppleCode] = useState("")
   const [appleLoginToken, setAppleLoginToken] = useState<string | null>(null)
+  // Apple 登录出口代理（gsa.apple.com 拒数据中心 IP 时经代理登录）。列表来自
+  // 用户侧代理池精简视图，仅 network 模式可选。
+  const [appleProxies, setAppleProxies] = useState<TeamProxyEntry[]>([])
+  const [appleProxyId, setAppleProxyId] = useState("")
+  // 远程 anisette 服务器（真实设备指纹，避开本地虚拟指纹被 Apple 503 拒收）。
+  const [appleAnisetteServer, setAppleAnisetteServer] = useState("ani.sidestore.io")
 
   useEffect(() => {
     if (open) {
@@ -1576,6 +1583,10 @@ function IosSigningProfileDialog({
       setDetail(null)
       resetForm()
       void loadProfiles()
+      // 打开弹框时拉代理池精简列表（Apple 登录出口可选）；失败静默——没代理仍可选直连。
+      void listTeamProxies()
+        .then((list) => setAppleProxies(list || []))
+        .catch(() => setAppleProxies([]))
     }
   }, [open])
 
@@ -1628,6 +1639,8 @@ function IosSigningProfileDialog({
         email: appleEmail.trim(),
         password: applePassword,
         profile_id: editing?.id,
+        proxy_config_id: appleProxyId || undefined,
+        anisette_server: appleAnisetteServer || undefined,
       })
       if (result.status === "2fa_required") {
         setAppleLoginToken(result.login_token || null)
@@ -1668,6 +1681,8 @@ function IosSigningProfileDialog({
         password: applePassword,
         code: appleCode.trim(),
         profile_id: editing?.id,
+        proxy_config_id: appleProxyId || undefined,
+        anisette_server: appleAnisetteServer || undefined,
       })
       toast.success(editing ? "重新登录成功，配置已更新" : "登录成功，已创建签名配置")
       resetForm()
@@ -1940,6 +1955,38 @@ function IosSigningProfileDialog({
                             onChange={(e) => setApplePassword(e.target.value)}
                             placeholder="Apple ID 密码（只用于登录，不会保存）"
                           />
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>登录出口代理（可选）</Label>
+                          <Select value={appleProxyId} onValueChange={setAppleProxyId}>
+                            <SelectTrigger><SelectValue placeholder="直连（不使用代理）" /></SelectTrigger>
+                            <SelectContent>
+                              {appleProxies
+                                .filter((p) => p.mode === "network" || p.mode === "node")
+                                .map((p) => (
+                                  <SelectItem key={p.id} value={p.id}>
+                                    {p.name || p.id}
+                                    （{p.mode === "node" ? "节点隧道" : "网络代理"}）
+                                  </SelectItem>
+                                ))}
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            gsa.apple.com 对数据中心 IP 可能直接拒绝登录。被拒时可选一个
+                            网络代理或节点隧道（请求由该节点出网）完成登录；2FA 验证同样经此出口。
+                          </p>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>Anisette 服务器（推荐保留默认）</Label>
+                          <Input
+                            value={appleAnisetteServer}
+                            onChange={(e) => setAppleAnisetteServer(e.target.value)}
+                            placeholder="ani.sidestore.io"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            用远程服务器取真实设备指纹（iloader 同款方案）；本地 anisette 库
+                            生成虚拟指纹会被 Apple 503 拒收。留空则回退本地库。
+                          </p>
                         </div>
                         <Button onClick={() => void submitAppleLogin()} disabled={saving}>
                           {saving ? <Spinner className="size-4" /> : null}

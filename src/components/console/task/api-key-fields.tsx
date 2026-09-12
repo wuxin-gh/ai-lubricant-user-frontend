@@ -20,6 +20,7 @@ import { Hint, NumberField } from "@/components/console/task/task-form-fields"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { isClaudeReservedModelAlias, CLAUDE_RESERVED_MODEL_HINT } from "@/utils/claude-models"
 import type { GatewayModelOption } from "@/api/editorClient"
 import type { TaskProvider } from "@/api/userTaskClient"
 
@@ -167,6 +168,10 @@ export function TaskApiKeyPanel(props: TaskApiKeyPanelProps) {
             placeholder="选择该任务可切换的模型（可多选）"
             emptyHint="暂无可用模型"
             className="min-h-11"
+            disabledValues={(provider === "claude")
+              ? (models || []).filter((m) => isClaudeReservedModelAlias(m.id)).map((m) => m.id)
+              : undefined}
+            disabledHint={(provider === "claude") ? CLAUDE_RESERVED_MODEL_HINT : undefined}
           />
         </div>
       )}

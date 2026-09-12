@@ -19,7 +19,9 @@ import { LeaderboardShell } from "@/components/marketplace/LeaderboardShell"
 import { LeaderboardConfigPanel } from "@/components/marketplace/LeaderboardConfigPanel"
 import { AgencyAgentsPanel } from "@/components/marketplace/AgencyAgentsPanel"
 import { AgentscopePanel } from "@/components/marketplace/AgentscopePanel"
+import { SkillhubPanel } from "@/components/marketplace/SkillhubPanel"
 import { CommunityConfigPanel } from "@/components/marketplace/CommunityConfigPanel"
+import { NodeIpBackupPanel } from "@/components/marketplace/NodeIpBackupPanel"
 import { MarketplaceEditDialog, type EditMode } from "@/components/marketplace/MarketplaceEditDialog"
 import { UnifiedProviderModal } from "./platform/Channels"
 import { Progress } from "@/components/ui/progress"
@@ -56,11 +58,11 @@ import { toast } from "sonner"
  * agency-agents 等导入面板，社区运营即技术交流群 + 社区通知配置。
  * 这两个父级 tab 不走 ``fetchMarketplaceCatalog``，各自组件自己拉数据。
  */
-type ModuleTab = MarketplaceModule | "leaderboard" | "community"
+type ModuleTab = MarketplaceModule | "leaderboard" | "community" | "node-ip"
 
 /** 目录类 tab 判定：特殊 tab 不拉目录、不吃新建/导出等工具栏动作。 */
 function isCatalogModule(tab: ModuleTab): tab is MarketplaceModule {
-  return tab !== "leaderboard" && tab !== "community"
+  return tab !== "leaderboard" && tab !== "community" && tab !== "node-ip"
 }
 
 /**
@@ -509,6 +511,7 @@ export default function MarketplaceAdmin() {
               <TabsTrigger value="mobile-versions">移动端 ({moduleCounts["mobile-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="device-control-versions">设备控制 App ({moduleCounts["device-control-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="leaderboard">外部榜单</TabsTrigger>
+              <TabsTrigger value="node-ip">节点公网 IP</TabsTrigger>
               <TabsTrigger value="community">社区运营</TabsTrigger>
             </TabsList>
             {/* 候选池/配置自带工具条，公共工具条（搜索/导入/导出/新建）对它无意义。 */}
@@ -559,6 +562,7 @@ export default function MarketplaceAdmin() {
                   <TabsTrigger value="agency-agents">agency-agents</TabsTrigger>
                   <TabsTrigger value="agency-agents-zh">agency-agents-zh</TabsTrigger>
                   <TabsTrigger value="agentscope">agentscope</TabsTrigger>
+                  <TabsTrigger value="skillhub">skillhub</TabsTrigger>
                 </TabsList>
                 <TabsContent value="agent-leaderboard"><LeaderboardConfigPanel /></TabsContent>
                 <TabsContent value="agency-agents">
@@ -570,11 +574,16 @@ export default function MarketplaceAdmin() {
                 <TabsContent value="agentscope">
                   <AgentscopePanel />
                 </TabsContent>
+                <TabsContent value="skillhub">
+                  <SkillhubPanel />
+                </TabsContent>
               </Tabs>
             ) : (
               <LeaderboardShell onGoConfig={() => setLeaderboardSub("config")} />
             )}
           </div>
+        ) : module === "node-ip" ? (
+          <NodeIpBackupPanel />
         ) : module === "community" ? (
           <CommunityConfigPanel />
         ) : (

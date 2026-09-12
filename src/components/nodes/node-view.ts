@@ -34,6 +34,8 @@ export interface NodeView {
   online: boolean
   lastHeartbeatAt: string
   managerNodeId: string
+  /** Node-reported capability takes priority for the startup method (autostart/standalone), with the ledger value as fallback (docker, etc.). */
+  startupMethod: string
   capabilities: NodeCaps
   capacity?: { max_sessions?: number; cpu_total?: number; memory_total?: number }
   activeSessions: number
@@ -55,6 +57,7 @@ export function fromAdminNode(node: AdminNodeInfo): NodeView {
     online: Boolean(node.online ?? node.connected),
     lastHeartbeatAt: node.last_heartbeat_at || "",
     managerNodeId: node.manager_node_id || "",
+    startupMethod: ((node.capabilities || {}).startup_method || node.startup_method || "") as string,
     capabilities: (node.capabilities || {}) as NodeCaps,
     capacity: undefined,
     activeSessions: (node.active_session_ids || []).length,
@@ -76,6 +79,7 @@ export function fromMyNode(node: MyNodeInfo): NodeView {
     online: Boolean(node.online ?? node.connected),
     lastHeartbeatAt: node.last_heartbeat_at || "",
     managerNodeId: node.manager_node_id || "",
+    startupMethod: ((node.capabilities || {}).startup_method || node.startup_method || "") as string,
     capabilities: (node.capabilities || {}) as NodeCaps,
     capacity: node.capacity,
     activeSessions: node.active_sessions || 0,

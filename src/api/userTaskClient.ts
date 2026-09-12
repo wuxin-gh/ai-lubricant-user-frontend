@@ -121,14 +121,14 @@ export interface CreateUserTaskPayload {
   active_plugins?: string[]
   git_identity_id?: string
   repo?: { repo_url?: string; branch?: string; commit?: string; branch_mode?: "default" | "existing" | "auto" }
-  // skill_ids 普通项传引用 id 字符串；技能集合/新表引用传
+  // skill_ids / plugin_ids：普通项传引用 id 字符串；技能集合/新表引用传
   // {resource_id|reference_id, entries:[子技能名…]}（服务端按 entries 过滤，
-  // 只下发勾选的子技能；缺省=整个集合）。
+  // 只下发勾选的子技能；缺省=整个集合）。插件同样支持新表引用 {reference_id}。
   extra?: {
     project_id?: string
     issue_id?: string
     skill_ids?: Array<string | { resource_id?: string; reference_id?: string; entries?: string[] }>
-    plugin_ids?: string[]
+    plugin_ids?: Array<string | { resource_id?: string; reference_id?: string; entries?: string[] }>
   }
   mode?: string
   reasoning_effort?: "" | "low" | "medium" | "high" | "xhigh"

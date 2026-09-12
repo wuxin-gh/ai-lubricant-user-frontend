@@ -91,6 +91,11 @@ export function NodeFileBrowser({
       onPathChange?.(nextPath)
     } catch (error) {
       if (currentRequestId !== requestId.current) return
+      // 列表失败也停在发起的路径上并清掉旧条目：错误信息才能归因到实际请求的目录。
+      // 否则首刷失败时路径栏停在初始 "/"，看起来像找错了目录。
+      setFilePath(path)
+      setPathDraft(path)
+      setFileEntries([])
       setFileError(error instanceof Error ? error.message : String(error))
     } finally {
       if (currentRequestId === requestId.current) setFileLoading(false)

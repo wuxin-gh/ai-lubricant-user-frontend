@@ -15,6 +15,7 @@ import {
   installNodeEditor,
   interruptNodeTerminal,
   listNodeTerminals,
+  refreshNodeLabels,
   updateNodeProxyConfig,
   upgradeNodeEditor,
   type NodeInfo,
@@ -33,11 +34,12 @@ import {
   machineSpecs,
   nodeEditorVersions,
   nodeNetwork,
+  startupMethodMeta,
 } from "./types"
 import { copyText } from "./install-guide"
 import { NodeShellApproval } from "./node-shell-approval"
 import { NodeTunnels } from "./node-tunnels"
-import { NodeJSInstallButton, NodePrerequisiteGuide, XcodeDetectButton } from "./node-prerequisite-guide"
+import { NodeJSInstallButton, NodePrerequisiteGuide, XcodeInstallButton } from "./node-prerequisite-guide"
 import { NodeUpgradeDialog } from "../NodeUpgradeDialog"
 
 /** 机器信息主行（带兜底文案），用于客户端列表的子项副行。 */
@@ -366,21 +368,35 @@ function NodeEnvironment({
               </td>
             </tr>
             {/* Xcode（xcodebuild）只在 macOS 节点有意义：项目页「构建」tab 按
-                xcodebuild_version 挑构建节点；缺失时给检测入口（无法自动安装，
-                点了会给出 App Store 手动安装的原因，见 XcodeDetectButton；
-                新版节点检测成功后服务端即时折进标签并刷新本表）。 */}
+                xcodebuild_version 挑构建节点；缺失时给自动安装入口（服务端解析
+                xcodereleases 直链，节点后台下载/解压/激活，前端轮询进度，见
+                XcodeInstallButton；装完后服务端即时折进标签并刷新本表）。 */}
+            {String(caps.os || "").toLowerCase() === "darwin" && (
+              <tr>
+                <td className="px-3 py-2 font-medium">Xcode（xcodebuild）</td>
+                <td className={`px-3 py-2 ${(caps.xcodebuild_version || "").trim() ? "font-mono" : "text-muted-foreground"}`}>
+                  {(caps.xcodebuild_version || "").trim() || "未安装（可自动安装）"}
+                </td>
+                <td className="px-3 py-2">
+                  <XcodeInstallButton node={node} onRefresh={refreshNode} />
+                </td>
+              </tr>
+            )}
+            {/* iOS 真机平台组件（xcode_ios_sdk 标签）：Xcode 15+ 的独立安装项，
+                缺它真机构建 destination 直接解析失败（"iOS 17.2 is not installed"）。
+                节点探针跑 xcodebuild -showsdks 取 iphoneos 版本；标签随注册/刷新
+                标签上报。不可自动安装（数 GB、走 Apple 源、无 root 要求），给出
+                手动命令；装完后点「刷新标签」补报。 */}
             {String(caps.os || "").toLowerCase() === "darwin" && (
               <tr>
                 <td className="px-3 py-2 font-medium">
-                  Xcode（xcodebuild）
+                  iOS 平台组件
                   <Badge variant="outline" className="ml-1.5">iOS 构建</Badge>
                 </td>
-                <td className={`px-3 py-2 ${(caps.xcodebuild_version || "").trim() ? "font-mono" : "text-muted-foreground"}`}>
-                  {(caps.xcodebuild_version || "").trim() || "未检测到（需完整 Xcode，无法自动安装）"}
+                <td className={`px-3 py-2 ${(caps.xcode_ios_sdk || "").trim() ? "font-mono" : "text-muted-foreground"}`}>
+                  {(caps.xcode_ios_sdk || "").trim() ? `iOS SDK ${(caps.xcode_ios_sdk || "").trim()}` : "未安装（在该节点执行 xcodebuild -downloadPlatform iOS，完成后点「刷新标签」）"}
                 </td>
-                <td className="px-3 py-2">
-                  <XcodeDetectButton node={node} onRefresh={refreshNode} />
-                </td>
+                <td className="px-3 py-2" />
               </tr>
             )}
             <tr>
@@ -411,8 +427,13 @@ function NodeEnvironment({
 
 function NodeOverview({
   node,
+  onRefreshLabels,
+  refreshing,
 }: {
   node: NodeInfo
+  /** 刷新标签回调；仅在线且有客户端的节点渲染按钮。 */
+  onRefreshLabels?: () => void
+  refreshing?: boolean
 }) {
   const status = STATUS_META[node.status] || STATUS_META.unknown
   const specs = machineSpecs(node.capabilities).filter((s) => s.label !== "客户端版本")
@@ -429,6 +450,18 @@ function NodeOverview({
         ) : (
           <Badge variant="outline" className={status.className}>{status.label}</Badge>
         )}
+        {node.connected && onRefreshLabels ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={refreshing}
+            onClick={onRefreshLabels}
+            title="重新探测编辑器/宿主工具版本与机器信息，无需重启节点进程"
+          >
+            {refreshing ? <Spinner /> : null}
+            刷新标签
+          </Button>
+        ) : null}
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1">
@@ -448,6 +481,15 @@ function NodeOverview({
             <span className="text-sm">{spec.value}</span>
           </div>
         ))}
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">启动方式</span>
+          <span className="text-sm">
+            {(() => {
+              const meta = startupMethodMeta(node.capabilities?.startup_method || node.startup_method || "")
+              return meta.label || "—"
+            })()}
+          </span>
+        </div>
         <div className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">最近心跳</span>
           <span className="text-sm">{node.last_heartbeat_at || "尚未上报"}</span>
@@ -733,6 +775,20 @@ export function NodeDetailModal({
   }, [open, node?.node_id, onChanged])
 
   const liveNode = detail?.node ?? node
+  const [refreshingLabels, setRefreshingLabels] = useState(false)
+  const refreshLabels = async () => {
+    if (!liveNode || refreshingLabels) return
+    setRefreshingLabels(true)
+    try {
+      await refreshNodeLabels(liveNode.node_id)
+      toast.success("标签已刷新")
+      onChanged?.()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "刷新标签失败")
+    } finally {
+      setRefreshingLabels(false)
+    }
+  }
   if (!liveNode) return null
   const upgrade = detail?.upgrade ?? null
   const children = liveNode.role === "management"
@@ -747,7 +803,7 @@ export function NodeDetailModal({
   const overview = (
     <div className="space-y-4">
       {!isContainer(liveNode) ? <NodeUpgradeIndicator upgrade={upgrade} /> : null}
-      <NodeOverview node={liveNode} />
+      <NodeOverview node={liveNode} onRefreshLabels={refreshLabels} refreshing={refreshingLabels} />
     </div>
   )
 

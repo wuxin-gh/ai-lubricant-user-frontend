@@ -1,18 +1,17 @@
 // 「从 GitHub 识别」导入器：skill / 插件 共用。
 //
-// 类型**单选**（识别端点按优先级 skills>plugin>skill>mcp>prompt 自动判定，返回
-// result.type）。弹框里类型可改，改完点「重新识别」按所选类型重派生（端点带
-// type 参数；证据不足会明确报错）。
+// 类型**单选**（识别端点按优先级 plugin>skill>mcp>prompt 自动判定，返回
+// result.type——plugin 是容器：marketplace.json 在场或 ≥2 个技能条目都算 plugin）。
+// 弹框里类型可改，改完点「重新识别」按所选类型重派生（端点带 type 参数；证据
+// 不足会明确报错）。
 //
-// - type=skills（集合）：仓库含多个 skill 条目。引用/安装都作用于**整个集合**
-//   （不在添加时挑子技能——任务期再勾）。展示 skill 列表（只读，供预览）。
+// - type=plugin：插件容器。带 entries（多技能仓库）时展示 skill 列表、按子技能
+//   展开装；无 entries（单 zip 包）按 download_url 整包装。两种安装坐标都带。
 // - type=skill：单条目，按 entryIndex 选。
-// - type=plugin：整包，按 download_url。
 // - type=mcp/prompt：本导入器不处理（MCP/提示词有各自入口），提示去对应页面。
 //
-// 引用：createReferenceFromGithub（kind=skills 走集合 manifest，kind=skill 单条目，
-//   kind=plugin 插件 manifest）。安装：父组件按 install_spec 拼 zip URL + importUrl。
-// 两条路都现成，本组件只做编排。
+// 引用：createReferenceFromGithub（kind=plugin 走容器 manifest，kind=skill 单条目）。
+// 安装：父组件按 install_spec 拼 zip URL + importUrl。两条路都现成，本组件只做编排。
 
 import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
@@ -47,8 +46,7 @@ export interface GithubRecognizeImporterProps {
 }
 
 const TYPE_LABEL: Record<string, string> = {
-  skills: "技能集（多个 skill）",
-  plugin: "插件",
+  plugin: "插件（含技能集）",
   skill: "单个 skill",
   mcp: "MCP",
   prompt: "提示词",
@@ -68,10 +66,11 @@ export function GithubRecognizeImporter({ domain, onConfirm, onCancel }: GithubR
 
   const resultType: GithubRecognizeType | "" = forcedType || result?.type || ""
   const entries = result?.skill_entries ?? []
-  // 当前入口能否落地该类型；不能则提示去对应页面。
+  // 当前入口能否落地该类型；不能则提示去对应页面。plugin 容器（含原技能集）
+  // 在两个入口都可落地：技能入口按 entries 展开装，插件入口整包 zip。
   const actionable =
-    (domain === "skill" && (resultType === "skills" || resultType === "skill")) ||
-    (domain === "plugin" && resultType === "plugin")
+    (domain === "skill" && (resultType === "skills" || resultType === "skill" || resultType === "plugin")) ||
+    (domain === "plugin" && (resultType === "plugin" || resultType === "skills"))
 
   // 识别成功 → 预填编辑表单。
   useEffect(() => {
@@ -178,8 +177,7 @@ export function GithubRecognizeImporter({ domain, onConfirm, onCancel }: GithubR
                 onChange={(e) => setForcedType(e.target.value as GithubRecognizeType | "")}
               >
                 <option value="">自动（{TYPE_LABEL[result.type] || result.type || "—"}）</option>
-                <option value="skills">技能集 skills</option>
-                <option value="plugin">插件 plugin</option>
+                <option value="plugin">插件 plugin（含技能集）</option>
                 <option value="skill">单个 skill</option>
                 <option value="mcp">MCP</option>
                 <option value="prompt">提示词</option>
@@ -190,8 +188,8 @@ export function GithubRecognizeImporter({ domain, onConfirm, onCancel }: GithubR
             </Button>
           </div>
 
-          {/* skills 集合预览：skill 列表（只读，整包安装/引用） */}
-          {resultType === "skills" && entries.length > 0 ? (
+          {/* 插件容器（多技能）预览：skill 列表（只读，整包引用/安装，任务期再勾子技能） */}
+          {(resultType === "plugin" || resultType === "skills") && entries.length > 0 ? (
             <div className="rounded-md border p-3 text-xs">
               <div className="mb-1 font-medium">包含 {entries.length} 个 skill（整包引用/安装，任务期再勾子技能）</div>
               <div className="max-h-40 overflow-y-auto space-y-0.5 text-muted-foreground">

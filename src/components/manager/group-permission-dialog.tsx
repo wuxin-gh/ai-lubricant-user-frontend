@@ -238,6 +238,11 @@ export function GroupPermissionDialog({
   }
 
   // v2 引用 → 旧 ResourceReference 形状（枚举值映射：skills→skill / prompt→project_prompt）。
+  // plugin 容器（带 entries）在 Skills tab 按技能维度展示；纯 zip 插件归 Plugins tab。
+  const isPluginContainer = (row: ResourceReferenceV2): boolean =>
+    row.resource.resource_type === "plugin"
+    && Array.isArray(row.resource.resource_data?.entries)
+    && (row.resource.resource_data.entries as unknown[]).length > 0
   const v2ToDisplay = (row: ResourceReferenceV2): ResourceReference => ({
     id: row.id,
     team_id: row.team_id,
@@ -259,9 +264,13 @@ export function GroupPermissionDialog({
     status: "active",
     group_ids: [],
   })
-  const v2SkillDisplay = v2Skills.map(v2ToDisplay)
-  const v2PluginDisplay = v2Plugins.map(v2ToDisplay)
-
+  // Skills tab 只展示容器插件（带 entries）+ 单 skill + 存量 skills；纯 zip 插件留 Plugins tab。
+  const v2SkillDisplay = v2Skills
+    .filter((row) => row.resource.resource_type !== "plugin" || isPluginContainer(row))
+    .map(v2ToDisplay)
+  const v2PluginDisplay = v2Plugins
+    .filter((row) => row.resource.resource_type !== "plugin" || !isPluginContainer(row))
+    .map(v2ToDisplay)
   const handleClose = () => onOpenChange(false)
 
   const handleSave = async () => {

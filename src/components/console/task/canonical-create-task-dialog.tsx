@@ -6,12 +6,12 @@ import { listEffectiveResources, listReferencesV2, listResourceReferences, creat
 import { fetchMarketIndexAll, isMarketplaceEnabled, type MarketItem } from "@/api/marketplaceRaw"
 import { recognizeGithubRepo } from "@/api/githubRecognition"
 import type { GithubRecognizeResult } from "@/api/githubRecognition"
-import { listEnvironments, getEnvironment, addEnvironmentResource, removeEnvironmentResource, syncEnvironment, type EnvResource, type EnvExtra, type TaskEnvironmentDetail } from "@/api/environmentClient"
-import { getSystemEnv, installSystemEnvResource, removeSystemEnvResource, type SystemEnvDetail, type SystemEnvEntry } from "@/api/systemEnvClient"
+import { listEnvironments, getEnvironment, addEnvironmentResource, removeEnvironmentResource, syncEnvironment, type TaskEnvironmentDetail } from "@/api/environmentClient"
+import { getSystemEnv, installSystemEnvResource, removeSystemEnvResource, type SystemEnvDetail } from "@/api/systemEnvClient"
 import { createUserTask, type TaskProvider, type UserTaskDetail } from "@/api/userTaskClient"
 import { useCommonData } from "@/components/console/data-provider"
 import { EnvironmentPanel } from "@/components/console/environment/environment-panel"
-import { EditorResourcePicker, type ConfigEntry, type ResourceItem } from "@/components/console/editor/resource-picker"
+import { type ConfigEntry, type ResourceItem } from "@/components/console/editor/resource-picker"
 import { McpGrantPicker, type PickerGrant, type PickerParamKind, type PickerResource } from "@/components/console/mcp/McpGrantPicker"
 import { ProjectPromptSelector } from "@/components/console/editor/project-prompt-selector"
 import { resolveTaskIntent, type IssueTaskType, type TaskIntent } from "@/components/console/editor/task-intent"
@@ -86,18 +86,20 @@ const PROVIDERS: Array<{ value: TaskProvider; label: string }> = [
   { value: "codex", label: "Codex" },
 ]
 
-/** 把已授权资源引用行映射成 EditorResourcePicker 的 item。 */
+/** 把已授权资源引用行映射成选择器/卡片的 item。 */
 function toResourceItems(rows: ResourceReference[]): ResourceItem[] {
   const items: ResourceItem[] = []
   for (const row of rows) {
     const manifest = row.manifest as {
       type?: string
-      entries?: Array<{ name?: string; path?: string; entry?: string; editors?: string[] }>
+      entries?: Array<{ name?: string; path?: string; entry?: string; editors?: string[]; description?: string }>
     }
     // 新表引用（统一资源池）映射行：提交时 {reference_id, entries} 绑定。
     if (row.market_id?.startsWith("v2:")) {
       const entries = Array.isArray(manifest?.entries) ? manifest.entries : []
-      if (manifest?.type === "skills" && entries.length > 0) {
+      // skills 与 plugin 容器都按 entries 展开子技能勾选（技能集已归入 plugin）。
+      const isContainer = (manifest?.type === "skills" || manifest?.type === "plugin") && entries.length > 0
+      if (isContainer) {
         for (const entry of entries) {
           const entryName = String(entry.name || "").trim()
           if (!entryName) continue
@@ -105,10 +107,11 @@ function toResourceItems(rows: ResourceReference[]): ResourceItem[] {
             id: `v2:${row.id}::${entryName}`,
             name: entryName,
             display_name: `${row.name}/${entryName}`,
-            description: entry.path ? `${entry.path}/${entry.entry || "SKILL.md"}` : undefined,
+            // 描述优先（frontmatter description，服务端随集合入池）；没有才退回路径。
+            description: entry.description || undefined,
             reference_id: row.id,
             resource_entry: entryName,
-            __badge: `技能集 · ${row.name}`,
+            __badge: `插件 · ${row.name}`,
           })
         }
       } else {
@@ -122,8 +125,8 @@ function toResourceItems(rows: ResourceReference[]): ResourceItem[] {
       }
       continue
     }
-    if (manifest?.type === "skills" && Array.isArray(manifest.entries) && manifest.entries.length > 0) {
-      // 集合只提供子技能复选框；提交时通过 resource_id/resource_entry 归并回集合绑定。
+    if ((manifest?.type === "skills" || manifest?.type === "plugin") && Array.isArray(manifest.entries) && manifest.entries.length > 0) {
+      // 集合/插件容器提供子技能条目；提交时通过 resource_id/resource_entry 归并回容器绑定。
       for (const entry of manifest.entries) {
         const entryName = String(entry.name || "").trim()
         if (!entryName) continue
@@ -131,10 +134,11 @@ function toResourceItems(rows: ResourceReference[]): ResourceItem[] {
           id: `${row.id}::${entryName}`,
           name: entryName,
           display_name: `${row.name}/${entryName}`,
-          description: entry.path ? `${entry.path}/${entry.entry || "SKILL.md"}` : undefined,
+          // 描述优先（frontmatter description）；没有才退回路径。
+          description: entry.description || undefined,
           resource_id: row.id,
           resource_entry: entryName,
-          __badge: `技能集 · ${row.name}`,
+          __badge: `插件 · ${row.name}`,
         })
       }
       continue
@@ -156,20 +160,25 @@ function toResourceItems(rows: ResourceReference[]): ResourceItem[] {
  */
 function v2ToLegacyRef(row: ResourceReferenceV2): ResourceReference {
   const res = row.resource
-  const isCollection = res.resource_type === "skills"
+  // 技能集（skills）与 plugin 容器（带 entries）都按集合语义映射——提交时
+  // 走 {reference_id, entries} 绑定，resolve 时按子技能展开。
+  const isCollection = (res.resource_type === "skills" || res.resource_type === "plugin")
+    && Array.isArray(res.resource_data?.entries) && res.resource_data.entries.length > 0
+  const isPlugin = res.resource_type === "plugin"
   return {
     id: String(row.id),
     team_id: row.team_id,
-    resource_type: "skill",
-    market_module: "skills",
+    resource_type: isPlugin ? "plugin" : "skill",
+    market_module: isPlugin ? "plugins" : "skills",
     market_id: `v2:${row.id}`,
     name: res.name,
     display_name: row.display_name || res.display_name || res.name,
+    description: row.description || res.description || undefined,
     version: row.version || res.version,
     manifest: isCollection
       ? {
-          type: "skills",
-          entries: (res.resource_data?.entries || []) as Array<{ name?: string; path?: string; entry?: string; editors?: string[] }>,
+          type: "plugin",
+          entries: (res.resource_data?.entries || []) as Array<{ name?: string; path?: string; entry?: string; editors?: string[]; description?: string }>,
         }
       : {},
     owned_entity_type: null,
@@ -179,7 +188,7 @@ function v2ToLegacyRef(row: ResourceReferenceV2): ResourceReference {
   }
 }
 
-/** 从选择器条目抽回普通 resource_id 列表（集合子项由 skillBindings 单独处理）。 */
+/** 从选择器条目抽回普通 resource_id 列表（集合子项由 resourceBindings 单独处理）。 */
 function selectedIds(entries: ConfigEntry[]): string[] {
   return entries
     .map((entry) => String(entry.resource_id || entry.id || entry.name || entry.url || entry.entry || ""))
@@ -187,11 +196,11 @@ function selectedIds(entries: ConfigEntry[]): string[] {
 }
 
 /**
- * 将平台技能选择归并为服务端绑定：
+ * 将平台技能/插件选择归并为服务端绑定：
  * - 新表引用子项 -> {reference_id, entries[]}，普通新引用 -> {reference_id}
  * - 旧表集合子项 -> {resource_id, entries[]}，旧普通项 -> {resource_id}
  */
-function skillBindings(entries: ConfigEntry[]): Array<{ resource_id?: string; reference_id?: string; entries?: string[] }> {
+function resourceBindings(entries: ConfigEntry[]): Array<{ resource_id?: string; reference_id?: string; entries?: string[] }> {
   const grouped = new Map<string, { resource_id?: string; reference_id?: string; entries?: string[] }>()
   for (const entry of entries) {
     const referenceId = String(entry.reference_id || "").trim()
@@ -316,7 +325,7 @@ interface CanonicalCreateTaskDialogProps {
  * 截断，hover 显示全部（title 属性）。
  */
 function EnvironmentResourceTabs({
-  entries, active, tab, onTabChange, onToggle, onAdd, onRemove, addButtonLabel = "添加",
+  entries, active, tab, onTabChange, onToggle, onAdd, onRemove, addButtonLabel = "添加", selectable = true,
 }: {
   entries: Record<"skill" | "plugin" | "mcp", ResourceItem[]>
   active: Record<"skill" | "plugin" | "mcp", Set<string>>
@@ -327,6 +336,8 @@ function EnvironmentResourceTabs({
   onRemove: (kind: "skill" | "plugin" | "mcp", item: ResourceItem) => void
   /** 右上按钮文案：隔离档=添加，shared/system=安装。 */
   addButtonLabel?: string
+  /** 卡片是否带勾选框。隔离档展示集=已添加集，无勾选语义（移除走「移除」按钮），传 false。 */
+  selectable?: boolean
 }) {
   const labels = { mcp: "MCP", skill: "技能", plugin: "插件" }
   const items = entries[tab]
@@ -352,9 +363,9 @@ function EnvironmentResourceTabs({
                 <div className="flex items-start gap-2">
                   {locked ? (
                     <span className="mt-0.5 inline-flex size-4 items-center justify-center rounded border bg-muted text-[9px] text-muted-foreground">✓</span>
-                  ) : (
+                  ) : selectable ? (
                     <input type="checkbox" checked={checked} onChange={() => onToggle(tab, id)} className="mt-0.5 size-4 accent-primary" />
-                  )}
+                  ) : null}
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium" title={name}>{name}</div>
                     {item.description ? (
@@ -375,27 +386,6 @@ function EnvironmentResourceTabs({
         </div>
       )}
     </section>
-  )
-}
-
-/** 资源中心式添加弹框：资源中心 / 分组 / 市场 + GitHub 识别入口。 */
-function EnvResourceSnapshot({ label, items }: { label: string; items: ResourceItem[] }) {
-  return (
-    <div className="rounded-md border p-2.5">
-      <div className="mb-1.5 text-xs font-medium text-muted-foreground">{label}</div>
-      {items.length === 0 ? (
-        <div className="text-xs text-muted-foreground">当前环境没有配置</div>
-      ) : (
-        <div className="flex flex-wrap gap-1.5">
-          {items.map((item) => (
-            <Badge key={String(item.id)} variant="outline" className="max-w-full px-1.5 py-0.5 text-[11px]">
-              <span className="truncate">{item.display_name || item.name}</span>
-              {item.__badge ? <span className="ml-1 text-[10px] text-muted-foreground">· {item.__badge}</span> : null}
-            </Badge>
-          ))}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -450,17 +440,32 @@ function NodePickerDialog({
   )
 }
 
+/** 技能集/插件容器行的子技能名清单；非容器返回 null。 */
+function collectionEntryNames(row: ResourceReference): string[] | null {
+  const manifest = row.manifest as { type?: string; entries?: Array<{ name?: string }> } | undefined
+  if ((manifest?.type !== "skills" && manifest?.type !== "plugin")
+    || !Array.isArray(manifest.entries) || manifest.entries.length === 0) return null
+  const names = manifest.entries.map((e) => String(e.name || "").trim()).filter(Boolean)
+  return names.length ? names : null
+}
+
 /** 资源中心式添加弹框：资源中心 / 分组 / 市场 + GitHub 识别入口。
- * 选中资源后调用 onPick(reference_id)：装进环境的动作由父层按档位执行。 */
+ * 选中资源后调用 onPick(row, label, entryNames?)：装进环境/任务的动作由父层按档位执行。
+ * row 是旧表引用行或 v2 映射行（market_id "v2:" 前缀），父层按档位分流。
+ * collectEntries=true 时，技能集合行先进子技能勾选面板（默认全选），确认后
+ * 只把勾选的子技能交给 onPick（entryNames=勾中名清单）；非集合行直发。 */
 function ResourceCenterAddDialog({
-  open, kind, pickedIds, onPick, onClose,
+  open, kind, pickedIds, onPick, onClose, collectEntries = false,
 }: {
   open: boolean
   kind: "skill" | "plugin" | "mcp"
-  /** 已在当前环境/勾选里的引用 id（显示「已添加」）。 */
+  /** 已在当前环境/勾选里的引用行级 id（显示「已添加」）。 */
   pickedIds: Set<string>
-  onPick: (referenceId: string, label: string) => Promise<void>
+  onPick: (row: ResourceReference, label: string, entryNames?: string[]) => Promise<void>
   onClose: () => void
+  /** 隔离档=添加模式：技能集合行先勾选具体子技能再添加。shared/system 档环境
+   *  按整集安装（任务期用环境卡片激活勾选收窄），不进勾选面板。 */
+  collectEntries?: boolean
 }) {
   const [tab, setTab] = useState<"center" | "group" | "market">("center")
   const [query, setQuery] = useState("")
@@ -472,6 +477,8 @@ function ResourceCenterAddDialog({
   const [githubResult, setGithubResult] = useState<GithubRecognizeResult | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [marketEnabled, setMarketEnabled] = useState(true)
+  // 集合行子技能勾选草稿：key=引用行 id，value=勾中的子技能名集合。null=未在勾选。
+  const [picking, setPicking] = useState<{ row: ResourceReference; checked: Set<string> } | null>(null)
 
   const kindLabel = kind === "skill" ? "技能" : kind === "plugin" ? "插件" : "MCP"
   const marketModule = kind === "mcp" ? "mcp" : kind === "plugin" ? "plugins" : "skills"
@@ -491,18 +498,36 @@ function ResourceCenterAddDialog({
         setMarketRows(await fetchMarketIndexAll(marketModule))
         return
       }
+      // 统一资源池引用（识别「引用模式」建的 v2 行）与旧表引用合并展示。
+      // MCP 不并：任务 MCP 链按 owned_entity_id 落 mcp_services grant，池引用
+      // 没有归属服务，选了也派发不了。
+      const v2Rows = kind === "mcp"
+        ? Promise.resolve([] as ResourceReferenceV2[])
+        : listReferencesV2(kind === "skill" ? "skill" : "plugin").catch(() => [] as ResourceReferenceV2[])
       if (tab === "center") {
-        // 资源中心 = 团队引用全集（含未授权给分组的，未授权的标灰禁加）。
-        const [all, effective] = await Promise.all([
+        // 资源中心 = 团队引用全集（旧表含未授权给分组的，未授权的标灰禁加；
+        // v2 行的可见性已由服务端口径过滤，无需再标）。
+        const [all, effective, v2] = await Promise.all([
           listResourceReferences(kind),
           listEffectiveResources(kind).catch(() => [] as ResourceReference[]),
+          v2Rows,
         ])
         const effectiveIds = new Set(effective.map((row) => row.id))
-        setRows(all.map((row) => ({ ...row, __source: effectiveIds.has(row.id) ? undefined : "unauthorized" })))
+        const merged = new Map<string, ResourceReference>()
+        for (const row of [...all.map((row) => ({ ...row, __source: effectiveIds.has(row.id) ? undefined : "unauthorized" })), ...v2.map(v2ToLegacyRef)]) {
+          merged.set(String(row.id), row)
+        }
+        setRows([...merged.values()])
         return
       }
-      // 分组 = 当前用户所在分组已授权、可直接使用的资源（effective）。
-      setRows(await listEffectiveResources(kind))
+      // 分组 = 当前用户所在分组已授权、可直接使用的资源（旧表 effective + v2 可见引用）。
+      const [effective, v2] = await Promise.all([
+        listEffectiveResources(kind),
+        v2Rows,
+      ])
+      const merged = new Map<string, ResourceReference>()
+      for (const row of [...effective, ...v2.map(v2ToLegacyRef)]) merged.set(String(row.id), row)
+      setRows([...merged.values()])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载资源失败")
     } finally { setLoading(false) }
@@ -513,9 +538,30 @@ function ResourceCenterAddDialog({
   const filteredRows = rows.filter((row) => [row.name, row.display_name, row.market_id, row.version].some((v) => String(v || "").toLowerCase().includes(q)))
   const filteredMarket = marketRows.filter((row) => [row.name, row.display_name, row.summary, row.publisher, row.id].some((v) => String(v || "").toLowerCase().includes(q)))
 
-  const pickReference = async (referenceId: string, label: string) => {
-    setBusyId(referenceId)
-    try { await onPick(referenceId, label) } finally { setBusyId(null) }
+  const pickReference = async (row: ResourceReference, label: string, entryNames?: string[]) => {
+    // 技能集合 + 隔离档：先进子技能勾选面板（默认全选），确认后再交给 onPick；
+    // 显式 entryNames（面板确认/重入）与非集合行直接走 onPick。
+    if (!entryNames && collectEntries) {
+      const names = collectionEntryNames(row)
+      if (names) {
+        setPicking({ row, checked: new Set(names) })
+        return
+      }
+    }
+    setBusyId(String(row.id))
+    try { await onPick(row, label, entryNames) } finally { setBusyId(null) }
+  }
+
+  /** 子技能勾选面板确认：把勾中的子技能名交给 onPick，成功后收起面板。 */
+  const confirmPicking = async () => {
+    const target = picking
+    if (!target || target.checked.size === 0) return
+    const label = target.row.display_name || target.row.name
+    setBusyId(String(target.row.id))
+    try {
+      await onPick(target.row, label, [...target.checked])
+      setPicking(null)
+    } finally { setBusyId(null) }
   }
 
   /** GitHub 识别 → 引用 → 交给 onPick（新引用的资源即本次可用）。 */
@@ -525,7 +571,9 @@ function ResourceCenterAddDialog({
     setGithubLoading(true)
     setGithubResult(null)
     try {
-      const forceType = kind === "skill" ? "skills" : kind
+      // 技能入口：多技能仓库按 plugin 容器识别（技能集已归入 plugin；服务端对
+      // legacy 'skills' 也会归一，这里直接传新口径）。
+      const forceType = kind === "skill" ? "plugin" : kind
       const result = await recognizeGithubRepo(repo, undefined, forceType)
       setGithubResult(result)
     } catch (error) {
@@ -537,7 +585,7 @@ function ResourceCenterAddDialog({
     if (!githubResult) return
     setGithubLoading(true)
     try {
-      const refKind = githubResult.type === "skills" ? "skills" : githubResult.type === "plugin" ? "plugin" : "skill"
+      const refKind = githubResult.type === "skills" || githubResult.type === "plugin" ? "plugin" : "skill"
       const created = await createReferenceFromGithub(
         githubResult.repo_full_name,
         githubResult.ref,
@@ -548,7 +596,7 @@ function ResourceCenterAddDialog({
       toast.success(`已引用「${created.display_name || created.name}」`)
       setGithubResult(null)
       setGithub("")
-      await pickReference(created.id, created.display_name || created.name)
+      await pickReference(created, created.display_name || created.name)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "引用失败")
     } finally { setGithubLoading(false) }
@@ -560,16 +608,67 @@ function ResourceCenterAddDialog({
     try {
       const created = await createResourceReference(marketModule, item.id)
       toast.success(`已引用「${created.display_name || created.name}」`)
-      await pickReference(created.id, created.display_name || created.name)
+      await pickReference(created, created.display_name || created.name)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "引用市场资源失败")
     } finally { setBusyId(null) }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next) onClose() }}>
+    <Dialog open={open} onOpenChange={(next) => { if (!next) { setPicking(null); onClose() } }}>
       <DialogContent className="z-[100] flex max-h-[85vh] flex-col overflow-hidden sm:max-w-3xl" overlayClassName="z-[100]">
         <DialogHeader><DialogTitle>添加{kindLabel}资源</DialogTitle></DialogHeader>
+        {picking ? (
+          // 子技能勾选面板：技能集合行点「添加」后进入；默认全选，确认只把勾中的交给 onPick。
+          // 卡片显示描述（frontmatter description），不再用路径。
+          (() => {
+            const subItems = toResourceItems([picking.row])
+            const total = subItems.length
+            const allChecked = picking.checked.size === total
+            return (
+              <div className="flex min-h-0 flex-1 flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 truncate text-sm font-medium">在「{picking.row.display_name || picking.row.name}」中勾选要添加的技能</span>
+                  <Button type="button" variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs" onClick={() => setPicking(null)}>返回</Button>
+                </div>
+                <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                  <span>已选 {picking.checked.size} / {total}</span>
+                  <Button type="button" variant="link" size="sm" className="h-auto p-0 text-xs"
+                    onClick={() => setPicking((cur) => cur ? { ...cur, checked: new Set(cur.checked.size === total ? [] : subItems.map((i) => String(i.resource_entry || i.name))) } : cur)}>
+                    {allChecked ? "清空" : "全选"}
+                  </Button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto rounded-md border p-1">
+                  {subItems.map((item) => {
+                    const name = String(item.resource_entry || item.name || "")
+                    const checked = picking.checked.has(name)
+                    return (
+                      <label key={String(item.id)} className={`flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-sm ${checked ? "bg-accent/30" : "hover:bg-muted"}`}>
+                        <input type="checkbox" checked={checked} className="mt-0.5 size-4 accent-primary"
+                          onChange={() => setPicking((cur) => {
+                            if (!cur) return cur
+                            const next = new Set(cur.checked)
+                            if (next.has(name)) next.delete(name); else next.add(name)
+                            return { ...cur, checked: next }
+                          })} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate">{item.display_name || item.name}</span>
+                          {item.description ? <span className="mt-0.5 block line-clamp-2 text-[11px] text-muted-foreground" title={item.description}>{item.description}</span> : null}
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setPicking(null)}>取消</Button>
+                  <Button type="button" size="sm" disabled={picking.checked.size === 0 || busyId !== null} onClick={() => void confirmPicking()}>
+                    {busyId === String(picking.row.id) ? <Spinner className="size-3.5" /> : null} 添加所选 {picking.checked.size}
+                  </Button>
+                </div>
+              </div>
+            )
+          })()
+        ) : (
         <Tabs value={tab} onValueChange={(value) => { setTab(value as typeof tab); setQuery(""); setGithubResult(null) }} className="flex min-h-0 flex-1 flex-col">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="center">资源中心</TabsTrigger>
@@ -578,11 +677,11 @@ function ResourceCenterAddDialog({
           </TabsList>
           <div className="py-2"><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${kindLabel}名称、描述或来源…`} /></div>
           <TabsContent value="center" className="min-h-0 flex-1 overflow-y-auto">
-            <ResourceAddCards rows={filteredRows} pickedIds={pickedIds} loading={loading} busyId={busyId} onPick={pickReference} />
+            <ResourceAddCards rows={filteredRows} pickedIds={pickedIds} loading={loading} busyId={busyId} onPick={pickReference} collectEntries={collectEntries} />
           </TabsContent>
           <TabsContent value="group" className="min-h-0 flex-1 overflow-y-auto">
             <div className="mb-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">你所在分组已授权、可直接使用的{kindLabel}资源</div>
-            <ResourceAddCards rows={filteredRows} pickedIds={pickedIds} loading={loading} busyId={busyId} onPick={pickReference} />
+            <ResourceAddCards rows={filteredRows} pickedIds={pickedIds} loading={loading} busyId={busyId} onPick={pickReference} collectEntries={collectEntries} />
           </TabsContent>
           <TabsContent value="market" className="min-h-0 flex-1 overflow-y-auto">
             <div className="mb-3 rounded-md border border-dashed p-3">
@@ -624,6 +723,7 @@ function ResourceCenterAddDialog({
             )}
           </TabsContent>
         </Tabs>
+        )}
         <DialogFooter>
           <span className="mr-auto text-[11px] text-muted-foreground">添加后资源装入当前环境（隔离档为本次任务），并默认勾选。</span>
           <Button variant="outline" onClick={onClose}>完成</Button>
@@ -635,39 +735,43 @@ function ResourceCenterAddDialog({
 
 /** 资源引用卡片网格：点击卡片即添加（onPick），已在环境/勾选的显示「已添加」。 */
 function ResourceAddCards({
-  rows, pickedIds, loading, busyId, onPick,
+  rows, pickedIds, loading, busyId, onPick, collectEntries = false,
 }: {
   rows: ResourceReference[]
   pickedIds: Set<string>
   loading: boolean
   busyId: string | null
-  onPick: (referenceId: string, label: string) => Promise<void>
+  onPick: (row: ResourceReference, label: string, entryNames?: string[]) => Promise<void>
+  /** 隔离档：集合行点「添加」先勾选具体子技能（onPick 里 gating）。卡片标技能集徽标。 */
+  collectEntries?: boolean
 }) {
   if (loading) return <div className="flex h-32 items-center justify-center"><Spinner /></div>
   if (!rows.length) return <p className="py-10 text-center text-sm text-muted-foreground">没有可添加的资源</p>
   return (
     <div className="grid gap-2.5 sm:grid-cols-2">
       {rows.map((row) => {
-        const picked = pickedIds.has(row.id)
+        const picked = pickedIds.has(String(row.id))
         const label = row.display_name || row.name
         const unauthorized = row.__source === "unauthorized"
+        const subCount = collectionEntryNames(row)?.length
         return (
-          <div key={row.id} className={`flex flex-col gap-1.5 rounded-lg border p-3 ${unauthorized ? "opacity-60" : ""}`}>
+          <div key={String(row.id)} className={`flex flex-col gap-1.5 rounded-lg border p-3 ${unauthorized ? "opacity-60" : ""}`}>
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
+              {subCount ? <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">技能集 · {subCount} 项</Badge> : null}
               {row.version ? <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">v{row.version}</Badge> : null}
               {picked ? <Badge variant="secondary" className="shrink-0 px-1 py-0 text-[10px]">已添加</Badge> : null}
               {unauthorized ? <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px] text-destructive">未授权</Badge> : null}
             </div>
-            <div className="truncate text-[11px] text-muted-foreground">来源：{row.market_id || "资源中心"}</div>
+            <div className="truncate text-[11px] text-muted-foreground">来源：{row.market_id?.startsWith("v2:") ? "资源池引用" : row.market_id || "资源中心"}</div>
             <div className="mt-auto flex justify-end">
               <Button
                 size="sm" className="h-7 px-2 text-xs"
                 disabled={picked || unauthorized || busyId !== null}
                 title={unauthorized ? "该引用未授权给你的分组，先到资源中心授权" : undefined}
-                onClick={() => void onPick(row.id, label)}
+                onClick={() => void onPick(row, label)}
               >
-                {busyId === row.id ? <Spinner className="size-3" /> : null} 添加
+                {busyId === String(row.id) ? <Spinner className="size-3" /> : null} {collectEntries && subCount ? "勾选技能" : "添加"}
               </Button>
             </div>
           </div>
@@ -676,297 +780,6 @@ function ResourceAddCards({
     </div>
   )
 }
-function EnvInstallStep({
-  envMode, envId, envName, nodeId, onBack,
-}: {
-  envMode: "isolated" | "shared" | "system"
-  envId: string
-  envName: string
-  nodeId: string
-  onBack: () => void
-}) {
-  const isShared = envMode === "shared"
-  const isSystem = envMode === "system"
-  const KINDS = [
-    { kind: "skill" as const, label: "技能" },
-    { kind: "plugin" as const, label: "插件" },
-    { kind: "mcp" as const, label: "MCP" },
-  ]
-  const [kind, setKind] = useState<"skill" | "plugin" | "mcp">("skill")
-  const [search, setSearch] = useState("")
-  const [authorized, setAuthorized] = useState<Partial<Record<"skill" | "plugin" | "mcp", ResourceReference[]>>>({})
-  const [authLoading, setAuthLoading] = useState(false)
-  // 已装集合：shared 按 resource_id 索引；system 按 kind:name 索引。
-  const [sharedInstalled, setSharedInstalled] = useState<Map<string, EnvResource>>(new Map())
-  const [sharedExtras, setSharedExtras] = useState<EnvExtra[]>([])
-  const [sharedNeedsSync, setSharedNeedsSync] = useState(false)
-  const [systemNative, setSystemNative] = useState<Map<string, SystemEnvEntry>>(new Map())
-  const [busy, setBusy] = useState<string | null>(null)
-  const [addOpen, setAddOpen] = useState(false)
-
-  const reload = useCallback(async () => {
-    const jobs: Promise<void>[] = [
-      listEffectiveResources("skill").then((rows) => setAuthorized((cur) => ({ ...cur, skill: rows }))).catch(() => setAuthorized((cur) => ({ ...cur, skill: [] }))),
-      listEffectiveResources("plugin").then((rows) => setAuthorized((cur) => ({ ...cur, plugin: rows }))).catch(() => setAuthorized((cur) => ({ ...cur, plugin: [] }))),
-      listEffectiveResources("mcp").then((rows) => setAuthorized((cur) => ({ ...cur, mcp: rows }))).catch(() => setAuthorized((cur) => ({ ...cur, mcp: [] }))),
-    ]
-    if (isShared && envId) {
-      jobs.push(getEnvironment(envId).then((detail) => {
-        const map = new Map<string, EnvResource>()
-        for (const r of detail.resources || []) map.set(r.resource_id, r)
-        setSharedInstalled(map)
-        setSharedExtras(detail.extras || [])
-        setSharedNeedsSync(detail.needs_sync)
-      }).catch(() => {}))
-    }
-    if (isSystem && nodeId) {
-      jobs.push(getSystemEnv(nodeId).then((detail) => {
-        const map = new Map<string, SystemEnvEntry>()
-        for (const [k, rows] of Object.entries(detail.resources || {})) {
-          for (const e of rows || []) map.set(`${k}:${e.name}`, e)
-        }
-        setSystemNative(map)
-      }).catch(() => {}))
-    }
-    await Promise.all(jobs)
-  }, [isShared, isSystem, envId, nodeId])
-
-  useEffect(() => { setAuthLoading(true); void reload().finally(() => setAuthLoading(false)) }, [reload])
-
-  const installedEntryOf = (_kindKey: "skill" | "plugin" | "mcp", resourceId: string): EnvResource | undefined =>
-    isShared ? sharedInstalled.get(resourceId) : undefined
-  const nativeEntryOf = (kindKey: "skill" | "plugin" | "mcp", name: string): SystemEnvEntry | undefined =>
-    isSystem ? systemNative.get(`${kindKey}:${name}`) : undefined
-
-  const addShared = async (resourceId: string, label: string) => {
-    setBusy(resourceId)
-    try {
-      await addEnvironmentResource(envId, { kind, resource_id: resourceId })
-      // 添加即同步：skill/plugin 真装到节点；MCP 是 config 引用，sync 无害。
-      try { await syncEnvironment(envId) } catch { /* 同步失败不打断——卡片会显示待同步 */ }
-      await reload()
-      toast.success(`已添加「${label}」`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "添加失败")
-    } finally { setBusy(null) }
-  }
-
-  const removeShared = async (entryId: string, label: string) => {
-    setBusy(entryId)
-    try {
-      await removeEnvironmentResource(envId, entryId)
-      try { await syncEnvironment(envId) } catch { /* 同上 */ }
-      await reload()
-      toast.success(`已移除「${label}」`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "移除失败")
-    } finally { setBusy(null) }
-  }
-
-  const installSystem = async (resourceId: string, label: string) => {
-    if (kind === "mcp") {
-      // system 档不管理 MCP（整 tab 隐藏）；此处收窄 SystemEnvFileKind。
-      toast.error("MCP 不支持安装到节点本机")
-      return
-    }
-    setBusy(resourceId)
-    try {
-      await installSystemEnvResource(nodeId, { kind, resource_id: resourceId, overwrite: false })
-      await reload()
-      toast.success(`已安装「${label}」到节点本机`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "安装失败")
-    } finally { setBusy(null) }
-  }
-
-  const uninstallSystem = async (name: string, label: string) => {
-    setBusy(name)
-    try {
-      await removeSystemEnvResource(nodeId, kind, name)
-      await reload()
-      toast.success(`已卸载「${label}」`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "卸载失败")
-    } finally { setBusy(null) }
-  }
-
-  const addSelected = async (resourceId: string, label: string) => {
-    if (isShared) await addShared(resourceId, label)
-    else if (isSystem && kind !== "mcp") await installSystem(resourceId, label)
-  }
-
-  const pickedIdsForDialog = new Set<string>(isShared
-    ? [...sharedInstalled.keys()]
-    : [...systemNative.values()].filter((entry) => entry.kind === kind).map((entry) => entry.name))
-
-  // 授权资源按搜索过滤；MCP 在 system 档不可管理，整 tab 隐藏。
-  const kinds = isSystem ? KINDS.filter((k) => k.kind !== "mcp") : KINDS
-  const activeKind = kinds.some((k) => k.kind === kind) ? kind : kinds[0].kind
-  const rows = (authorized[activeKind] || []).filter((row) => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    return [row.name, row.display_name, row.market_id, row.version]
-      .some((v) => String(v || "").toLowerCase().includes(q))
-  })
-
-  // 环境里有、授权清单里没有的（手装/本机自有）：只读展示。
-  const unmanaged = isShared
-    ? sharedExtras.filter((e) => e.kind === activeKind)
-    : [...systemNative.values()]
-        .filter((e) => e.kind === activeKind)
-        .filter((e) => !(authorized[activeKind] || []).some((row) => row.name === e.name))
-
-  return (
-    <Dialog open onOpenChange={(v) => { if (!v) onBack() }}>
-      <DialogContent className="z-[80] flex max-h-[94vh] flex-col overflow-hidden sm:max-w-4xl" overlayClassName="z-[80]">
-        <DialogHeader className="shrink-0">
-          <DialogTitle>
-            {isShared ? `管理共用环境「${envName}」` : isSystem ? "管理节点本机环境" : "管理资源"}
-            {isShared && sharedNeedsSync ? <Badge variant="destructive" className="ml-2 text-[10px]">待同步</Badge> : null}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex min-h-0 flex-1 flex-col gap-3 py-2">
-          {/* Tab + 搜索 + 添加资源入口（三 tab 添加弹框：资源中心/分组/市场+GitHub 识别）一行 */}
-          <div className="flex shrink-0 items-center gap-3">
-            <Tabs value={activeKind} onValueChange={(v) => setKind(v as "skill" | "plugin" | "mcp")}>
-              <TabsList>
-                {kinds.map((k) => (
-                  <TabsTrigger key={k.kind} value={k.kind}>{k.label}</TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={`搜索${kinds.find((k) => k.kind === activeKind)?.label || ""}名称 / 市场…`}
-              className="h-9 flex-1"
-            />
-            <Button type="button" size="sm" className="h-9 shrink-0" onClick={() => setAddOpen(true)}>
-              <Plus className="size-3.5" /> 添加
-            </Button>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {authLoading ? (
-              <div className="flex h-40 items-center justify-center"><Spinner /></div>
-            ) : (
-              <>
-                {rows.length === 0 ? (
-                  <p className="py-10 text-center text-sm text-muted-foreground">
-                    没有匹配的平台资源。先在资源中心引用并授权给你的分组。
-                  </p>
-                ) : (
-                  <div className="grid gap-2.5 sm:grid-cols-2">
-                    {rows.map((row) => {
-                      const installed = installedEntryOf(activeKind, row.id)
-                      const native = nativeEntryOf(activeKind, row.name)
-                      const inPlace = isShared ? installed : native
-                      const label = row.display_name || row.name
-                      const cardBusy = busy === row.id
-                      return (
-                        <div key={row.id} className="flex flex-col gap-1.5 rounded-lg border p-3">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
-                            {row.version ? <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">v{row.version}</Badge> : null}
-                            {inPlace ? (
-                              <Badge variant="secondary" className="shrink-0 px-1 py-0 text-[10px]">
-                                {isShared ? (installed?.state === "pending" ? "待同步" : "已在环境") : (native?.platform_managed ? "平台已装" : "本机已有")}
-                              </Badge>
-                            ) : null}
-                          </div>
-                          {row.market_id ? (
-                            <div className="truncate text-[11px] text-muted-foreground">来源：{row.market_id.startsWith("v2:") ? "资源中心" : row.market_id}</div>
-                          ) : null}
-                          <div className="min-h-[16px] flex-1" />
-                          <div className="flex items-center justify-end gap-1.5">
-                            {isShared ? (
-                              installed ? (
-                                <Button
-                                  size="sm" variant="outline" className="h-7 px-2 text-xs"
-                                  disabled={busy !== null}
-                                  onClick={() => void removeShared(installed.id, label)}
-                                >
-                                  {cardBusy ? <Spinner className="size-3" /> : null} 移除
-                                </Button>
-                              ) : (
-                                <Button
-                                  size="sm" className="h-7 px-2 text-xs"
-                                  disabled={busy !== null}
-                                  onClick={() => void addShared(row.id, label)}
-                                >
-                                  {cardBusy ? <Spinner className="size-3" /> : null} 添加
-                                </Button>
-                              )
-                            ) : isSystem ? (
-                              native ? (
-                                native.platform_managed ? (
-                                  <Button
-                                    size="sm" variant="outline" className="h-7 px-2 text-xs"
-                                    disabled={busy !== null}
-                                    onClick={() => void uninstallSystem(native.name, label)}
-                                  >
-                                    {cardBusy ? <Spinner className="size-3" /> : null} 卸载
-                                  </Button>
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground">本机自有，平台不管理</span>
-                                )
-                              ) : (
-                                <Button
-                                  size="sm" className="h-7 px-2 text-xs"
-                                  disabled={busy !== null}
-                                  onClick={() => void installSystem(row.id, label)}
-                                >
-                                  {cardBusy ? <Spinner className="size-3" /> : null} 安装
-                                </Button>
-                              )
-                            ) : null}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {/* 环境里有、授权清单里没有的：只读展示。 */}
-                {unmanaged.length > 0 ? (
-                  <div className="mt-4">
-                    <div className="mb-1.5 text-xs font-medium text-muted-foreground">
-                      {isShared ? "节点手动安装（不在环境配置里，任务也会带上）" : "本机自有（操作者安装，平台不管理）"}
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {unmanaged.map((entry) => (
-                        <Badge key={`${entry.kind}:${entry.name}`} variant="outline" className="px-1.5 py-0.5 text-[11px]">
-                          {entry.name}
-                          {"version" in entry && entry.version ? <span className="ml-1 text-[10px] text-muted-foreground">v{entry.version}</span> : null}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
-        </div>
-        <DialogFooter className="shrink-0">
-          <span className="mr-auto text-[11px] text-muted-foreground">
-            {isShared ? "添加/移除会自动同步到节点；环境资源跨任务复用。" : "安装会写入节点操作者 HOME（增量）；卸载仅限平台装过的。"}
-          </span>
-          <Button variant="outline" onClick={onBack}>完成</Button>
-        </DialogFooter>
-      </DialogContent>
-      {addOpen ? (
-        <ResourceCenterAddDialog
-          kind={activeKind}
-          open={addOpen}
-          pickedIds={pickedIdsForDialog}
-          onPick={async (referenceId, label) => { await addSelected(referenceId, label) }}
-          onClose={() => setAddOpen(false)}
-        />
-      ) : null}
-    </Dialog>
-  )
-}
-
 export default function CanonicalCreateTaskDialog({
   open,
   onOpenChange,
@@ -1029,15 +842,21 @@ export default function CanonicalCreateTaskDialog({
   const [keys, setKeys] = useState<RuntimeKeyItem[]>([])
   const [models, setModels] = useState<GatewayModelOption[]>([])
   const [skillRows, setSkillRows] = useState<ResourceReference[]>([])
-  // 新表引用（统一资源池）：映射成旧形状并入 allSkillRows，选择器逻辑零改动复用。
+  // 新表引用（统一资源池）：映射成旧形状并入 allSkillRows/allPluginRows，
+  // 选择器/卡片/提交绑定逻辑零改动复用（v2 行打 market_id "v2:" 前缀标记）。
   const [v2SkillRows, setV2SkillRows] = useState<ResourceReferenceV2[]>([])
-  // 旧引用 + 新表引用（v2 映射行）合并：主技能 Tab 一个清单同时可见两种来源。
+  const [v2PluginRows, setV2PluginRows] = useState<ResourceReferenceV2[]>([])
+  // 旧引用 + 新表引用（v2 映射行）合并：卡片清单同时可见两种来源。
   const allSkillRows = useMemo(
     () => [...skillRows, ...v2SkillRows.map(v2ToLegacyRef)],
     [skillRows, v2SkillRows],
   )
   const [mcpRows, setMcpRows] = useState<ResourceReference[]>([])
   const [pluginRows, setPluginRows] = useState<ResourceReference[]>([])
+  const allPluginRows = useMemo(
+    () => [...pluginRows, ...v2PluginRows.map(v2ToLegacyRef)],
+    [pluginRows, v2PluginRows],
+  )
   const [resourceTab, setResourceTab] = useState<ResourceTab>("tool")
   const [submitting, setSubmitting] = useState(false)
 
@@ -1086,20 +905,26 @@ export default function CanonicalCreateTaskDialog({
       listEffectiveResources("skill").catch(() => []),
       listEffectiveResources("mcp").catch(() => []),
       listEffectiveResources("plugin").catch(() => []),
+      // 统一资源池引用（识别「引用模式」建的 v2 行）：skill+plugin 都并进清单。
+      // MCP 不并——任务 MCP 链按 owned_entity_id 落 mcp_services grant，池引用
+      // 没有归属服务，选了也派发不了（normalize_mcp_bindings 会拒）。
       listReferencesV2("skill").catch(() => []),
-    ]).then(([skills, mcps, plugins, v2Skills]) => {
+      listReferencesV2("plugin").catch(() => []),
+    ]).then(([skills, mcps, plugins, v2Skills, v2Plugins]) => {
       setSkillRows(skills)
       setMcpRows(mcps)
       setPluginRows(plugins)
       setV2SkillRows(v2Skills)
+      setV2PluginRows(v2Plugins)
       // 只在资源列表非空时按它过滤已选项；空集视作"未加载/拉取失败"，
       // 保留已选项避免关弹框重开时被误清空（修复资源附件面板数据被覆盖）。
       // 集合子项的 id 是 ``refId::entryName``，按 resource_id 前缀匹配保留；
       // 新表引用（v2: 前缀映射行）按 reference_id / id 前缀匹配保留。
-      const v2Mapped = v2Skills.map(v2ToLegacyRef)
       const keepRows: Array<{ id: string }> = [
         ...skills.map((r) => ({ id: r.id })),
-        ...v2Mapped.map((r) => ({ id: r.id })),
+        ...v2Skills.map((r) => ({ id: String(r.id) })),
+        ...plugins.map((r) => ({ id: r.id })),
+        ...v2Plugins.map((r) => ({ id: String(r.id) })),
       ]
       const keep = (entries: ConfigEntry[], rows: Array<{ id: string }>) =>
         rows.length === 0
@@ -1110,7 +935,7 @@ export default function CanonicalCreateTaskDialog({
             return rows.some((row) => row.id === ownerId)
           })
       setSelectedSkills((cur) => keep(cur, keepRows))
-      setSelectedPlugins((cur) => keep(cur, plugins))
+      setSelectedPlugins((cur) => keep(cur, keepRows))
     })
     // MCP 的第二个来源：可直接挂载的服务实例（内置 cdp-bridge / mail /
     // device-control、平台管理的、个人 SSE）。团队引用只覆盖市场安装的那部分，
@@ -1276,13 +1101,16 @@ export default function CanonicalCreateTaskDialog({
     }
   }, [envMode, envId, nodeId, systemEnvAllowed])
 
-  /** 添加资源（三 tab 弹框选中后）：按档位装进 shared 环境 / system 本机 / 隔离任务级。 */
-  const addResourceToEnv = useCallback(async (referenceId: string, label: string) => {
+  /** 添加资源（三 tab 弹框选中后）：按档位装进 shared 环境 / system 本机 / 隔离任务级。
+   *  row 是弹框选中的引用行（旧表行或 v2 映射行）——shared/system 装引用行 id，
+   *  isolated 直接把行展开成任务级条目；entryNames 非空时只把集合里勾中的子技能
+   *  加进任务（其余子技能不动）。 */
+  const addResourceToEnv = useCallback(async (row: ResourceReference, label: string, entryNames?: string[]) => {
     const kind = envAddKind
     if (!kind) return
     if (envMode === "shared" && envId) {
       try {
-        await addEnvironmentResource(envId, { kind, resource_id: referenceId })
+        await addEnvironmentResource(envId, { kind, resource_id: String(row.id) })
         try { await syncEnvironment(envId) } catch { /* 同步失败不打断，卡片显示待同步 */ }
         toast.success(`已添加「${label}」到环境`)
       } catch (err) {
@@ -1292,7 +1120,7 @@ export default function CanonicalCreateTaskDialog({
       await reloadEnvDetail()
     } else if (envMode === "system" && nodeId && kind !== "mcp") {
       try {
-        await installSystemEnvResource(nodeId, { kind, resource_id: referenceId, overwrite: false })
+        await installSystemEnvResource(nodeId, { kind, resource_id: String(row.id), overwrite: false })
         toast.success(`已安装「${label}」到节点本机`)
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "安装失败")
@@ -1303,16 +1131,28 @@ export default function CanonicalCreateTaskDialog({
       toast.info("系统内置档不写操作者本机 MCP 配置；本机已有的 MCP 会自动生效。")
     } else if (envMode === "isolated") {
       // 隔离档没有可持久化的环境：加进任务级勾选（selected*），提交时装进 session。
-      const rows = kind === "skill" ? allSkillRows : kind === "plugin" ? pluginRows : mcpRows
-      const row = rows.find((r) => r.id === referenceId)
-      if (!row) { toast.error("未找到该资源，请刷新后重试"); return }
-      const item: ConfigEntry = { id: row.id, name: row.name, resource_id: row.id }
-      if (kind === "skill") setSelectedSkills((cur) => cur.some((e) => e.id === row.id) ? cur : [...cur, item])
-      if (kind === "plugin") setSelectedPlugins((cur) => cur.some((e) => e.id === row.id) ? cur : [...cur, item])
-      if (kind === "mcp") setSelectedMcps((cur) => cur.some((e) => e.id === row.id) ? cur : [...cur, item])
-      toast.success(`已添加「${label}」（本次任务）`)
+      // 用 toResourceItems 展开成条目（集合→子技能子项、v2 引用带 reference_id、
+      // 普通资源→单条目）；entryNames 非空时只保留勾中的子技能，条目 id 与卡片 id
+      // 同源，勾选列表过滤才能对上。
+      const picked = toResourceItems([row]).filter((item) => {
+        if (!entryNames || entryNames.length === 0) return true
+        return entryNames.includes(String(item.resource_entry || item.name || ""))
+      })
+      if (!picked.length) { toast.info("未勾选任何子技能"); return }
+      const upsert = (cur: ConfigEntry[]) => {
+        let next = cur
+        for (const item of picked) {
+          const id = String(item.id)
+          if (!next.some((e) => String(e.id) === id)) next = [...next, { ...item, id }]
+        }
+        return next
+      }
+      if (kind === "skill") setSelectedSkills(upsert)
+      if (kind === "plugin") setSelectedPlugins(upsert)
+      if (kind === "mcp") setSelectedMcps(upsert)
+      toast.success(`已添加「${label}」${entryNames ? `（${picked.length} 项）` : ""}（本次任务）`)
     }
-  }, [envMode, envId, nodeId, envAddKind, reloadEnvDetail, allSkillRows, pluginRows, mcpRows])
+  }, [envMode, envId, nodeId, envAddKind, reloadEnvDetail])
 
   /** 删除确认后执行：shared 移除环境引用并同步；system 卸载平台装的；isolated 仅取消勾选。 */
   const confirmRemove = useCallback(async () => {
@@ -1344,14 +1184,19 @@ export default function CanonicalCreateTaskDialog({
     }
   }, [removeTarget, envMode, envId, nodeId, envDetail, reloadEnvDetail])
 
-  // 当前环境资源卡片：shared=环境快照、system=本机清单、isolated=平台授权候选
-  // （勾选即本次任务用，提交走任务级 selected*；无环境可装）。
+  // 当前环境资源卡片：shared=环境快照、system=本机清单、isolated=已添加的任务级选择
+  // （初始为空，点「添加」从资源中心选择，提交走任务级 selected*）。
   const environmentEntries = useMemo(() => {
     const out: Record<"skill" | "plugin" | "mcp", ResourceItem[]> = { skill: [], plugin: [], mcp: [] }
     if (envMode === "isolated") {
-      out.skill = toResourceItems(allSkillRows)
-      out.plugin = toResourceItems(pluginRows)
-      out.mcp = toResourceItems(mcpRows)
+      // 隔离档：只显示已添加（任务级勾选）的资源；初始为空，点「添加」从资源中心选择。
+      // 清单含旧表授权行 + v2 资源池引用（映射行），条目 id 与添加时写入的同源。
+      const skillIds = new Set(selectedSkills.map((e) => String(e.id || e.resource_id || "")))
+      const pluginIds = new Set(selectedPlugins.map((e) => String(e.id || e.resource_id || "")))
+      const mcpIds = new Set(selectedMcps.map((e) => String(e.id || e.resource_id || "")))
+      out.skill = toResourceItems(allSkillRows).filter((item) => skillIds.has(String(item.id)))
+      out.plugin = toResourceItems(allPluginRows).filter((item) => pluginIds.has(String(item.id)))
+      out.mcp = toResourceItems(mcpRows).filter((item) => mcpIds.has(String(item.id)))
       return out
     }
     if (envMode === "shared" && envDetail) {
@@ -1368,9 +1213,15 @@ export default function CanonicalCreateTaskDialog({
       return out
     }
     if (envMode === "system" && systemEnvDetail) {
+      // 与节点详情「系统环境」面板同口径：只列所选执行客户端会加载的资源
+      // （readers 含该 provider）。否则把 gemini-only / codex-only 的条目也
+      // 摆出来，跟用户在节点详情里看到的编辑器 tab 对不上。
+      // readers 为空（旧节点二进制上报不了归属）时不过滤——宁可显示，不能让
+      // 老节点的系统档列表整段消失。
       for (const [kind, rows] of Object.entries(systemEnvDetail.resources || {})) {
         if (kind !== "skill" && kind !== "plugin" && kind !== "mcp") continue
         for (const entry of rows || []) {
+          if (entry.readers.length > 0 && !entry.readers.includes(provider)) continue
           out[kind].push({
             id: `${kind}:${entry.name}`,
             name: entry.name,
@@ -1382,7 +1233,7 @@ export default function CanonicalCreateTaskDialog({
       }
     }
     return out
-  }, [envMode, envDetail, systemEnvDetail, allSkillRows, pluginRows, mcpRows])
+  }, [envMode, envDetail, systemEnvDetail, provider, allSkillRows, allPluginRows, mcpRows, selectedSkills, selectedPlugins, selectedMcps])
 
   // 环境资源默认全勾（取消 = 本次任务不使用）；换环境/新增资源时把新出现的
   // 资源补进勾选集合，用户手动取消的保持不动。isolated 档勾选走 selected*
@@ -1434,8 +1285,8 @@ export default function CanonicalCreateTaskDialog({
     const mapping = resolveTaskIntent(intent, issueType)
     const isIsolated = envMode === "isolated"
     // 隔离档：勾选的资源走任务级安装（装进本次 session）。
-    const skillIds = isIsolated ? skillBindings(selectedSkills) : []
-    const pluginIds = isIsolated ? selectedIds(selectedPlugins) : []
+    const skillIds = isIsolated ? resourceBindings(selectedSkills) : []
+    const pluginIds = isIsolated ? resourceBindings(selectedPlugins) : []
     // shared/system 档：环境资源已在环境里，任务只发「本次激活子集」（active_*）。
     // 全勾 = 不发（节点默认全激活）；部分勾 = 只发勾选的名字。名字取自环境卡片
     // 的 display_name/name（与节点侧 activeSkillNames 的枚举名一致）。
@@ -1634,16 +1485,10 @@ export default function CanonicalCreateTaskDialog({
                   active={displayActive}
                   tab={envResourceTab}
                   onTabChange={setEnvResourceTab}
-                  onToggle={(kind, id) => {
-                    // isolated 勾选直接驱动 selected*（提交时装进 session）。
-                    const item = environmentEntries[kind].find((e) => String(e.id) === id)
-                    const entry: ConfigEntry = { id, name: item?.name || id, resource_id: id }
-                    if (kind === "skill") setSelectedSkills((cur) => cur.some((e) => String(e.id) === id) ? cur.filter((e) => String(e.id) !== id) : [...cur, entry])
-                    if (kind === "plugin") setSelectedPlugins((cur) => cur.some((e) => String(e.id) === id) ? cur.filter((e) => String(e.id) !== id) : [...cur, entry])
-                    if (kind === "mcp") setSelectedMcps((cur) => cur.some((e) => String(e.id) === id) ? cur.filter((e) => String(e.id) !== id) : [...cur, entry])
-                  }}
+                  onToggle={() => { /* 隔离档卡片无勾选框：展示集=已添加集，移除走「移除」按钮 */ }}
                   onAdd={(kind) => setEnvAddKind(kind)}
                   onRemove={requestRemove}
+                  selectable={false}
                 />
               ) : null}
               {envMode === "shared" ? (
@@ -1711,14 +1556,17 @@ export default function CanonicalCreateTaskDialog({
             onReload={() => void reloadNodes().catch((error) => toast.error(error instanceof Error ? error.message : "刷新节点失败"))}
           />
         ) : null}
-        {/* 添加资源弹框（资源中心/分组/市场 + GitHub 识别）。 */}
+        {/* 添加资源弹框（资源中心/分组/市场 + GitHub 识别）。已添加判定按行级 id：
+            勾选条目 id 可能是子项级（refId::name / v2:refId），归一回引用行 id 再比对。
+            隔离档=添加模式，技能集合行先进子技能勾选面板。 */}
         {envAddKind ? (
           <ResourceCenterAddDialog
             open={envAddKind !== null}
             kind={envAddKind}
-            pickedIds={new Set(environmentEntries[envAddKind].map((item) => String(item.id)))}
+            pickedIds={new Set(environmentEntries[envAddKind].map((item) => String(item.id).replace(/^v2:/, "").split("::")[0]))}
             onPick={addResourceToEnv}
             onClose={() => setEnvAddKind(null)}
+            collectEntries={envMode === "isolated"}
           />
         ) : null}
         {/* 删除/卸载确认。 */}
@@ -1885,10 +1733,26 @@ export default function CanonicalCreateTaskDialog({
                     resources={mcpPickerResources}
                     paramKinds={mcpParamKinds}
                   />
-                  {(mcpRows.length > 0 || selectedMcps.length > 0) ? (
+                  {/* 引用型 MCP 的选择已收敛到第一步环境资源区（「添加」），
+                      这里只读回显本次已添加的团队 MCP，避免两处入口口径不一。 */}
+                  {envMode === "isolated" && (mcpRows.length > 0 || selectedMcps.length > 0) ? (
                     <div className="rounded-md border p-2.5">
-                      <div className="mb-1.5 text-xs font-medium text-muted-foreground">团队授权 MCP（引用型）</div>
-                      <EditorResourcePicker label="团队 MCP" items={toResourceItems(mcpRows)} selected={selectedMcps} onChange={setSelectedMcps} />
+                      <div className="mb-1.5 text-xs font-medium text-muted-foreground">团队授权 MCP（引用型，在第一步「添加」中选择）</div>
+                      {selectedMcps.length === 0 ? (
+                        <div className="text-xs text-muted-foreground">未添加。返回上一步，在环境资源 MCP 页签点「添加」选择。</div>
+                      ) : (
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedMcps.map((entry) => {
+                            const id = String(entry.id || entry.name || "")
+                            const item = toResourceItems(mcpRows).find((r) => String(r.id) === id)
+                            return (
+                              <Badge key={id} variant="outline" className="px-1.5 py-0.5 text-[11px]">
+                                <span className="truncate">{item?.display_name || item?.name || String(entry.name || id)}</span>
+                              </Badge>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   ) : null}
                 </div>

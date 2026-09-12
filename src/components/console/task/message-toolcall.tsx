@@ -1,7 +1,7 @@
 import { IconAlertTriangle, IconChevronDown, IconChevronUp, IconCircleCheck } from "@tabler/icons-react"
 import { Spinner } from "@/components/ui/spinner"
 import type { MessageType } from "./message"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Collapsible, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { useMemo, useState, type ReactNode } from "react"
 import { ConstsCliName } from "@/api/Api"
 import * as fallbackRender from "./toolcalls/fallback"
@@ -22,7 +22,6 @@ import * as internalWebsearchRender from "./toolcalls/internal_websearch"
 import * as internalImgsearchRender from "./toolcalls/internal_imgsearch"
 import * as internalImageAnalysisRender from "./toolcalls/internal_image_analysis"
 import { taskDetailT } from "./task-i18n"
-import { outputText } from "./item-to-message"
 
 type ToolCallRenderer = {
   match: (message: MessageType, cli?: ConstsCliName) => boolean
@@ -288,26 +287,6 @@ const toolCallRenderers: ToolCallRenderer[] = [
   },
 ]
 
-/** One-line preview shown under a collapsed tool call: the first useful line of
- * the result (or the key argument), so the user gets a hint without expanding. */
-function previewText(message: MessageType): string {
-  const output = outputText(message.data.rawOutput)
-  if (output) {
-    const firstLine = output.split(/\r?\n/).find((line) => line.trim()) ?? ""
-    if (firstLine) return firstLine.length > 240 ? `${firstLine.slice(0, 240)}…` : firstLine
-  }
-  const input = message.data.rawInput
-  if (input && typeof input === "object") {
-    const record = input as Record<string, unknown>
-    for (const key of ["command", "file_path", "pattern", "query", "path"]) {
-      if (typeof record[key] === "string" && (record[key] as string).trim()) {
-        return `${key}: ${record[key] as string}`
-      }
-    }
-  }
-  return "点击展开查看详情"
-}
-
 export const ToolCallMessageItem = ({ message, cli }: { message: MessageType, cli?: ConstsCliName }) => {
   const renderer = toolCallRenderers.find((item) => item.match(message, cli)) ?? {
     renderTitle: fallbackRender.renderTitle,
@@ -379,18 +358,24 @@ export const ToolCallMessageItem = ({ message, cli }: { message: MessageType, cl
           </button>
         </CollapsibleTrigger>
       </div>
-      {!open && (
-        <div className="mt-0.5 max-h-16 overflow-hidden rounded-md border border-border bg-muted/20 px-3 py-1 text-xs text-muted-foreground">
-          <div className="line-clamp-2 whitespace-pre-wrap break-all">
-            {previewText(message)}
-          </div>
-        </div>
-      )}
-      <CollapsibleContent>
-        <div className="mt-1 rounded-md border border-border bg-muted/30 text-xs max-h-[50vh] overflow-auto">
-          {detail}
-        </div>
-      </CollapsibleContent>
+      {/* 结果直接铺在折叠卡内：收起时截断显示开头几行（底部渐隐提示还有更多），
+          点击即展开全量。不再有独立的“部分结果”小面板。 */}
+      <div
+        role={open ? undefined : "button"}
+        tabIndex={open ? undefined : 0}
+        onClick={!open ? () => setOpen(true) : undefined}
+        onKeyDown={!open ? (event) => { if (event.key === "Enter" || event.key === " ") setOpen(true) } : undefined}
+        className={
+          open
+            ? "relative mt-1 max-h-[50vh] overflow-auto rounded-md border border-border bg-muted/30 text-xs"
+            : "relative mt-1 max-h-20 cursor-pointer overflow-hidden rounded-md border border-border bg-muted/20 text-xs"
+        }
+      >
+        {detail}
+        {!open && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent" />
+        )}
+      </div>
     </Collapsible>
   )
 }

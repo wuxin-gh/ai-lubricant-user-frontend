@@ -20,7 +20,7 @@
  * （单条/批量）已随专用 agent 配置一并移除；MCP 验证仍走确定性 HEAD/握手（verify_item）。
  */
 import { useCallback, useEffect, useState } from "react"
-import { ArrowUpDown, CloudOff, CloudUpload, ExternalLink, Info, Pencil, Plus, ShieldCheck, Star, Trash2 } from "lucide-react"
+import { ArrowUpDown, CloudOff, CloudUpload, Download, ExternalLink, Info, Pencil, Plus, ScanSearch, ShieldCheck, Star, Trash2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -34,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   createLeaderboardItem,
   deleteLeaderboardItems,
+  downloadLeaderboardItem,
   fetchLeaderboardItems,
   getMarketplacePublishJobs,
   publishLeaderboardItems,
@@ -198,6 +199,8 @@ export function LeaderboardItemsView({
   const [addOpen, setAddOpen] = useState(false)
   const [addRepo, setAddRepo] = useState("")
   const [adding, setAdding] = useState(false)
+  const [batchRecognizing, setBatchRecognizing] = useState(false)
+  const [batchRecognizeProgress, setBatchRecognizeProgress] = useState({ done: 0, total: 0 })
   // 排序（资源中心索引）单独管理，不混进资源编辑弹框
   const [sortItem, setSortItem] = useState<LeaderboardItem | null>(null)
   const [sortValue, setSortValue] = useState("")
@@ -300,6 +303,46 @@ export function LeaderboardItemsView({
     }
   }
 
+  /**
+   * 批量识别：对选中条目逐个重跑 GitHub 探针并重派生分类/安装/启动配置。
+   *
+   * 复用单条「重新识别」端点（POST /items/{id}/reprobe），串行执行：
+   *  - 逐条推进，按钮文本实时显示 X/N，跑完汇总成功/失败；
+   *  - 单条失败（识别证据不足、仓库不可达、限流）catch 住继续下一条，不中断整批；
+   *  - 识别语义与编辑弹框「重新识别」一致：重派生 install_spec/launch_spec/
+   *    target_modules，管理员手改的 name/description/排序不动；不改状态，识别完
+   *    仍是草稿，勾选保留方便接着批量发布。
+   */
+  const handleBatchRecognize = async (ids: number[]) => {
+    if (ids.length === 0 || batchRecognizing) return
+    const failures: string[] = []
+    setBatchRecognizing(true)
+    setBatchRecognizeProgress({ done: 0, total: ids.length })
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]
+        try {
+          await reprobeLeaderboardItem(id)
+        } catch (err) {
+          const name = items.find((it) => it.id === id)?.repo_full_name || `#${id}`
+          failures.push(`${name}：${err instanceof Error ? err.message : "识别失败"}`)
+        }
+        setBatchRecognizeProgress({ done: i + 1, total: ids.length })
+      }
+      if (failures.length === 0) {
+        toast.success(`批量识别完成：${ids.length} 项全部成功`)
+      } else {
+        toast.warning(`批量识别完成：成功 ${ids.length - failures.length} 项、失败 ${failures.length} 项`, {
+          description: failures.join("；"),
+        })
+      }
+      await load()
+    } finally {
+      setBatchRecognizing(false)
+      setBatchRecognizeProgress({ done: 0, total: 0 })
+    }
+  }
+
   const handleUnpublish = async (ids: number[]) => {
     if (ids.length === 0) return
     try {
@@ -349,6 +392,27 @@ export function LeaderboardItemsView({
         await load()
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "验证失败")
+      }
+    })
+
+  // 下载安装数据（实测下载地址是否有效）：后端代理拉上游 zip/prompt 正文回传。
+  const handleDownload = (item: LeaderboardItem) =>
+    void withBusy(item.id, async () => {
+      try {
+        const { blob, filename } = await downloadLeaderboardItem(item.id)
+        const url = URL.createObjectURL(blob)
+        try {
+          const a = document.createElement("a")
+          a.href = url
+          a.download = filename
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+        } finally {
+          URL.revokeObjectURL(url)
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "下载失败")
       }
     })
 
@@ -493,6 +557,7 @@ export function LeaderboardItemsView({
           <NativeSelectOption value="agency-agents">agency-agents</NativeSelectOption>
           <NativeSelectOption value="agency-agents-zh">agency-agents-zh</NativeSelectOption>
           <NativeSelectOption value="agentscope">agentscope</NativeSelectOption>
+          <NativeSelectOption value="skillhub">SkillHub</NativeSelectOption>
           <NativeSelectOption value="manual">手动添加</NativeSelectOption>
         </NativeSelect>
         <NativeSelect
@@ -513,16 +578,27 @@ export function LeaderboardItemsView({
           className="w-44"
         />
         <div className="ml-auto flex gap-2">
-          <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+          <Button size="sm" variant="outline" disabled={selected.size === 0 || batchRecognizing} onClick={() => setAddOpen(true)}>
             <Plus className="mr-1 h-3.5 w-3.5" />手动添加
           </Button>
-          <Button size="sm" disabled={selected.size === 0} onClick={() => void handlePublish([...selected])}>
+          <Button size="sm" disabled={selected.size === 0 || batchRecognizing} onClick={() => void handlePublish([...selected])}>
             批量发布（{selected.size}）
           </Button>
-          <Button size="sm" variant="outline" disabled={selected.size === 0} onClick={() => void handleUnpublish([...selected])}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={selected.size === 0 || batchRecognizing}
+            title="对选中条目逐个重跑 GitHub 识别探针，按探测结果重置分类与安装/启动配置（名称、描述等管理员编辑过的字段不动；串行执行，单条失败不中断整批）"
+            onClick={() => void handleBatchRecognize([...selected])}
+          >
+            {batchRecognizing
+              ? `识别中 ${batchRecognizeProgress.done}/${batchRecognizeProgress.total}`
+              : <><ScanSearch className="mr-1 h-3.5 w-3.5" />批量识别（{selected.size}）</>}
+          </Button>
+          <Button size="sm" variant="outline" disabled={selected.size === 0 || batchRecognizing} onClick={() => void handleUnpublish([...selected])}>
             批量撤回（{selected.size}）
           </Button>
-          <Button size="sm" variant="destructive" disabled={selected.size === 0} onClick={() => { setDeleteItem(null); setBatchDeleteOpen(true) }}>
+          <Button size="sm" variant="destructive" disabled={selected.size === 0 || batchRecognizing} onClick={() => { setDeleteItem(null); setBatchDeleteOpen(true) }}>
             批量删除（{selected.size}）
           </Button>
         </div>
@@ -681,6 +757,17 @@ export function LeaderboardItemsView({
                     </button>
                     <Button size="sm" variant="ghost" disabled={busy} onClick={() => setInfoItem(item)}>
                       <Info className="mr-1 h-3 w-3" />信息
+                    </Button>
+
+                    {/* 下载安装数据：实测该条目的下载地址（后端代理上游 zip / prompt 正文） */}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      title="下载该条目的安装数据，实测下载地址是否有效（zip / 提示词正文；仅浏览类无下载数据会提示）"
+                      onClick={() => handleDownload(item)}
+                    >
+                      <Download className="h-3 w-3" />下载
                     </Button>
 
                     <Button size="sm" variant="outline" disabled={busy} onClick={() => setDetail(item)}>

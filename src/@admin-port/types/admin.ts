@@ -16,6 +16,8 @@ export interface ModelIdRewriteRule {
   enabled: boolean;
   pattern: string;
   replacement: string;
+  /** 只搜索：按全量名（含 owner/ 前缀，未切）匹配，命中即保留该模型；不参与改名。 */
+  search_only: boolean;
 }
 
 /** 对全局模型规则模版的活引用：改模版立即影响所有引用它的渠道。 */
@@ -205,6 +207,8 @@ export interface ProviderSummary extends Record<string, unknown> {
   disabled_account_count: number;
   retry_count?: number | null;
   extra_retry_status_codes?: number[];
+  /** 定时更新模型开关；列表「自动更新」筛选项读它。缺省视为开启（与运行时口径一致）。 */
+  auto_update_models?: boolean;
   updated_at_ts: number;
   models: string[];
 }
@@ -367,6 +371,8 @@ export interface ProviderModelEntry extends Record<string, unknown> {
   id?: string;
   name?: string;
   extra_config?: Record<string, unknown>;
+  /** 行级启用开关；false = 模型保留在表但运行时不路由（管理端模型 tab 可切换）。缺省视为启用。 */
+  enabled?: boolean;
   /** 上游原始模型名（未切 "/"、未套规则），获取上游模型预览用 */
   raw_model_id?: string;
   /** 纯规则结果（不考虑撞名让位）；is_regex 为真时即这行被改成的名字 */

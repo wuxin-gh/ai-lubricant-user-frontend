@@ -104,6 +104,48 @@ export function fetchMarketplaceStatus(): Promise<MarketplaceStatus> {
   return request<MarketplaceStatus>("/status")
 }
 
+// ── 节点公网 IP 探测备份（市场管理 → 节点公网 IP tab）──────────────────────────
+//
+// 备份存 DB 主配置 blob（node_public_ip key），与「全局配置 → 节点网络」互不关联——
+// 全局配置仍是节点在用的唯一真相源。「同步市场数据」按钮与 diff 在全局配置 →
+// 节点网络 tab 内（那里拿节点在用配置与本备份比对，点击把备份追加进编辑器）。
+
+export type NodeIpBackupConfig = {
+  ipv4_urls: string[]
+  ipv6_urls: string[]
+  default_ipv4_urls: string[]
+  default_ipv6_urls: string[]
+}
+
+function _toStringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
+}
+
+function _normalizeNodeIpBackup(raw: unknown): NodeIpBackupConfig {
+  const d = (raw ?? {}) as Record<string, unknown>
+  return {
+    ipv4_urls: _toStringList(d.ipv4_urls),
+    ipv6_urls: _toStringList(d.ipv6_urls),
+    default_ipv4_urls: _toStringList(d.default_ipv4_urls),
+    default_ipv6_urls: _toStringList(d.default_ipv6_urls),
+  }
+}
+
+export async function getNodeIpBackupConfig(): Promise<NodeIpBackupConfig> {
+  return _normalizeNodeIpBackup(await request<unknown>("/admin/node-ip-config"))
+}
+
+/** 保存市场备份（只落 blob，不下发、不动全局配置）。未传的地址族不动。 */
+export async function updateNodeIpBackupConfig(
+  payload: { ipv4_urls?: string[]; ipv6_urls?: string[] },
+): Promise<NodeIpBackupConfig> {
+  const data = await request<unknown>("/admin/node-ip-config", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
+  return _normalizeNodeIpBackup(data)
+}
+
 /**
  * 管理页目录读取：走服务端 ``/admin/catalog``（q 交给服务端过滤——前端再做一遍
  * JSON.stringify 全量序列化会在大目录时把每次搜索都拖成卡顿）。store 路径下保存
@@ -558,13 +600,25 @@ export function fetchLeaderboardStatus(): Promise<LeaderboardStatus> {
   return request<LeaderboardStatus>("/admin/leaderboard/status")
 }
 
-/** 手动触发一次同步（后台异步执行，立即返回 {started:true}；已在跑→409）。仍只写草稿,不发布任何条目。 */
-export function triggerLeaderboardSync(): Promise<{ started?: boolean; detail?: string }> {
-  return request("/admin/leaderboard/sync", { method: "POST" })
+/** 手动触发一次同步（后台异步执行，立即返回 {started:true}；已在跑→409）。仍只写草稿,不发布任何条目。
+ *
+ * 覆盖模式（默认全不传 = 不覆盖）：overwrite_published / overwrite_draft 控制已存在行的
+ * 资源字段是否被上游+探针最新值覆盖（管理员手改让位）。覆盖只刷新数据，永不翻状态。 */
+export function triggerLeaderboardSync(opts?: {
+  overwrite_published?: boolean
+  overwrite_draft?: boolean
+}): Promise<{ started?: boolean; detail?: string }> {
+  const body: Record<string, boolean> = {}
+  if (opts?.overwrite_published) body.overwrite_published = true
+  if (opts?.overwrite_draft) body.overwrite_draft = true
+  return request("/admin/leaderboard/sync", {
+    method: "POST",
+    body: Object.keys(body).length ? JSON.stringify(body) : undefined,
+  })
 }
 
-/** 管理员编辑资源字段（与市场资源同一套）+ 安装配置。**不含发布**——发布是独立的
- *  推送动作（publishLeaderboardItems 入队）；patch 传 status 会被服务端忽略。 */
+/** 管理员编辑资源字段（与市场资源同一套）+ 安装配置。**含直改状态**——status 走
+ * update_curation 直翻库（与列表页发布队列/撤回并存的捷径）。 */
 export function updateLeaderboardItem(
   itemId: number,
   patch: {
@@ -572,6 +626,8 @@ export function updateLeaderboardItem(
     target_modules?: string[]
     target_module?: LeaderboardModule | ""
     installable?: boolean
+    /** 直改状态（draft|published|hidden）；发布队列路径仍是正式发布口径。 */
+    status?: "draft" | "published" | "hidden"
     /** skill/plugin/prompt 安装配置，整体替换（只送勾选分类对应的部分）。 */
     install_spec?: Record<string, unknown>
     /** 手改 MCP 启动方式；服务端会把 launch_spec_status 置 filled（人工已核对）。 */
@@ -657,7 +713,15 @@ export interface AgencyAgentsSyncReport {
 /** 手动同步 agency-agents 提示词源到 prompts 模块（merge）。默认 pinned commit。
  *  ``chinese=true`` 走 agency-agents-zh 中文社区源。 */
 export function syncAgencyAgents(
-  options: { ref?: string; flush?: boolean; dryRun?: boolean; chinese?: boolean } = {},
+  options: {
+    ref?: string
+    flush?: boolean
+    dryRun?: boolean
+    chinese?: boolean
+    /** 覆盖模式（弹框勾选；缺省=不覆盖，已存在行只刷上游元数据）。 */
+    overwrite_draft?: boolean
+    overwrite_published?: boolean
+  } = {},
 ): Promise<AgencyAgentsSyncReport> {
   const path = options.chinese
     ? "/admin/marketplace/agency-agents-zh/sync"
@@ -668,6 +732,8 @@ export function syncAgencyAgents(
       ref: options.ref || undefined,
       flush: options.flush || undefined,
       dry_run: options.dryRun || undefined,
+      overwrite_draft: options.overwrite_draft || undefined,
+      overwrite_published: options.overwrite_published || undefined,
     }),
   })
 }
@@ -710,14 +776,58 @@ export interface AgentscopeSyncReport {
   logs?: Array<{ ts: string; phase: string; detail: string }>
 }
 
-/** 手动同步 agentscope 技能源到 skills 模块。公开 API，无需鉴权。 */
-export function syncAgentscope(): Promise<AgentscopeSyncReport> {
-  return request("/admin/marketplace/agentscope/sync", { method: "POST" })
+/** 手动同步 agentscope 技能源到 skills 模块。公开 API，无需鉴权。
+ * 覆盖模式（弹框勾选；缺省=不覆盖）：overwrite_* 控制已存在行资源字段是否被上游
+ * 最新值重写（管理员手改让位）。覆盖只刷新数据，永不翻状态。 */
+export function syncAgentscope(opts?: {
+  overwrite_draft?: boolean
+  overwrite_published?: boolean
+}): Promise<AgentscopeSyncReport> {
+  const body: Record<string, boolean> = {}
+  if (opts?.overwrite_published) body.overwrite_published = true
+  if (opts?.overwrite_draft) body.overwrite_draft = true
+  return request("/admin/marketplace/agentscope/sync", {
+    method: "POST",
+    body: Object.keys(body).length ? JSON.stringify(body) : undefined,
+  })
 }
 
 /** 上次 agentscope 同步结果。 */
 export function fetchAgentscopeLastSync(): Promise<SourceSyncStatus> {
   return request("/admin/marketplace/agentscope/last-sync")
+}
+
+/** skillhub 技能源同步报告。同步路由后台异步执行——POST 立即返回 ``{started, detail}``。 */
+export interface SkillhubSyncReport {
+  /** 后台异步路由的立即返回形态 */
+  started?: boolean
+  converted: number
+  failed: Array<{ id?: string; code?: string; errors: string[] }>
+  ran_at: string
+  detail: string
+  logs?: Array<{ ts: string; phase: string; detail: string }>
+}
+
+/** 手动同步 skillhub 技能源到 skills 模块。公开 API，无需鉴权。 */
+/** 手动同步 skillhub 技能源到 skills 模块。公开 API，无需鉴权。
+ * 覆盖模式（弹框勾选；缺省=不覆盖）：overwrite_* 控制已存在行资源字段是否被上游
+ * 最新值重写（管理员手改让位）。覆盖只刷新数据，永不翻状态。 */
+export function syncSkillhub(opts?: {
+  overwrite_draft?: boolean
+  overwrite_published?: boolean
+}): Promise<SkillhubSyncReport> {
+  const body: Record<string, boolean> = {}
+  if (opts?.overwrite_published) body.overwrite_published = true
+  if (opts?.overwrite_draft) body.overwrite_draft = true
+  return request("/admin/marketplace/skillhub/sync", {
+    method: "POST",
+    body: Object.keys(body).length ? JSON.stringify(body) : undefined,
+  })
+}
+
+/** 上次 skillhub 同步结果。 */
+export function fetchSkillhubLastSync(): Promise<SourceSyncStatus> {
+  return request("/admin/marketplace/skillhub/last-sync")
 }
 
 /** 清空整个榜单候选池。破坏性——需带 {confirm: "purge"} 二次确认。 */
@@ -726,4 +836,28 @@ export function purgeLeaderboardItems(): Promise<{ purged: number; detail: strin
     method: "POST",
     body: JSON.stringify({ confirm: "purge" }),
   })
+}
+
+/**
+ * 下载候选条目的安装数据（管理员实测下载地址用）。
+ *
+ * 后端代理：skill 直接下载 zip / prompt 回传 .md；失败时后端回 JSON 错误信封
+ * （同 request 的两种信封都解析），调用方 toast 显示。成功返回 {blob, filename}。
+ */
+export async function downloadLeaderboardItem(
+  itemId: number,
+): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(`${BASE}/admin/leaderboard/items/${itemId}/download`, {
+    credentials: "include",
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    let body: any = null
+    try { body = text ? JSON.parse(text) : null } catch { body = null }
+    throw new Error(adminErrorMessage(body, response.status))
+  }
+  const disposition = response.headers.get("Content-Disposition") || ""
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const filename = m ? decodeURIComponent(m[1].trim()) : `item-${itemId}`
+  return { blob: await response.blob(), filename }
 }

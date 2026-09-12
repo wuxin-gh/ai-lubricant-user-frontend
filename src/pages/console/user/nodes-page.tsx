@@ -10,7 +10,9 @@ import { Button } from "@/components/ui/button"
  * 执行节点页（/console/nodes）。原先藏在「配置」弹框的节点分区，提为侧栏顶级页面。
  *
  * 节点的入驻/审批/分配归管理端；这里是使用侧：查看被授权的节点、开终端（含文件浏览
- * 器与 AI 助手）。列表本体复用设置弹框里的 `Nodes` 组件（它自取 useCommonData().nodes）。
+ * 器与 AI 助手）、删除执行节点与运行时管理（详情「运行时」tab）。列表本体复用设置
+ * 弹框里的 `Nodes` 组件（它自取 useCommonData().nodes）；页面自带页头，故不传
+ * showHeader——`Nodes` 内部标题栏只在设置弹框里渲染，避免双标题栏。
  */
 export default function UserNodesPage() {
   const { reloadNodes } = useCommonData()
@@ -38,7 +40,7 @@ export default function UserNodesPage() {
             执行节点
           </div>
           <p className="mt-2 text-sm text-muted-foreground">
-            任务与编辑器的运行时节点。节点由管理端入驻、审批并分配给分组；这里可查看被授权的节点并打开终端。
+            任务与编辑器的运行时节点。节点由管理端入驻、审批并分配给分组；这里可查看被授权的节点、打开终端，并对执行节点做删除与运行时管理（升级、装编辑器、升级代理）。
           </p>
         </div>
         <Button variant="outline" size="sm" disabled={refreshing} onClick={() => void refresh()}>

@@ -214,6 +214,14 @@ export function NodeTerminalDialog({
   return (
     <>
       <Dialog
+        // 非模态：Radix 模态 Dialog 的 FocusScope(trapped) 会监听全局 focusin，
+        // 一旦焦点落入弹框 DOM 之外（浮窗走 createPortal 挂在 body 上、处于
+        // DialogContent 子树之外），就会把焦点强行拽回弹框内——于是 AI 助手浮窗
+        // 的输入框点得开、按钮按得动，却一个字都打不进去（键入被劫持回弹框）。
+        // 这里本就要做成「弹框常驻 + 浮窗/页面可同时操作」的非模态体验：
+        // onInteractOutside/onEscapeKeyDown 已 preventDefault 阻止误关，
+        // pointer-events 锁也随非模态一并消失，浮窗不再需要靠 pointer-events-auto 续命。
+        modal={false}
         open={open}
         onOpenChange={(next) => {
           if (next) return

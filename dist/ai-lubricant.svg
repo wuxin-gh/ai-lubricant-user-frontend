@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Ai Lubricant</title>
+  <rect width="64" height="64" rx="16" fill="#10231b"/>
+  <path d="M32 9c-8.7 10.4-16 18.8-16 29.2C16 47 23.2 54 32 54s16-7 16-15.8C48 27.8 40.7 19.4 32 9Z" fill="#7cf29c"/>
+  <path d="M32 20 23 43h6.1l1.5-4.2h7L39.1 43H45L36 20h-4Zm.1 8.7 3.2 6.1h-6.3l3.1-6.1Z" fill="#10231b"/>
+</svg>

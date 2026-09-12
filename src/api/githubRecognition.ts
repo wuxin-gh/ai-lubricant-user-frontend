@@ -11,20 +11,24 @@ export type GithubRecognizeSkillEntry = {
   editors: string[]
 }
 
+/** legacy 'skills'（技能集）保留在联合类型里做 API 兼容——服务端已把它归一成
+ * plugin 容器（技能集本质是多技能的插件包），新代码一律按 plugin 处理。 */
 export type GithubRecognizeType = "skills" | "plugin" | "skill" | "mcp" | "prompt"
 
 export type GithubRecognizeResult = {
   repo_full_name: string
   ref: string
   head_sha: string
-  /** 单选主类型（skills|plugin|skill|mcp|prompt），优先级 skills>plugin>skill>mcp>prompt。 */
+  /** 单选主类型（plugin|skill|mcp|prompt），优先级 plugin>skill>mcp>prompt——
+   * 插件是容器：marketplace.json 在场或 ≥2 个技能条目都算 plugin。 */
   type: GithubRecognizeType | ""
   /** 自动判定类型（force_type 前的值，便于 UI 显示“自动识别为 X”）。 */
   auto_type: GithubRecognizeType | ""
   modules: string[]
   install_spec: Record<string, any>
   launch_spec: Record<string, any>
-  /** skill 列表：type=skill 恰 1 项；type=skills N 项（集合整包安装，任务期再勾子技能）。 */
+  /** skill 列表：type=skill 恰 1 项；type=plugin 可 N 项（容器整包安装，任务期再按
+   * 子技能勾选）。 */
   skill_entries: GithubRecognizeSkillEntry[]
   /** 仓库元数据（识别时一次拉取）：预填描述等编辑默认值。 */
   repo_meta: {

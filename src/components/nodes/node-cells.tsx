@@ -13,6 +13,7 @@ import {
   machineFactRows,
   machineInfoLine,
   nodeEditors,
+  startupMethodMeta,
   STATUS_META,
 } from "@/pages/manager/platform/nodes/types"
 import { preferredNodeIP, type NodeView } from "./node-view"
@@ -50,6 +51,24 @@ export function VersionCell({ view }: { view: NodeView | null }) {
   const version = (view.capabilities?.client_version || "").trim()
   if (!version) return <span className="text-xs text-muted-foreground">尚未上报</span>
   return <span className="font-mono text-xs break-all">v{version.replace(/^v/i, "")}</span>
+}
+
+/**
+ * 启动方式列。值来自 NodeView.startupMethod（节点自报 capability 优先、台账
+ * 兜底——docker 容器节点不自报该标签，永远显示台账值）。未上报留空，而不是
+ * 「尚未上报」占位：该标签只在新版节点上存在，老节点满屏占位是噪音。
+ */
+export function StartupMethodCell({ view }: { view: NodeView | null }) {
+  if (!view) return null
+  if (view.displayOnly) return null
+  if (view.isPassive) return null
+  const meta = startupMethodMeta(view.startupMethod)
+  if (!meta.label) return <span className="text-xs text-muted-foreground">—</span>
+  return (
+    <Badge variant="outline" className={meta.className}>
+      {meta.label}
+    </Badge>
+  )
 }
 
 /** 已安装编辑器 tag 列。容器 / 无节点 → 空。 */

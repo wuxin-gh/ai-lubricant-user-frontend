@@ -110,6 +110,23 @@ async function reviewFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+/** 节点升级/编辑器安装升级是节点上跑官方命令的长 RPC（数分钟），与管理端
+ * axios 客户端的 620s 超时同口径——fetch 默认无超时，靠 AbortController 兜住。 */
+async function reviewFetchLong<T>(path: string, init?: RequestInit, timeoutMs = 620_000): Promise<T> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await reviewFetch<T>(path, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("请求超时：节点仍在执行，请稍后刷新查看结果")
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export function getProjectWebhook(projectId: string): Promise<ProjectWebhookConfig | null> {
   return reviewFetch(`/api/v1/users/projects/${encodeURIComponent(projectId)}/webhook`)
 }
@@ -150,8 +167,8 @@ export function listProjectReviewNodes(
   return reviewFetch(`/api/v1/users/projects/${encodeURIComponent(projectId)}/webhook/review-nodes?${query}`)
 }
 
-export function installNodeEditor(nodeId: string, editor: string): Promise<unknown> {
-  return reviewFetch(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/editors/${encodeURIComponent(editor)}/install`, { method: "POST" })
+export function installNodeEditor(nodeId: string, editor: string): Promise<{ node_id: string; editor: string; action: string; version: string }> {
+  return reviewFetchLong(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/editors/${encodeURIComponent(editor)}/install`, { method: "POST" })
 }
 
 export function installNodeTool(nodeId: string, tool: string): Promise<unknown> {
@@ -167,6 +184,17 @@ export interface CreateGroupExecutionNodeResult {
   node?: unknown
 }
 
+/** 用户侧代理池精简视图：只返回 id+name+mode，不暴露地址/凭据。 */
+export interface TeamProxyEntry {
+  id: string
+  name: string
+  mode: string
+}
+
+export function listTeamProxies(): Promise<TeamProxyEntry[]> {
+  return reviewFetch<TeamProxyEntry[]>(`/api/v1/teams/proxies`)
+}
+
 export function createGroupExecutionNode(
   groupId: string,
   body: { startup_method?: string; node_name?: string; proxy_config_id?: string },
@@ -180,6 +208,151 @@ export function createGroupExecutionNode(
 /** 成员侧审批节点（权限：user_can_use_node 派生管理权）。 */
 export function approveGroupNode(nodeId: string): Promise<unknown> {
   return reviewFetch(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/approve`, { method: "POST" })
+}
+
+// ==================== 用户侧执行节点运行时管理 =====================
+//
+// 删除/统一升级/编辑器升级/升级代理原来只在管理端；后端已按同样口径开出
+// /api/v1/teams/nodes/* 通道（user_can_use_node 派生管理权 + 仅执行节点硬闸）。
+// 形状与管理端 @/@admin-port/api/nodes 的同名接口一致，方便组件按 admin 范本复刻。
+
+/** 节点/服务端算好的版本判定里的一条版本线。 */
+export interface UserNodeVersionLine {
+  current: string
+  latest: string
+  installed: boolean
+  needs_upgrade: boolean
+}
+
+/** 节点详情接口的版本判定块（节点程序与 runtime 两条独立版本线）。 */
+export interface UserNodeUpgradeStatus {
+  stale: boolean
+  node_program: UserNodeVersionLine
+  runtime: UserNodeVersionLine
+  can_upgrade: boolean
+}
+
+/** detail 接口返回的节点行（管理端 admin/nodes/{id} 同形：role/capabilities/connected）。 */
+export interface UserNodeDetailNode {
+  node_id: string
+  node_name: string
+  status: string
+  role: string
+  is_passive?: boolean
+  connected: boolean
+  online?: boolean
+  capabilities: Record<string, string>
+}
+
+export interface UserNodeDetailResponse {
+  node: UserNodeDetailNode
+  upgrade: UserNodeUpgradeStatus
+}
+
+/** GET /api/v1/teams/nodes/{id} —— 单节点详情 + 服务端版本判定。 */
+export function getUserNodeDetail(nodeId: string): Promise<UserNodeDetailResponse> {
+  return reviewFetch<UserNodeDetailResponse>(`/api/v1/teams/nodes/${encodeURIComponent(nodeId)}`)
+}
+
+/** version.json 里的一条发行资产（runtime 或节点程序）。 */
+export interface UserNodeReleaseAsset {
+  role: string
+  platform: string
+  arch: string
+  version: string
+  filename: string
+  download_url: string
+  digest: string
+  size_bytes: number
+}
+
+/** GET /api/v1/teams/nodes/latest-release —— 服务端缓存的最新节点发行版本。 */
+export interface UserNodeLatestRelease {
+  version: string
+  version_notes: string
+  release_tag: string
+  updated_at: string
+  stale: boolean
+  assets: UserNodeReleaseAsset[]
+  coverage: UserNodeReleaseAsset[]
+}
+
+export function getLatestUserNodeRelease(): Promise<UserNodeLatestRelease> {
+  return reviewFetch<UserNodeLatestRelease>(`/api/v1/teams/nodes/latest-release`).then((data) => {
+    const assets = Array.isArray(data?.assets) ? data.assets : []
+    const coverage = Array.isArray(data?.coverage) && data.coverage.length > 0 ? data.coverage : assets
+    return { ...data, assets, coverage }
+  })
+}
+
+/** GET /api/v1/teams/nodes/{id}/upgrade-defaults —— 上次成功升级用的代理预选。 */
+export function getUserNodeUpgradeDefaults(nodeId: string): Promise<{ last_proxy_id: string }> {
+  return reviewFetch<{ last_proxy_id: string }>(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/upgrade-defaults`,
+  )
+}
+
+/** 统一升级下发结果：runtime 与节点程序两步各自回报（缺资产则为 null）。 */
+export interface UserUpgradeNodeResult {
+  node_id: string
+  accepted: boolean
+  runtime: { target_version: string; download_url: string } | null
+  node: { target_version: string; download_url: string } | null
+}
+
+/** POST /api/v1/teams/nodes/{id}/upgrade —— 统一升级（Runtime 热切换 + 节点程序替换）。 */
+export function upgradeUserNode(
+  nodeId: string,
+  options: { proxyConfigId?: string } = {},
+): Promise<UserUpgradeNodeResult> {
+  return reviewFetchLong<UserUpgradeNodeResult>(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/upgrade`,
+    { method: "POST", body: JSON.stringify({ proxy_config_id: options.proxyConfigId || "" }) },
+  )
+}
+
+/** POST /api/v1/teams/nodes/{id}/editors/{editor}/upgrade —— 升级已安装的编辑器 CLI。 */
+export function upgradeUserNodeEditor(
+  nodeId: string,
+  editor: string,
+): Promise<{ node_id: string; editor: string; action: string; version: string }> {
+  return reviewFetchLong(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/editors/${encodeURIComponent(editor)}/upgrade`,
+    { method: "POST" },
+  )
+}
+
+/** 节点绑定的出口代理（不含地址/凭据，仅 id + 解析后的模式）。 */
+export interface UserNodeProxyConfig {
+  revision: string | number
+  proxy_mode: string
+  proxy_config_id: string
+}
+
+/** GET /api/v1/teams/nodes/{id}/proxy-config —— 读取节点升级代理绑定。 */
+export function getUserNodeProxyConfig(nodeId: string): Promise<UserNodeProxyConfig> {
+  return reviewFetch<UserNodeProxyConfig>(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
+  )
+}
+
+/** PUT /api/v1/teams/nodes/{id}/proxy-config —— 更新节点升级代理并推送在线节点。 */
+export function updateUserNodeProxyConfig(
+  nodeId: string,
+  proxyConfigId: string,
+): Promise<UserNodeProxyConfig> {
+  return reviewFetch<UserNodeProxyConfig>(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
+    { method: "PUT", body: JSON.stringify({ proxy_config_id: proxyConfigId || "" }) },
+  )
+}
+
+/** DELETE /api/v1/teams/nodes/{id} —— 删除执行节点（pending 撤销入驻 / 其余硬删除）。 */
+export function deleteUserNode(nodeId: string): Promise<{ deleted: boolean; revoked?: boolean }> {
+  return reviewFetch<{ deleted: boolean; revoked?: boolean }>(
+    `/api/v1/teams/nodes/${encodeURIComponent(nodeId)}`,
+    { method: "DELETE" },
+  )
 }
 
 /** 节点上一个命名共享环境（用户侧只读视图，归属该节点）。 */

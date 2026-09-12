@@ -4,6 +4,9 @@
  * 条目把上游模型 ID 转成对外 model_id：先切掉 "owner/" 前缀，再自上而下逐条
  * 跑正则替换。顺序敏感且不是命中即停，多条会叠加，所以行序可调。
  * 条目分两种——内联规则，与对全局模版的活引用（就地展开，位置即优先级）。
+ * 内联规则可勾「只搜索」：变成纯过滤条件——按**全量名**（含 owner/ 前缀，未切）
+ * 匹配，命中即保留该模型，不参与改名（普通规则跑在切完前缀的名字上，带前缀
+ * 的 pattern 如 deepseek-ai/deepseek-v4 永远搜不到）。
  * 内部样式自包含（CSS 变量来自平台页面根），与 FreezePolicyEditor 同款。
  */
 import { useCallback, useMemo, useState } from "react"
@@ -52,6 +55,7 @@ export function normalizeModelIdRewriteRules(raw: unknown): ModelIdRewriteEntry[
       enabled: row.enabled !== false,
       pattern,
       replacement: typeof row.replacement === "string" ? row.replacement : "",
+      search_only: row.search_only === true,
     })
   }
   return entries
@@ -83,19 +87,31 @@ export function expandModelIdRewriteRules(
 }
 
 /**
- * 预览用：与后端 apply_model_id_rewrite_rules 同源。
+ * 预览用：与后端 apply_model_id_rewrite_rules / model_id_matches_search_rules 同源。
+ * 只搜索规则不参与改名（跳过替换链），但按全量名（未切前缀）判定命中，
+ * 命中时 searchHit=true——这行模型会被保留。
  * JS 正则语法与 Python 不完全一致，预览只作调试参考，最终以服务端结果为准。
  */
 export function applyModelIdRewriteRules(
   modelId: string,
   entries: ModelIdRewriteEntry[],
   templates: ModelRuleTemplate[] = [],
-): { result: string; errors: string[] } {
+): { result: string; errors: string[]; searchHit: boolean } {
   const errors: string[] = []
   let result = stripModelOwnerPrefix(modelId)
-  if (!result) return { result, errors }
+  let searchHit = false
+  if (!result) return { result, errors, searchHit }
   for (const [idx, rule] of expandModelIdRewriteRules(entries, templates).entries()) {
     if (!rule.enabled || !rule.pattern.trim()) continue
+    // 只搜索规则：纯过滤条件，拿全量名（含 owner/ 前缀）判定命中，不改名。
+    if (rule.search_only) {
+      try {
+        if (new RegExp(rule.pattern).test(modelId)) searchHit = true
+      } catch (err) {
+        errors.push(`${rule.name || `第 ${idx + 1} 条`}: ${err instanceof Error ? err.message : "正则不合法"}`)
+      }
+      continue
+    }
     try {
       // 后端 re.sub 默认替换全部命中，这里用 g 对齐。
       const rewritten = result.replace(new RegExp(rule.pattern, "g"), rule.replacement)
@@ -104,7 +120,7 @@ export function applyModelIdRewriteRules(
       errors.push(`${rule.name || `第 ${idx + 1} 条`}: ${err instanceof Error ? err.message : "正则不合法"}`)
     }
   }
-  return { result: result || stripModelOwnerPrefix(modelId), errors }
+  return { result: result || stripModelOwnerPrefix(modelId), errors, searchHit }
 }
 
 const inputStyle: React.CSSProperties = {
@@ -191,7 +207,7 @@ export function ModelIdRewriteEditor({
   )
 
   const addRule = useCallback(
-    () => setRules((prev) => [...prev, { name: "", enabled: true, pattern: "", replacement: "" }]),
+    () => setRules((prev) => [...prev, { name: "", enabled: true, pattern: "", replacement: "", search_only: false }]),
     [setRules],
   )
 
@@ -216,6 +232,8 @@ export function ModelIdRewriteEditor({
         改写只影响对外 model_id，发给上游的原始模型名不变。
         顺序自上而下逐条应用（不是命中即停），可用 <code>\1</code> 引用捕获组。
         引用全局模版的条目会在其所在位置就地展开——模版与内联规则同列排序，改模版即时对所有引用它的渠道生效。
+        <br />
+        勾选「只搜索」的规则只做过滤：按<b>全量名</b>（含 owner/ 前缀，如 <code>deepseek-ai/deepseek-v4</code>）匹配，命中即保留该模型，不改名——普通规则跑在切完前缀的名字上，带前缀的写法在那里永远搜不到。
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "14px", borderRadius: "var(--admin-radius)", border: "1px solid var(--admin-border)", background: "var(--bg3)" }}>
@@ -263,6 +281,15 @@ export function ModelIdRewriteEditor({
                     style={{ ...inputStyle, flex: 1, minWidth: 0 }}
                   />
                 )}
+                {!templateRef && (
+                  <label
+                    title="只按全量名（含 owner/ 前缀）匹配：命中即保留该模型，不参与改名"
+                    style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "12px", color: rule.search_only ? "var(--textH)" : "var(--text2)", cursor: "pointer", flexShrink: 0 }}
+                  >
+                    <input type="checkbox" checked={rule.search_only === true} onChange={(e) => patchRule(idx, { search_only: e.target.checked })} />
+                    只搜索
+                  </label>
+                )}
                 <Switch checked={rule.enabled} onCheckedChange={(checked) => patchRule(idx, { enabled: checked === true })} />
                 <button onClick={() => moveRule(idx, -1)} disabled={idx === 0} style={{ ...btnMove, opacity: idx === 0 ? 0.4 : 1 }}>上移</button>
                 <button onClick={() => moveRule(idx, 1)} disabled={idx === rules.length - 1} style={{ ...btnMove, opacity: idx === rules.length - 1 ? 0.4 : 1 }}>下移</button>
@@ -272,6 +299,26 @@ export function ModelIdRewriteEditor({
                 <div style={{ fontSize: "12px", color: templateName ? "var(--text2)" : "#ef4444" }}>
                   {templateName ? `引用全局模版「${templateName}」；模版内容会在此位置展开。` : `模版「${rule.template_id}」不存在或尚未加载，运行时将跳过。`}
                 </div>
+              ) : rule.search_only ? (
+                <>
+                  <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "minmax(0, 1fr)" }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "12px", color: "var(--text2)" }}>
+                      匹配正则（全量名，含 owner/ 前缀）
+                      <Input
+                        value={rule.pattern}
+                        onChange={(e) => patchRule(idx, { pattern: e.target.value })}
+                        placeholder="例：^deepseek-ai/ 或 deepseek-ai/deepseek-v4"
+                        style={{ ...inputStyle, fontFamily: "var(--font-mono, monospace)" }}
+                      />
+                    </label>
+                  </div>
+                  <div style={{ fontSize: "12px", color: "var(--text2)", lineHeight: 1.6 }}>
+                    只搜索：按<b>全量名</b>（含 owner/ 前缀，未切）匹配，命中即保留该模型，<b>不参与改名</b>——名字沿用默认形态（切前缀 + 其它改写规则的结果）。
+                  </div>
+                  {patternError && (
+                    <div style={{ fontSize: "12px", color: "#ef4444" }}>正则不合法：{patternError}（保存会被拒绝）</div>
+                  )}
+                </>
               ) : (
                 <>
                   <div style={{ display: "grid", gap: "8px", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
@@ -321,7 +368,7 @@ export function ModelIdRewriteEditor({
         <Input
           value={probe}
           onChange={(e) => setProbe(e.target.value)}
-          placeholder="填一个上游模型 ID，实时查看改写结果"
+          placeholder="填一个上游模型 ID（可带 owner/ 前缀），实时查看改写与过滤结果"
           style={{ ...inputStyle, fontFamily: "var(--font-mono, monospace)" }}
         />
         {preview && (
@@ -329,6 +376,11 @@ export function ModelIdRewriteEditor({
             <code style={{ color: "var(--text2)" }}>{probe.trim()}</code>
             <span>→</span>
             <code style={{ color: "var(--textH)", fontWeight: 600 }}>{preview.result}</code>
+            {preview.searchHit && (
+              <span title="该模型被「只搜索」规则命中：自动更新时会保留" style={{ fontSize: "12px", color: "var(--green, #10b981)" }}>
+                命中只搜索规则（保留）
+              </span>
+            )}
           </div>
         )}
         {preview?.errors.map((err, i) => (

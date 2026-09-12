@@ -49,6 +49,35 @@ export const EDITOR_LABEL: Record<string, string> = {
   anthropic: "Anthropic",
 }
 
+/**
+ * 启动方式的友好名。两个来源并存：
+ * - 节点自报 capability `startup_method`（"autostart"=已装开机自启 /
+ *   "standalone"=手动启动）反映安装后的真实形态，列表优先显示它；
+ * - 台账 `startup_method`（onboard 时选的安装形态）在节点未上报时兜底，
+ *   docker 形态节点永远显示台账值（容器节点不自报该标签）。
+ */
+export const STARTUP_METHOD_LABEL: Record<string, string> = {
+  standalone: "手动启动",
+  systemd: "systemd 自启",
+  autostart: "开机自启",
+  docker: "Docker",
+  "docker-compose": "Compose",
+}
+
+/** 启动方式 → 列表徽标配色。docker 灰、自启绿、默认 outline。 */
+export function startupMethodMeta(value: string | undefined | null): {
+  label: string
+  className?: string
+} {
+  const key = (value || "").trim()
+  if (!key) return { label: "" }
+  const label = STARTUP_METHOD_LABEL[key] || key
+  if (key === "autostart" || key === "systemd") {
+    return { label, className: "border-green-600 text-green-600 dark:border-green-400 dark:text-green-400" }
+  }
+  return { label }
+}
+
 /** 一个带客户端节点（执行 / 管理客户端）入驻弹窗提交的表单值。 */
 export interface OnboardFormValues {
   node_name: string
@@ -93,6 +122,10 @@ export interface NodeCaps {
   system_env?: string
   /** macOS + Xcode 节点上报的 xcodebuild 版本（hostTools 探针）；空则无构建能力。 */
   xcodebuild_version?: string
+  /** 该 Mac 安装的 iOS 真机 SDK 版本（xcodebuild -showsdks 探针，如 "17.2"）；
+   *  Xcode 15+ 的 iOS 平台组件是独立安装项——缺它时真机构建 destination 直接
+   *  解析失败（修复：xcodebuild -downloadPlatform iOS）。空则 iOS 构建环境不全。 */
+  xcode_ios_sdk?: string
   [key: string]: string | EditorCapability[] | undefined
 }
 
@@ -213,8 +246,24 @@ export function machineSpecsLine(caps: NodeCaps | undefined | null): string {
 /** 本系统支持安装/升级/版本上报的编辑器 CLI（与 Go agent.SupportedEditors 对齐）。 */
 export const SUPPORTED_EDITORS = ["claude", "codex", "gemini", "opencode", "cursor"] as const
 
-/** 已安装的编辑器/Provider 列表（来自 capabilities.providers 逗号串）。 */
+/**
+ * 已安装的编辑器/Provider 列表。
+ *
+ * 真相源是 capabilities.editors 数组（节点注册时探测并结构化上报）。兼容老节点
+ * 没有 editors 只有 providers 逗号串的情况：editors 缺失时回退解析 providers。
+ * 两者都缺才算未安装。这是「装了编辑器却被判未装」的根因修复：某些节点上报了
+ * editors 但漏了 providers 串，单纯读 providers 会误判。
+ */
 export function nodeEditors(caps: NodeCaps | undefined | null): string[] {
+  const editorsList = (caps as Record<string, unknown> | undefined)?.editors
+  if (Array.isArray(editorsList) && editorsList.length > 0) {
+    const fromEditors = editorsList
+      .map((e) => String((e as { provider?: string })?.provider || "").trim().toLowerCase())
+      .filter(Boolean)
+    if (fromEditors.length > 0) {
+      return fromEditors.map((p) => EDITOR_LABEL[p] || p)
+    }
+  }
   const providers = caps?.providers
   if (!providers) return []
   const str = String(providers)
@@ -224,22 +273,28 @@ export function nodeEditors(caps: NodeCaps | undefined | null): string[] {
 /**
  * 每个受支持编辑器的安装状态与版本。
  *
- * 「是否已安装」以 capabilities.providers 为真相源——那是节点用 LookPath 直接探测
- * 出来的，可靠；版本号则来自 capabilities["editor_version_<editor>"]（跑
- * `<editor> --version` 抓 semver，best-effort，可能缺失）。两者数据源不同：装了但
- * 版本探测失败时，installed=true 而 version="", UI 应显示「已安装·版本未知」而不是
- * 误判为未安装。
+ * 「是否已安装」优先用 capabilities.editors 数组（节点注册探测），回退到
+ * capabilities.providers 逗号串；再回退到 editor_version_<editor> 非空。任一信号
+ * 有值即视为已安装——三者数据源不同，漏掉任一字段都可能导致装了却显示未装。
  */
 export function nodeEditorVersions(
   caps: NodeCaps | undefined | null,
 ): { editor: string; label: string; version: string; installed: boolean }[] {
   const c = caps || {}
-  const installedSet = new Set(
-    String(c.providers || "")
-      .split(",")
-      .map((p) => p.trim().toLowerCase())
-      .filter(Boolean),
-  )
+  const installedSet = new Set<string>()
+  const editorsList = (c as Record<string, unknown>)?.editors
+  if (Array.isArray(editorsList)) {
+    for (const e of editorsList) {
+      const provider = String((e as { provider?: string })?.provider || "").trim().toLowerCase()
+      if (provider) installedSet.add(provider)
+    }
+  }
+  if (installedSet.size === 0 && c.providers) {
+    for (const p of String(c.providers).split(",")) {
+      const trimmed = p.trim().toLowerCase()
+      if (trimmed) installedSet.add(trimmed)
+    }
+  }
   return SUPPORTED_EDITORS.map((editor) => {
     const version = String(c[`editor_version_${editor}`] || "").trim()
     return {

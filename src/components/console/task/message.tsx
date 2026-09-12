@@ -122,8 +122,8 @@ const MessageItem = ({ message, cli, isLatest = false }: { message: MessageType,
 
   // assistant 消息在时间旁边带上这次调用的模型与 token 用量——用户不必去
   // 请求日志页面对账。用量缺失（旧帧/非 assistant）时只显示时间。
-  // 模型与用量常驻可见（用户要求对话消息标出所用模型）；时间戳仍只在悬停时
-  // 显出，避免每条消息都顶一行 10px 时间噪声。
+  // 模型/用量与时间戳同款交互：平时隐去，悬停消息行才显出（2026-09-09 用户
+  // 定版：不想每条消息常驻一行元数据噪声）。
   const usage = message.data?.usage
   const usageLabel = usage
     ? `${message.data.model ? `${message.data.model} · ` : ""}${usage.total.toLocaleString()} tokens`
@@ -136,7 +136,11 @@ const MessageItem = ({ message, cli, isLatest = false }: { message: MessageType,
           <span className="text-transparent group-hover:text-muted-foreground transition-colors">
             {dayjs.unix(normalizeTimestampToSeconds(message.time)).format('MM-DD HH:mm:ss')}
           </span>
-          {usageLabel ? <span className="text-muted-foreground">{usageLabel}</span> : null}
+          {usageLabel ? (
+            <span className="text-transparent group-hover:text-muted-foreground transition-colors">
+              {usageLabel}
+            </span>
+          ) : null}
         </div>
       )}
       <div className="flex text-sm w-full mr-auto justify-start">

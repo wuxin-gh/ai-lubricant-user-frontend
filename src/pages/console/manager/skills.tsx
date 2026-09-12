@@ -616,8 +616,9 @@ function AddSkillDialog({
                 domain="skill"
                 onConfirm={async (result, payload) => {
                   // 引用模式走 v2（先落池 resources 再建引用 resource_references）；
-                  // 安装模式维持本地入库链路不变。
-                  if (payload.mode === "reference" || payload.type === "skills") {
+                  // 安装模式维持本地入库链路不变。skills（技能集）与 plugin 容器
+                  // （带 entries 的多技能插件）同一语义：整包 v2。
+                  if (payload.mode === "reference" || payload.type === "skills" || payload.type === "plugin") {
                     const pinned = payload.mode === "install" || payload.pinCommit
                     await createReferenceFromGithubV2({
                       repo: result.repo_full_name,
@@ -631,7 +632,7 @@ function AddSkillDialog({
                     })
                     const verb = payload.mode === "reference" ? "已引用" : "已安装"
                     toast.success(
-                      payload.type === "skills"
+                      payload.type === "skills" || payload.type === "plugin"
                         ? `${verb}技能集「${payload.name}」含 ${result.skill_entries.length} 个 skill（GitHub 直连）`
                         : `已引用 skill「${payload.name}」（GitHub 直连，服务器不存字节）`,
                     )

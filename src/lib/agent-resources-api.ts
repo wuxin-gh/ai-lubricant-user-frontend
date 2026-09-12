@@ -62,6 +62,11 @@ export type PluginListItem = {
   entry: string
   active_version?: string
   is_force_delivery: boolean
+  /** 来源：github | upload | npm | bare；source_url 为 GitHub 仓库或下载地址。 */
+  source_type?: string | null
+  source_url?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 export function fetchPluginListing(): Promise<PluginListItem[]> {
@@ -135,6 +140,11 @@ export type SkillListItem = {
   /** Skill ID surfaced by the swagger model — kept for backward compatibility. */
   skill_id?: string
   is_force_delivery?: boolean
+  /** 来源：github | upload；source_url 为 GitHub 归档或仓库地址。 */
+  source_type?: string | null
+  source_url?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 export function fetchSkillListing(): Promise<SkillListItem[]> {

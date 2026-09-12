@@ -11,13 +11,47 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react"
 import type { LucideIcon } from "lucide-react"
-import { ExternalLink, GitFork, Star } from "lucide-react"
+import { ExternalLink, GitFork, Star, ChevronDown } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { StackBadges } from "@/components/ui/stack-badges"
-import { normalizeModules } from "./leaderboard-labels"
+import { normalizeModules, normalizeSkillInstallSpec } from "./leaderboard-labels"
 import { fetchLeaderboardDiscover, type LeaderboardDiscoverItem } from "@/api/marketplaceRaw"
+
+/**
+ * 客户端翻页器：上一页 / 第 x/y 页 · 共 n 个 / 下一页。
+ * 复用 ModelMetadata 的 Pager 样式；资源中心「自己资源」与「市场」两处共用。
+ */
+export function MarketPager({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  onPageChange: (page: number) => void
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const current = Math.min(page, totalPages)
+  if (total === 0) return null
+  return (
+    <div className="flex items-center justify-center gap-2 pt-2 text-xs text-muted-foreground">
+      <Button size="sm" variant="outline" onClick={() => onPageChange(current - 1)} disabled={current <= 1}>
+        上一页
+      </Button>
+      <span>第 {current}/{totalPages} 页 · 共 {total} 个</span>
+      <Button size="sm" variant="outline" onClick={() => onPageChange(current + 1)} disabled={current >= totalPages}>
+        下一页
+      </Button>
+    </div>
+  )
+}
+
+/** 默认每页条数：3 列网格 × 8 行 = 24。 */
+export const MARKET_PAGE_SIZE = 24
 
 /** 榜单的 target_module 取值，与后端 ``classify()`` 的映射一致。 */
 export type LeaderboardModule = "mcp" | "skill" | "plugin" | "prompt"
@@ -55,18 +89,29 @@ export function useLeaderboardMarket(
   return { items, loading }
 }
 
-/** 按关键字过滤榜单条目（仓库名/描述/语言/关键词/场景）。空串返回原数组。 */
+/** 按关键字过滤榜单条目（仓库名/描述/语言/关键词/场景/子技能名与说明）。空串返回原数组。 */
 export function filterLeaderboardItems(
   items: LeaderboardDiscoverItem[],
   query: string,
 ): LeaderboardDiscoverItem[] {
   const q = query.trim().toLowerCase()
   if (!q) return items
-  return items.filter((item) =>
-    [item.repo_full_name, item.description, item.language, ...(item.topics || []), ...(item.use_cases || [])]
-      .filter(Boolean)
-      .some((field) => String(field).toLowerCase().includes(q)),
-  )
+  return items.filter((item) => {
+    const fields: string[] = [
+      item.repo_full_name,
+      item.description,
+      item.language,
+      ...(item.topics || []),
+      ...(item.use_cases || []),
+    ]
+    // 技能集：子技能名/说明也参与匹配——搜 "docx" 能命中 anthropics/skills 集合。
+    const spec = normalizeSkillInstallSpec(item.install_spec)
+    for (const entry of spec.entries) {
+      fields.push(entry.name)
+      if (entry.description) fields.push(entry.description)
+    }
+    return fields.filter(Boolean).some((field) => String(field).toLowerCase().includes(q))
+  })
 }
 
 /** 热度行：名次 / star / fork / 语言。名次是榜单位置事实，热度是 GitHub 事实。 */
@@ -111,6 +156,17 @@ export function LeaderboardMarketCard({
   )
   const topics = (item.tags || item.topics || []).slice(0, 4)
   const modules = normalizeModules(item.target_modules, item.target_module)
+  // 插件容器：一行卡片 + 可展开的子技能列表（名称+说明）。整包安装/引用，任务期再勾子技能。
+  // skills（存量技能集）已归 plugin 容器——两类都按容器展开。纯 zip 插件（无
+  // entries）不展开——它是整包，不是容器。
+  const skillSpec = useMemo(
+    () => (modules.includes("skills") || modules.includes("plugin")
+      ? normalizeSkillInstallSpec(item.install_spec)
+      : null),
+    [modules, item.install_spec],
+  )
+  const isCollection = !!skillSpec && skillSpec.entries.length > 0
+  const [expanded, setExpanded] = useState(false)
 
   return (
     <Card size="sm" className="shadow-none">
@@ -123,7 +179,9 @@ export function LeaderboardMarketCard({
             <div className="flex items-center gap-1.5">
               <span className="truncate text-sm font-medium">{shortName}</span>
               <Badge variant="outline" className="shrink-0 text-[10px]">榜单</Badge>
-              {modules.length > 1 ? (
+              {isCollection ? (
+                <Badge variant="outline" className="shrink-0 text-[10px]">技能集</Badge>
+              ) : modules.length > 1 ? (
                 <Badge variant="outline" className="shrink-0 text-[10px]">{modules.map((m) => m.toUpperCase()).join("+")}</Badge>
               ) : null}
               {!item.installable ? (
@@ -145,6 +203,31 @@ export function LeaderboardMarketCard({
         <p className="mb-3 mt-2 line-clamp-2 text-xs text-muted-foreground">
           {item.description || "暂无描述"}
         </p>
+
+        {isCollection && skillSpec && skillSpec.entries.length > 0 ? (
+          <div className="mb-3">
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ChevronDown className={`size-3 transition-transform ${expanded ? "rotate-180" : ""}`} />
+              包含 {skillSpec.entries.length} 个子技能（整包安装，任务期再勾选）
+            </button>
+            {expanded ? (
+              <div className="mt-1.5 max-h-48 space-y-1.5 overflow-y-auto rounded-md border bg-muted/20 p-2">
+                {skillSpec.entries.map((entry, i) => (
+                  <div key={i} className="text-[11px]">
+                    <span className="font-medium text-foreground">{entry.name || `#${i + 1}`}</span>
+                    {entry.description ? (
+                      <span className="ml-1.5 text-muted-foreground line-clamp-2">{entry.description}</span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {topics.length > 0 ? (
           <div className="mb-3 flex flex-wrap gap-1">

@@ -59,6 +59,8 @@ export interface MarketplaceSourceConfig {
   agency_agents_zh_ref: string
   agentscope_enabled: boolean
   agentscope_interval_hours: number
+  skillhub_enabled: boolean
+  skillhub_interval_hours: number
   // 各源出网代理：留空回落 proxy_id 全局；agentscope 无此字段（恒走全局）
   leaderboard_proxy_id: string
   agency_agents_proxy_id: string
@@ -68,6 +70,7 @@ export interface MarketplaceSourceConfig {
   agency_agents_last_sync_at: string
   agency_agents_zh_last_sync_at: string
   agentscope_last_sync_at: string
+  skillhub_last_sync_at: string
   default_leaderboard_repo: string
   default_leaderboard_boards: string
 }
@@ -92,6 +95,8 @@ export interface MarketplaceSourceInput {
   agency_agents_zh_proxy_id?: string
   agentscope_enabled?: boolean
   agentscope_interval_hours?: number
+  skillhub_enabled?: boolean
+  skillhub_interval_hours?: number
 }
 
 export async function getMarketplaceSourceConfig(): Promise<MarketplaceSourceConfig> {

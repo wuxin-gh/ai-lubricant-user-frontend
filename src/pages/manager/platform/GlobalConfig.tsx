@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react"
-import { CircleHelp, Plus, Save, Trash2 } from "lucide-react"
+import { CircleHelp, Plus, RefreshCw, Save, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { AdminPage } from "@/components/manager/platform-page"
@@ -40,6 +40,7 @@ import {
   updateDataRetentionConfig,
   updateLogRetentionConfig,
 } from "@/@admin-port/api/dashboard"
+import { getNodeIpBackupConfig } from "@/api/marketplaceAdmin"
 import type { ModelMetadataEntry } from "@/@admin-port/api/modelMetadata"
 import type { HeaderTemplate, ModelRuleTemplate, ProviderLimitFreezeRule, TestTypeDef } from "@/@admin-port/types/admin"
 import { ModelIdRewriteEditor } from "./ModelIdRewriteEditor"
@@ -94,6 +95,21 @@ function splitLines(value: string): string[] {
 
 function splitList(value: string): string[] {
   return value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean)
+}
+
+/** 追加合并：当前在前 + 备份里没有的追加在后（保序去重）。返回合并结果与新增条目。 */
+function mergeAppendUrls(current: string[], backup: string[]): { merged: string[]; added: string[] } {
+  const seen = new Set(current.map((u) => u.trim()).filter(Boolean))
+  const merged = [...current]
+  const added: string[] = []
+  for (const raw of backup) {
+    const u = raw.trim()
+    if (!u || seen.has(u)) continue
+    seen.add(u)
+    merged.push(u)
+    added.push(u)
+  }
+  return { merged, added }
 }
 
 function HelpTip({ children }: { children: ReactNode }) {
@@ -235,6 +251,19 @@ function RunModeTab({ active }: { active: boolean }) {
 
 function NodeGlobalTab({ active }: { active: boolean }) {
   const state = useConfig<NodeGlobalConfig>(active, loadNodeGlobal)
+  // 市场备份（备用数据）：active 时拉一次，供 diff 与「同步市场数据」按钮。
+  // undefined=加载中，null=加载失败，object=已加载。
+  const [backup, setBackup] = useState<{ ipv4_urls: string[]; ipv6_urls: string[] } | null | undefined>(undefined)
+
+  useEffect(() => {
+    if (!active || backup !== undefined) return
+    let cancelled = false
+    getNodeIpBackupConfig()
+      .then((cfg) => { if (!cancelled) setBackup({ ipv4_urls: cfg.ipv4_urls, ipv6_urls: cfg.ipv6_urls }) })
+      .catch(() => { if (!cancelled) setBackup(null) })
+    return () => { cancelled = true }
+  }, [active, backup])
+
   const save = async () => {
     if (!state.value) return
     state.setSaving(true)
@@ -248,10 +277,41 @@ function NodeGlobalTab({ active }: { active: boolean }) {
       state.setSaving(false)
     }
   }
+
+  // diff：市场备份里有没有当前编辑器里还没有的 URL——有才值得导入。
+  const importable4 = state.value && backup ? mergeAppendUrls(state.value.ipv4_urls, backup.ipv4_urls).added.length : 0
+  const importable6 = state.value && backup ? mergeAppendUrls(state.value.ipv6_urls, backup.ipv6_urls).added.length : 0
+  const hasImportable = importable4 + importable6 > 0
+
+  // 追加进编辑器（staged，不保存）——管理员点「保存」才真正下发到节点。
+  const syncFromMarket = () => {
+    if (!state.value || !backup) return
+    const m4 = mergeAppendUrls(state.value.ipv4_urls, backup.ipv4_urls)
+    const m6 = mergeAppendUrls(state.value.ipv6_urls, backup.ipv6_urls)
+    state.setValue({ ...state.value, ipv4_urls: m4.merged, ipv6_urls: m6.merged })
+    toast.success(`已追加市场备份 ${m4.added.length + m6.added.length} 条到编辑器，请点「保存」下发`)
+  }
+
   return (
     <TabFrame description="配置全部真实节点共享的公网 IPv4/IPv6 探测地址，保存后实时下发到在线节点。" loading={state.loading} saving={state.saving} error={state.error} onReload={state.load} onSave={() => void save()}>
       {state.value ? <>
         <Alert className="mb-5"><AlertDescription>每个地址族建议配置至少 3 个不同 HTTP(S) 网站。节点串行访问，多个网站返回同一地址后才确认。一行一个 URL，留空表示禁用对应地址族探测。</AlertDescription></Alert>
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            {backup === undefined ? (
+              <span className="text-muted-foreground">市场备份：读取中…</span>
+            ) : backup === null ? (
+              <span className="text-muted-foreground">市场备份：加载失败（仍可手动编辑）</span>
+            ) : hasImportable ? (
+              <span className="text-destructive">市场备份有 {importable4 + importable6} 条未在用（IPv4 {importable4} · IPv6 {importable6}）</span>
+            ) : (
+              <span className="text-emerald-600">市场备份的地址都已在用</span>
+            )}
+          </div>
+          <Button size="sm" variant="outline" disabled={!hasImportable} onClick={syncFromMarket}>
+            <RefreshCw className="mr-1 h-4 w-4" />同步市场数据
+          </Button>
+        </div>
         <div className="grid gap-5 lg:grid-cols-2">
           <Field label="IPv4 获取地址"><Textarea className="min-h-80 resize-y font-mono text-xs leading-5" value={(state.value.ipv4_urls ?? []).join("\n")} onChange={(event) => state.setValue((current) => current ? { ...current, ipv4_urls: splitLines(event.target.value) } : current)} /></Field>
           <Field label="IPv6 获取地址"><Textarea className="min-h-80 resize-y font-mono text-xs leading-5" value={(state.value.ipv6_urls ?? []).join("\n")} onChange={(event) => state.setValue((current) => current ? { ...current, ipv6_urls: splitLines(event.target.value) } : current)} /></Field>

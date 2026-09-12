@@ -43,17 +43,26 @@ function stageLabel(stage: string): string {
 }
 
 export default function ProjectBuildTab({ projectId, nodes }: { projectId: string; nodes: NodeInfo[] }) {
-  // 具备 Xcode 构建能力的节点（hostTools 探针上报的 xcodebuild_version 标签）。
-  // mac 的 node-ios（ios_host）同样承载 xcodebuild，是首选构建节点——服务端
-  // start 校验 capability + 使用权，这里只做展示过滤。
+  // mac 节点（node-ios/ios_host 也是合法构建节点）。环境检测拆两半：
+  // xcodebuild_version = Xcode 本体；xcode_ios_sdk = iOS 真机平台组件（Xcode 15+
+  // 独立安装项，缺它真机构建 destination 解析直接失败）。下拉里所有 mac 节点都
+  // 列出来——环境不全的禁用并标注缺哪个，而不是整块藏掉。
   const darwinNodes = useMemo(
     () => nodes.filter((n) => n.node_role === "execution" || n.node_role === "ios_host"),
     [nodes],
   )
   const buildNodes = useMemo(
-    () => darwinNodes.filter((n) => !!n.capabilities?.xcodebuild_version),
+    () => darwinNodes.filter((n) => !!n.capabilities?.xcodebuild_version && !!n.capabilities?.xcode_ios_sdk),
     [darwinNodes],
   )
+
+  /** 缺环境提示：缺哪个说哪个，给可操作的修复动作。 */
+  const envGapLabel = (n: NodeInfo): string => {
+    const gaps: string[] = []
+    if (!n.capabilities?.xcodebuild_version) gaps.push("缺 Xcode")
+    if (!n.capabilities?.xcode_ios_sdk) gaps.push("缺 iOS 平台组件")
+    return gaps.join("，")
+  }
 
   const [recipeKind, setRecipeKind] = useState(RECIPES[0].value)
   const [nodeId, setNodeId] = useState("")
@@ -123,28 +132,14 @@ export default function ProjectBuildTab({ projectId, nodes }: { projectId: strin
     }
   }
 
-  // ── 空态：没有 Xcode 节点 ─────────────────────────────────────────────
-  if (!buildNodes.length) {
-    // 区分两种缺因：有 macOS 节点但缺 Xcode（指引去环境面板检测/看原因），
-    // 和根本没有 macOS 节点。node-ios（ios_host）也是合法构建节点。
-    const macWithoutXcode = darwinNodes.some((n) => !(n.capabilities?.xcodebuild_version || "").trim())
+  // ── 空态：一个 mac 节点都没有 ─────────────────────────────────────────
+  // 环境不全的节点仍出现在下拉里（禁用+标注），所以这里只剩「无 mac 节点」一种空态。
+  if (!darwinNodes.length) {
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">
-        {macWithoutXcode ? (
-          <>
-            macOS 节点未检测到完整 Xcode（xcodebuild），无法构建。
-            <br />
-            Xcode 无法远程自动安装：请在该节点上从 App Store 安装完整 Xcode 后，由管理员在
-            节点详情「环境」面板点「检测 Xcode」——检测成功即刷新构建能力，无需重启节点
-            （旧版节点程序需重启一次才能上报）。
-          </>
-        ) : (
-          <>
-            暂无 macOS 节点（执行节点或 iOS 设备主机均可，需安装完整 Xcode）。
-            <br />
-            绑定后即可在此构建 WDA。
-          </>
-        )}
+        暂无 macOS 节点（执行节点或 iOS 设备主机均可，需安装完整 Xcode）。
+        <br />
+        绑定后即可在此构建 WDA。
       </div>
     )
   }
@@ -176,13 +171,28 @@ export default function ProjectBuildTab({ projectId, nodes }: { projectId: strin
               <Select value={nodeId} onValueChange={setNodeId}>
                 <SelectTrigger><SelectValue placeholder="选择节点" /></SelectTrigger>
                 <SelectContent>
-                  {buildNodes.map((n) => (
-                    <SelectItem key={n.node_id} value={n.node_id}>
-                      {n.node_name}（{n.capabilities?.xcodebuild_version}）
-                    </SelectItem>
-                  ))}
+                  {/* 所有 mac 节点都列出：环境齐全的可选；缺的禁用并在文案里
+                      直接标注缺什么（缺 Xcode / 缺 iOS 平台组件），管理员一眼
+                      知道去补哪块。 */}
+                  {darwinNodes.map((n) => {
+                    const ready = !!n.capabilities?.xcodebuild_version && !!n.capabilities?.xcode_ios_sdk
+                    const gap = envGapLabel(n)
+                    return (
+                      <SelectItem key={n.node_id} value={n.node_id} disabled={!ready}>
+                        {ready
+                          ? `${n.node_name}（Xcode ${n.capabilities?.xcodebuild_version} · iOS SDK ${n.capabilities?.xcode_ios_sdk}）`
+                          : `${n.node_name}（${gap}）`}
+                      </SelectItem>
+                    )
+                  })}
                 </SelectContent>
               </Select>
+              {!!darwinNodes.length && !buildNodes.length && (
+                <div className="text-xs text-muted-foreground">
+                  当前 macOS 节点缺少 iOS 构建环境。缺 Xcode：在节点详情「环境」面板自动安装；
+                  缺 iOS 平台组件：在该 Mac 执行 <code>xcodebuild -downloadPlatform iOS</code>，完成后点节点详情「刷新标签」。
+                </div>
+              )}
             </div>
           </div>
 

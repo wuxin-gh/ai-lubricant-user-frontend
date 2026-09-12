@@ -51,6 +51,10 @@ export interface MessageComposerProps<T = never> {
   onSwitchModel?: (model: string) => void
   /** 模型菜单尾部的「添加模型…」入口。 */
   onAddModel?: () => void
+  /** provider=claude 时，命中 Claude Code 内置别名的模型名需要禁用。
+   * 调用方算好列表传入，组件灰显并附提示。 */
+  disabledModels?: string[]
+  disabledModelHint?: string
   /** 要求发送前必须先选模型：多模型可选而当前为空时，发送会被拦截并提示，
    * 触发按钮也会变成琥珀色的「请选择模型」。仅任务对话等需要明确每轮模型
    * 的场景启用；普通会话允许空模型走默认值，不受影响。 */
@@ -88,6 +92,8 @@ export default function MessageComposer<T = never>({
   modelOptions = [],
   onSwitchModel,
   onAddModel,
+  disabledModels,
+  disabledModelHint,
   requireModel = false,
   leadingActions,
   leftActions,
@@ -268,14 +274,27 @@ export default function MessageComposer<T = never>({
                 <div className="max-h-[min(380px,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto">
                   {modelOptions.length === 0 ? <DropdownMenuItem disabled>暂无可用模型</DropdownMenuItem> : filteredModels.length === 0 ? <div className="px-3 py-4 text-center text-sm text-muted-foreground">无匹配模型</div> : (
                     <DropdownMenuRadioGroup value={modelValue}>
-                      {filteredModels.map((option) => (
-                        <DropdownMenuRadioItem key={option.value} value={option.value} onSelect={() => onSwitchModel?.(option.value)} className="min-w-0">
-                          <span className="flex min-w-0 flex-col">
-                            <span className="truncate">{option.label || option.value}</span>
-                            {option.description && <span className="truncate text-xs text-muted-foreground">{option.description}</span>}
-                          </span>
-                        </DropdownMenuRadioItem>
-                      ))}
+                      {filteredModels.map((option) => {
+                        const isDisabled = disabledModels?.includes(option.value)
+                        return (
+                          <DropdownMenuRadioItem
+                            key={option.value}
+                            value={option.value}
+                            onSelect={(event) => { if (isDisabled) { event.preventDefault(); return } onSwitchModel?.(option.value) }}
+                            className={cn("min-w-0", isDisabled && "cursor-not-allowed opacity-40")}
+                            title={isDisabled ? (disabledModelHint || "") : undefined}
+                          >
+                            <span className="flex min-w-0 flex-col">
+                              <span className="truncate">{option.label || option.value}</span>
+                              {isDisabled && disabledModelHint ? (
+                                <span className="truncate text-xs text-amber-600 dark:text-amber-400">{disabledModelHint}</span>
+                              ) : option.description ? (
+                                <span className="truncate text-xs text-muted-foreground">{option.description}</span>
+                              ) : null}
+                            </span>
+                          </DropdownMenuRadioItem>
+                        )
+                      })}
                     </DropdownMenuRadioGroup>
                   )}
                 </div>

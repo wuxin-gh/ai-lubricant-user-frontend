@@ -19,6 +19,8 @@ export default function MultiSelect({
   placeholder = "请选择",
   emptyHint = "暂无可选项",
   className,
+  disabledValues,
+  disabledHint,
 }: {
   options: Array<{ value: string; label?: string; hint?: string }>
   value: string[]
@@ -26,10 +28,14 @@ export default function MultiSelect({
   placeholder?: string
   emptyHint?: string
   className?: string
+  /** 禁用的 value 集合：渲染但不可勾选，附 disabledHint 提示。 */
+  disabledValues?: string[]
+  disabledHint?: string
 }) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const selectedSet = useMemo(() => new Set(value), [value])
+  const disabledSet = useMemo(() => new Set(disabledValues || []), [disabledValues])
   const labelOf = useMemo(() => {
     const map = new Map<string, string>()
     for (const option of options) map.set(option.value, option.label || option.value)
@@ -124,21 +130,29 @@ export default function MultiSelect({
           ) : (
             filteredOptions.map((option) => {
               const checked = selectedSet.has(option.value)
+              const isDisabled = disabledSet.has(option.value)
               return (
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => toggle(option.value)}
+                  disabled={isDisabled}
+                  onClick={() => !isDisabled && toggle(option.value)}
                   className={cn(
-                    "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted",
+                    "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm",
+                    isDisabled ? "cursor-not-allowed opacity-40" : "hover:bg-muted",
                     checked && "font-medium"
                   )}
+                  title={isDisabled ? (disabledHint || "") : undefined}
                 >
                   <span className="flex size-4 shrink-0 items-center justify-center">
                     {checked && <IconCheck className="size-3.5 text-primary" />}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{option.label || option.value}</span>
-                  {option.hint && <span className="shrink-0 text-xs text-muted-foreground">{option.hint}</span>}
+                  {isDisabled && disabledHint ? (
+                    <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">{disabledHint}</span>
+                  ) : (
+                    option.hint && <span className="shrink-0 text-xs text-muted-foreground">{option.hint}</span>
+                  )}
                 </button>
               )
             })

@@ -43,6 +43,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Spinner } from "@/components/ui/spinner"
 import { formatTokens } from "@/utils/common"
+import { isClaudeReservedModelAlias, CLAUDE_RESERVED_MODEL_HINT } from "@/utils/claude-models"
 
 /**
  * 任务对话面板。实时轮次来自任务的 SSE 事件流（节点运行时事件被后端桥接成 JSON，
@@ -832,6 +833,8 @@ export default function TaskWorkspaceChat({
           modelOptions={(models || []).map((modelId) => ({ value: modelId, label: modelId }))}
           onSwitchModel={(modelId) => void onSwitchModel?.(modelId)}
           onAddModel={onAddModel}
+          disabledModels={(models || []).filter((m) => isClaudeReservedModelAlias(m))}
+          disabledModelHint={CLAUDE_RESERVED_MODEL_HINT}
           requireModel={requireModel}
           leftActions={
             <>

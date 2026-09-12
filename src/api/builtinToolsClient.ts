@@ -22,7 +22,14 @@ async function toolFetch<T>(path: string, init?: RequestInit & { baseOverride?: 
     let detail = `HTTP ${r.status}`
     try {
       const data = await r.json()
-      detail = data?.detail || data?.message || detail
+      // 后端统一信封 {error:{message,...}}；FastAPI HTTPException 直接 {detail};
+      // 兼容两种形态，取最深处的可读 message 给用户看。
+      const err = data?.error
+      if (err && typeof err === "object") {
+        detail = err.message || err.detail || JSON.stringify(err)
+      } else {
+        detail = data?.detail || data?.message || detail
+      }
     } catch {
       // ignore parse error, keep default detail
     }
@@ -331,15 +338,15 @@ export function claimIosDevice(body: { node_id: string; udid: string; label: str
 }
 
 export function listIosSigningProfiles(): Promise<{ profiles: IosSigningProfile[] }> {
-  return toolFetch(`/ios/signing-profiles`, { baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/signing-profiles`, { baseOverride: "/api/v1/users/ios" })
 }
 
 export function createIosSigningProfile(body: { name: string; kind: "asc" | "p12" | "apple_id"; secret_data: Record<string, unknown> }): Promise<IosSigningProfile> {
-  return toolFetch(`/ios/signing-profiles`, { method: "POST", body: JSON.stringify(body), baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/signing-profiles`, { method: "POST", body: JSON.stringify(body), baseOverride: "/api/v1/users/ios" })
 }
 
 export function deleteIosSigningProfile(profileId: number): Promise<{ deleted: boolean }> {
-  return toolFetch(`/ios/signing-profiles/${profileId}`, { method: "DELETE", baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/signing-profiles/${profileId}`, { method: "DELETE", baseOverride: "/api/v1/users/ios" })
 }
 
 /** 原地更新签名配置：只改名（secret_data 省略），或整包替换材料（id 不变，设备绑定不断）。 */
@@ -347,7 +354,7 @@ export function updateIosSigningProfile(
   profileId: number,
   body: { name: string; secret_data?: Record<string, unknown> },
 ): Promise<IosSigningProfile> {
-  return toolFetch(`/ios/signing-profiles/${profileId}`, {
+  return toolFetch(`/signing-profiles/${profileId}`, {
     method: "PUT",
     body: JSON.stringify(body),
     baseOverride: "/api/v1/users/ios",
@@ -364,8 +371,12 @@ export function loginAppleId(body: {
   password: string
   /** 重新登录已有配置（原 id 更新，设备绑定不断）。 */
   profile_id?: number
+  /** 出口代理池条目 id（network 模式）：gsa.apple.com 拒数据中心 IP，被拒网络经代理登录。空 = 直连。 */
+  proxy_config_id?: string
+  /** 远程 anisette 服务器 URL（如 ani.sidestore.io）：取真实设备指纹，避开本地虚拟指纹被 Apple 503。空 = 本地 anisette 库。 */
+  anisette_server?: string
 }): Promise<IosAppleIdLoginResult> {
-  return toolFetch(`/ios/signing-profiles/apple-id/login`, {
+  return toolFetch(`/signing-profiles/apple-id/login`, {
     method: "POST",
     body: JSON.stringify(body),
     baseOverride: "/api/v1/users/ios",
@@ -378,8 +389,12 @@ export function verifyAppleId2fa(body: {
   password: string
   code: string
   profile_id?: number
+  /** 与 login 同口径：2FA 完成那步请求也经同一代理出网。 */
+  proxy_config_id?: string
+  /** 与 login 同口径：远程 anisette 服务器。 */
+  anisette_server?: string
 }): Promise<IosAppleIdLoginResult> {
-  return toolFetch(`/ios/signing-profiles/apple-id/verify-2fa`, {
+  return toolFetch(`/signing-profiles/apple-id/verify-2fa`, {
     method: "POST",
     body: JSON.stringify(body),
     baseOverride: "/api/v1/users/ios",
@@ -393,15 +408,15 @@ export function startIosWdaJob(resourceId: number, body: {
   wda_bundle_id?: string
   xctest_config_name?: string
 }): Promise<{ job_id: string; device_id: string; action: string; status: string }> {
-  return toolFetch(`/ios/devices/${resourceId}/wda/${body.action}`, { method: "POST", body: JSON.stringify(body), baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/devices/${resourceId}/wda/${body.action}`, { method: "POST", body: JSON.stringify(body), baseOverride: "/api/v1/users/ios" })
 }
 
 export function getIosWdaJobStatus(resourceId: number, jobId: string): Promise<IosWdaJobSnapshot> {
-  return toolFetch(`/ios/devices/${resourceId}/wda/jobs/${encodeURIComponent(jobId)}`, { baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/devices/${resourceId}/wda/jobs/${encodeURIComponent(jobId)}`, { baseOverride: "/api/v1/users/ios" })
 }
 
 export function cancelIosWdaJob(resourceId: number, jobId: string): Promise<{ job_id: string; cancelled: boolean }> {
-  return toolFetch(`/ios/devices/${resourceId}/wda/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", baseOverride: "/api/v1/users/ios" })
+  return toolFetch(`/devices/${resourceId}/wda/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", baseOverride: "/api/v1/users/ios" })
 }
 
 // ==================== 项目页「构建」tab ====================

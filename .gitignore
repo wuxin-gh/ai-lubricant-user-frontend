@@ -9,7 +9,9 @@ pnpm-workspace.yaml
 lerna-debug.log*
 
 node_modules
-dist
+# dist 随库发布：服务端一键升级从 GitHub 公开仓 clone（含子模块），前端产物必须
+# 在库里才能免构建部署。publish_github.sh 发布前会用 vite 重构建（绕开 tsc 存量报错）。
+# dist-ssr 仍是纯本地产物，不随库。
 dist-ssr
 *.local
 

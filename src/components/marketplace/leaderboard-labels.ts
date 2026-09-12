@@ -5,11 +5,12 @@
  * 之后漂移（比如详情里显示「MCP」而卡片显示「mcp」）。
  */
 
-/** 我们市场的安装形态。board 是「主题」，这里是「安装形态」，两者不等价。 */
+/** 我们市场的安装形态。board 是「主题」，这里是「安装形态」，两者不等价。
+ * skills（技能集）已归入 plugin 容器——保留键仅作存量行展示兼容。 */
 export const MODULE_LABELS: Record<string, string> = {
   mcp: "MCP",
   skill: "Skill",
-  skills: "技能集",
+  skills: "插件（技能集）",
   prompt: "提示词",
   plugin: "插件",
 }
@@ -20,6 +21,7 @@ export const SOURCE_LABELS: Record<string, string> = {
   "agency-agents": "agency-agents",
   "agency-agents-zh": "agency-agents-zh",
   "agentscope": "agentscope",
+  "skillhub": "SkillHub",
   manual: "手动添加",
 }
 
@@ -32,16 +34,21 @@ export const EDITOR_LABELS: Record<string, string> = {
   gemini: "Gemini",
 }
 
-/** 分类单选的固定顺序（与后端 TARGET_MODULES 对齐）。 */
-export const ALL_MODULES = ["mcp", "skill", "skills", "plugin", "prompt"] as const
+/** 分类单选的固定顺序（与后端 TARGET_MODULES 对齐）。skills 已归入 plugin 容器——
+ * 不再作为新分类选项，仅 normalizeModules 兼容存量值。 */
+export const ALL_MODULES = ["mcp", "skill", "plugin", "prompt"] as const
 
 export type LeaderboardModuleOption = typeof ALL_MODULES[number]
+
+/** normalizeModules 认识的值：新四类 + 存量 skills（读侧映射展示用）。 */
+const _KNOWN_MODULES = [...ALL_MODULES, "skills"] as const
 
 /**
  * 把分类收口成数组。兼容：
  * - 新后端：string[]
  * - 未重启的旧后端：JSON 字符串（'["mcp","skill"]'）
  * - 更老数据：只有 target_module 单值列
+ * - 存量 skills 行：技能集已归 plugin 容器，读侧仍按原值透出（展示层标签兼容）。
  */
 export function normalizeModules(raw: unknown, primary = ""): string[] {
   let value = raw
@@ -49,10 +56,10 @@ export function normalizeModules(raw: unknown, primary = ""): string[] {
     try { value = JSON.parse(value) } catch { value = value ? [value] : [] }
   }
   if (Array.isArray(value)) {
-    const modules = value.map((m) => String(m)).filter((m) => (ALL_MODULES as readonly string[]).includes(m))
+    const modules = value.map((m) => String(m)).filter((m) => (_KNOWN_MODULES as readonly string[]).includes(m))
     if (modules.length > 0) return [...new Set(modules)]
   }
-  return primary && (ALL_MODULES as readonly string[]).includes(primary) ? [primary] : []
+  return primary && (_KNOWN_MODULES as readonly string[]).includes(primary) ? [primary] : []
 }
 
 /** JSONB 在旧服务进程上可能以字符串返回；统一收口成 external_data 对象。 */
@@ -72,11 +79,16 @@ export interface SkillEntry {
   path: string
   entry: string
   editors: string[]
+  /** 子技能说明（探针读 SKILL.md frontmatter description；展示/搜索用）。 */
+  description?: string
 }
 
 /**
  * install_spec.skill 收口成 entries 形态（与后端 normalize_skill_install_spec 同口径，幂等）。
  * 旧单对象 {install_method, path, ref} → 一个 claude entry；已是 entries 形态 → 原样。
+ *
+ * 插件容器（原技能集）：落库后 install_spec 形如 ``{plugin: {...entries}}``——
+ * entries 在 plugin 壳里时也读出来，让卡片/编辑弹框按容器展开子技能。
  */
 export function normalizeSkillInstallSpec(spec: unknown): {
   install_method?: string
@@ -86,10 +98,33 @@ export function normalizeSkillInstallSpec(spec: unknown): {
   const source = (spec && typeof spec === "object" && !Array.isArray(spec)
     ? spec as Record<string, unknown>
     : {}) as Record<string, unknown>
+  // skill 壳优先（单 skill / 旧集合形态）；否则 plugin 壳（插件容器）——纯 zip
+  // 插件（plugin 壳无 entries）不认作容器，返回空。
   const skill = source.skill && typeof source.skill === "object" && !Array.isArray(source.skill)
     ? source.skill as Record<string, unknown>
     : undefined
-  if (!skill) return { entries: [] }
+  if (!skill) {
+    const plugin = source.plugin && typeof source.plugin === "object" && !Array.isArray(source.plugin)
+      ? source.plugin as Record<string, unknown>
+      : undefined
+    if (plugin && Array.isArray(plugin.entries) && plugin.entries.length > 0) {
+      return {
+        install_method: plugin.install_method ? String(plugin.install_method) : undefined,
+        ref: plugin.ref ? String(plugin.ref) : undefined,
+        entries: plugin.entries.map((e) => {
+          const row = (e && typeof e === "object" ? e : {}) as Record<string, unknown>
+          return {
+            name: String(row.name || ""),
+            path: String(row.path || ""),
+            entry: String(row.entry || "SKILL.md"),
+            editors: Array.isArray(row.editors) ? row.editors.map(String) : [],
+            description: String(row.description || ""),
+          }
+        }),
+      }
+    }
+    return { entries: [] }
+  }
   const rawEntries = Array.isArray(skill.entries) ? skill.entries : []
   if (rawEntries.length > 0) {
     return {
@@ -102,6 +137,7 @@ export function normalizeSkillInstallSpec(spec: unknown): {
           path: String(row.path || ""),
           entry: String(row.entry || "SKILL.md"),
           editors: Array.isArray(row.editors) ? row.editors.map(String) : [],
+          description: String(row.description || ""),
         }
       }),
     }

@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label"
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
+import { SyncOverwriteDialog } from "./SyncOverwriteDialog"
 import { getMarketplaceSourceConfig, getProxyPoolTabConfig, updateMarketplaceSourceConfig } from "@/@admin-port/api/globalConfig"
 import type { ProxyEntry } from "@/@admin-port/api/proxyPool"
 import {
@@ -28,6 +29,7 @@ import {
   type LeaderboardStatus,
 } from "@/api/marketplaceAdmin"
 import { INTERVAL_OPTIONS, fmtSyncAt } from "./leaderboard-labels"
+import { useSourceSyncPoll } from "./useSourceSyncPoll"
 import { toast } from "sonner"
 
 export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
@@ -35,11 +37,23 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
   const [proxies, setProxies] = useState<ProxyEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [syncStatus, setSyncStatus] = useState<LeaderboardStatus | null>(null)
-  const [syncing, setSyncing] = useState(false)
+  // 同步状态由 useSourceSyncPoll 统一管理：running 认后端 _progress.running 真值
+  // （刷新后/load 时发现后端在跑也认），按钮禁用、进度条、轮询都由它驱动。
+  const { last: syncStatus, setLast: setSyncStatus, syncing, setSyncing, running } = useSourceSyncPoll<LeaderboardStatus>(
+    () => fetchLeaderboardStatus(),
+    (st) => !!st?.last_sync?.progress?.running,
+    (st) => {
+      const ls = st.last_sync
+      if (ls?.ok === false) toast.error("同步失败", { description: ls.detail })
+      else if (ls?.ok === true) { toast.success(ls.detail || "同步完成，新条目已进候选池（草稿）"); onSaved?.() }
+    },
+  )
   const [purging, setPurging] = useState(false)
   // 打开面板默认展开执行日志（重启后靠 DB 记录也能直接看到最近一次）
   const [showLogs, setShowLogs] = useState(true)
+
+  // 「立即同步」弹框：覆盖策略勾选（状态与复位都在弹框组件内部）
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false)
 
   const [enabled, setEnabled] = useState(false)
   const [interval, setInterval] = useState(24)
@@ -71,35 +85,26 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
 
   useEffect(() => { void load() }, [load])
 
-  const handleSync = async () => {
+  const handleSync = async (opts: { overwriteDraft: boolean; overwritePublished: boolean }) => {
     setSyncing(true)
     setShowLogs(true)
+    // 关闭弹框（勾选复位由弹框组件在关闭时自清）
+    setSyncDialogOpen(false)
     try {
       // 后台异步执行：POST 立即返回 {started: true}；已在跑 → 后端 409（toast 显示）
-      const res = await triggerLeaderboardSync()
+      const res = await triggerLeaderboardSync(
+        opts.overwritePublished || opts.overwriteDraft
+          ? { overwrite_published: opts.overwritePublished, overwrite_draft: opts.overwriteDraft }
+          : undefined,
+      )
       if (!res.started) {
         toast.error(res.detail || "启动同步失败")
         setSyncing(false)
         return
       }
-      // 轮询 status 端点拿实时进度+日志（last_sync.progress）
-      const poll = window.setInterval(async () => {
-        try {
-          const st = await fetchLeaderboardStatus()
-          setSyncStatus(st)
-          const running = st.last_sync?.progress?.running
-          if (!running && st.last_sync?.ran_at) {
-            window.clearInterval(poll)
-            setSyncing(false)
-            if (st.last_sync.ok === false) {
-              toast.error("同步失败", { description: st.last_sync.detail })
-            } else if (st.last_sync.ok === true) {
-              toast.success(st.last_sync.detail || "同步完成，新条目已进候选池（草稿）")
-              onSaved?.()
-            }
-          }
-        } catch { /* 轮询失败静默，继续 */ }
-      }, 3000)
+      // 后端已起任务，_progress.running 马上变 true，轮询 hook 接管实时进度。
+      // 立即拉一次，避免等 2s 才显示进度（也覆盖 create_task 还没置 running 的空窗）。
+      try { setSyncStatus(await fetchLeaderboardStatus()) } catch { /* 静默，hook 继续轮询 */ }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "启动同步失败")
       setSyncing(false)
@@ -183,8 +188,8 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
                       上次 {fmtSyncAt(config.leaderboard_last_sync_at)}（历史记录）
                     </span>
                   ) : null}
-                  {/* 同步中：实时进度 */}
-                  {syncing && progress?.running ? (
+                  {/* 同步中：实时进度（认后端 running 真值，刷新后仍在跑也显示） */}
+                  {progress?.running ? (
                     <span className="inline-flex items-center gap-2 text-xs">
                       <span className="font-medium text-foreground">
                         {progress.phase === "fetch" ? "拉取榜单文件…"
@@ -205,9 +210,9 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
                 </>
               )}
             </div>
-            <Button size="sm" variant="outline" disabled={syncing} onClick={() => void handleSync()}>
-              <RefreshCw className={`mr-1 h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-              {syncing ? "同步中..." : "立即同步"}
+            <Button size="sm" variant="outline" disabled={syncing || running} onClick={() => setSyncDialogOpen(true)}>
+              <RefreshCw className={`mr-1 h-4 w-4 ${syncing || running ? "animate-spin" : ""}`} />
+              {syncing || running ? "同步中..." : "立即同步"}
             </Button>
           </div>
 
@@ -221,7 +226,7 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
               >
                 {showLogs ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                 执行日志（{lastSync.logs.length} 条）
-                {syncing ? <Spinner className="ml-auto size-3" /> : null}
+                {(syncing || running) ? <Spinner className="ml-auto size-3" /> : null}
               </button>
               {showLogs ? (
                 <div className="max-h-64 overflow-y-auto border-t bg-muted/10 px-3 py-2 font-mono text-[11px] leading-5">
@@ -305,6 +310,15 @@ export function LeaderboardConfigPanel({ onSaved }: { onSaved?: () => void }) {
           </Button>
         </AlertDescription>
       </Alert>
+
+      {/* 「立即同步」弹框：覆盖策略勾选（所有内容源共用同一套语义），默认不勾=不覆盖。 */}
+      <SyncOverwriteDialog
+        open={syncDialogOpen}
+        onOpenChange={setSyncDialogOpen}
+        onConfirm={(opts) => void handleSync(opts)}
+        busy={syncing}
+        title="立即同步外部榜单"
+      />
     </div>
   )
 }

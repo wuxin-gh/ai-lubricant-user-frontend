@@ -184,12 +184,22 @@ export interface NodeProxyConfig {
   proxy_config_id: string
 }
 
-/** GET /api/v1/admin/nodes/{nodeId}/proxy-config —— 读取节点绑定的出口代理。 */
+/** GET /api/v1/admin/nodes/{nodeId}/proxy-config —— 读取节点绑定的出口代理。
+ *  node_server 的 Connect RPC 响应按 connect-go 口径序列化为 camelCase
+ *  （proxyConfigId/proxyMode/proxyUrl/proxyUrlPrefix），这里归一成接口声明的
+ *  snake_case，否则节点详情弹框读 cfg.proxy_config_id 永远 undefined → 永远显示「直连」。 */
 export async function getNodeProxyConfig(nodeId: string): Promise<NodeProxyConfig> {
-  const response = await request.get<NodeProxyConfig>(
+  const response = await request.get<Record<string, unknown>>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
   )
-  return response.data
+  const raw = (response.data || {}) as Record<string, unknown>
+  return {
+    revision: (raw.revision ?? raw.proxyRevision ?? 0) as string | number,
+    proxy_mode: String(raw.proxyMode ?? raw.proxy_mode ?? ""),
+    proxy_url: String(raw.proxyUrl ?? raw.proxy_url ?? ""),
+    proxy_url_prefix: String(raw.proxyUrlPrefix ?? raw.proxy_url_prefix ?? ""),
+    proxy_config_id: String(raw.proxyConfigId ?? raw.proxy_config_id ?? ""),
+  }
 }
 
 /** PUT /api/v1/admin/nodes/{nodeId}/proxy-config —— 设置节点绑定的出口代理并推送给该在线节点；空 id = 直连。 */
@@ -197,11 +207,19 @@ export async function updateNodeProxyConfig(
   nodeId: string,
   proxyConfigId: string,
 ): Promise<NodeProxyConfig> {
-  const response = await request.put<NodeProxyConfig>(
+  const response = await request.put<Record<string, unknown>>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/proxy-config`,
     { proxy_config_id: proxyConfigId || "" },
   )
-  return response.data
+  // 与 GET 同源（Connect RPC camelCase），归一后回传。
+  const raw = (response.data || {}) as Record<string, unknown>
+  return {
+    revision: (raw.revision ?? raw.proxyRevision ?? 0) as string | number,
+    proxy_mode: String(raw.proxyMode ?? raw.proxy_mode ?? ""),
+    proxy_url: String(raw.proxyUrl ?? raw.proxy_url ?? ""),
+    proxy_url_prefix: String(raw.proxyUrlPrefix ?? raw.proxy_url_prefix ?? ""),
+    proxy_config_id: String(raw.proxyConfigId ?? raw.proxy_config_id ?? ""),
+  }
 }
 
 
@@ -318,6 +336,110 @@ export async function installNodeHostTool(
   return response.data
 }
 
+/** RefreshNodeLabels 返回：合并后的全部能力标签（节点重新探测 + 服务端簿记）。 */
+export interface RefreshNodeLabelsResult {
+  node_id: string
+  labels: Record<string, string>
+}
+
+/**
+ * POST /api/v1/admin/nodes/{nodeId}/refresh-labels —— 让在线节点重新探测全部
+ * 能力标签（编辑器/host tool 版本、机器信息、--labels），无需重启节点进程。
+ *
+ * 节点回传与注册时同构的能力快照，服务端折进 capabilities；调用方刷新
+ * listNodes 即可见。节点离线报错、旧版节点（不认识该帧）会超时——错误
+ * 信息会提示升级节点。探测预算 30s + 往返，超时给足。
+ */
+export async function refreshNodeLabels(nodeId: string): Promise<RefreshNodeLabelsResult> {
+  const response = await request.post<RefreshNodeLabelsResult>(
+    `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/refresh-labels`,
+    undefined,
+    { timeout: 60000 },
+  )
+  return response.data
+}
+
+// ── 异步 Xcode 安装任务（.xip 下载/解压动辄数十分钟到数小时，同步 ack 装不下，
+//    走 HostToolJob 帧：start 短受理 → 事件帧进度 → 恰好一个 result，轮询快照） ──
+
+/** POST .../host-tools/xcode/jobs 的受理返回：job_id 已铸造，安装后台进行。 */
+export interface XcodeInstallJobStart {
+  node_id: string
+  job_id: string
+  status: string
+  target_version: string
+  download_url: string
+  download_size_bytes: number
+  requires_macos: string
+  beta: boolean
+  /** 目录来自上次成功快照（远端拉取失败）时为 true。 */
+  stale: boolean
+}
+
+/** GET .../host-tools/xcode/jobs/{jobId} 的进度快照（控制面内存态）。 */
+export interface XcodeInstallJobSnapshot {
+  job_id: string
+  tool: string
+  node_id: string
+  target_version: string
+  status: "running" | "completed" | "failed" | string
+  stage: string
+  percent: number
+  message: string
+  log_tail: string
+  current_bytes: number
+  total_bytes: number
+  retryable: boolean
+  error_code: string
+  xcodebuild_version: string
+  app_path: string
+  created_at: string
+  updated_at: string
+  completed_at: string
+  events: Array<{ seq: number; stage: string; message: string; timestamp: string }>
+}
+
+/**
+ * POST /api/v1/admin/nodes/{nodeId}/host-tools/xcode/jobs —— 启动 Xcode 自动安装。
+ *
+ * 服务端解析 xcodereleases 目录（targetVersion 缺省取配置默认，"latest" = 最新
+ * 非 beta 且兼容节点 macOS），节点受理后立即返回 job_id；进度轮询
+ * getNodeXcodeInstallJob，取消 cancelNodeXcodeInstallJob。
+ */
+export async function startNodeXcodeInstall(
+  nodeId: string,
+  targetVersion?: string,
+): Promise<XcodeInstallJobStart> {
+  const response = await request.post<XcodeInstallJobStart>(
+    `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/host-tools/xcode/jobs`,
+    targetVersion ? { target_version: targetVersion } : {},
+    { timeout: 60000 },
+  )
+  return response.data
+}
+
+/** GET /api/v1/admin/nodes/{nodeId}/host-tools/xcode/jobs/{jobId} —— 轮询进度快照。 */
+export async function getNodeXcodeInstallJob(
+  nodeId: string,
+  jobId: string,
+): Promise<XcodeInstallJobSnapshot> {
+  const response = await request.get<XcodeInstallJobSnapshot>(
+    `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/host-tools/xcode/jobs/${encodeURIComponent(jobId)}`,
+  )
+  return response.data
+}
+
+/** POST /api/v1/admin/nodes/{nodeId}/host-tools/xcode/jobs/{jobId}/cancel —— 协作取消。 */
+export async function cancelNodeXcodeInstallJob(
+  nodeId: string,
+  jobId: string,
+): Promise<{ cancelled: boolean }> {
+  const response = await request.post<{ cancelled: boolean }>(
+    `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/host-tools/xcode/jobs/${encodeURIComponent(jobId)}/cancel`,
+  )
+  return response.data
+}
+
 /** POST /api/v1/admin/nodes/{nodeId}/editors/{editor}/upgrade —— 在线升级编辑器 CLI */
 export async function upgradeNodeEditor(
   nodeId: string,
@@ -420,7 +542,12 @@ export function nodeCoverageVersion(
   if (!release || !node) return ""
   const os = node.capabilities?.os
   const arch = node.capabilities?.arch
-  const wanted = (node.role || "").trim() === "management" ? "management" : "execution"
+  // 与服务端 node_release_catalog.select_upgrade_assets 同口径：ios_host 认
+  // node-ios 资产（role=ios_host），而不是把它当成 execution 去找 node-execution。
+  // 此前 ios_host 恒落到 else → execution 分支，Mac 节点升级判定永远拿不到
+  // 自己的最新版本号，前端误报「尚未同步到任何节点发行版本」。
+  const role = (node.role || "").trim()
+  const wanted = role === "ios_host" ? "ios_host" : role === "management" ? "management" : "execution"
   const row = release.coverage.find(
     (c) => c.role === wanted && c.platform === os && c.arch === arch,
   )
