@@ -1629,11 +1629,10 @@ function AccountsTab({
 
   // 上报编辑态给父弹框：进入/退出表单、以及组件卸载（切 Tab/关弹框）都要同步，
   // 否则父层会拿着已卸载表单的 editing=true 永久拦截后续操作。
+  // onEditingChange 由父层 useCallback 固定引用，不随 render 抖动。
   useEffect(() => {
     onEditingChange?.(isEditing)
     return () => onEditingChange?.(false)
-    // onEditingChange 由父层 useCallback 固定引用，不随 render 抖动
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, onEditingChange])
 
   // 加载内置渠道的文档链接（仅部分渠道有，如 Cloudflare）
