@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronsUpDown,
   CircleQuestionMark,
+  CloudDownload,
   Copy,
   ExternalLink,
   KeyRound,
@@ -67,6 +68,7 @@ import {
 import { getProxies } from '@/@admin-port/api/proxyPool'
 import type { ProxyEntry } from '@/@admin-port/api/proxyPool'
 import { getDashboardStats, getMainConfig } from '@/@admin-port/api/dashboard'
+import { fetchMarketplaceManifest } from '@/api/marketplaceAdmin'
 import { getChannelTabConfig, getModelRuleTemplates } from '@/@admin-port/api/globalConfig'
 import type {
   AccountSchemaField,
@@ -3772,6 +3774,32 @@ function templateMetaFromManifest(manifest: Record<string, any> | null | undefin
   }
 }
 
+/**
+ * 渠道名 → 市场模板 id 用的 slug。必须与服务端 channel_template_export._slug 完全一致
+ * （小写、非 [a-z0-9._-] 的字符簇替换为 '-'、去首尾 '-._'、截断 120），否则
+ * 「同步市场数据」算出的 local.<slug> 匹配不到真正发布出去的模板。
+ */
+export function channelTemplateSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '').slice(0, 120)
+}
+
+/** 市场模板/预设里的对话协议行 → 表单态行（字段口径与 initCreate/loadData 一致）。 */
+function normalizeChatProtocolRows(rows: unknown): ChatProtocolConfig[] {
+  if (!Array.isArray(rows)) return []
+  return rows.map((row: any) => ({
+    id: safeString(row?.id),
+    enabled: row?.enabled !== false,
+    protocol: safeString(row?.protocol) || 'openai',
+    path: safeString(row?.path),
+    upstream_stream: normalizeUpstreamStream(row?.upstream_stream),
+    client_preset: safeString(row?.client_preset) || 'none',
+    header_template: safeString(row?.header_template),
+    system_type: safeString(row?.system_type) || 'auto',
+    send_reasoning_content: row?.send_reasoning_content !== false,
+    models: Array.isArray(row?.models) ? row.models.map(String) : [],
+  }))
+}
+
 /** manifest.resource.channel -> 渠道表单预设（复用 create 态的 presetData 路径）。 */
 function templatePresetFromManifest(manifest: Record<string, any> | null | undefined): ProviderCreatePreset | null {
   const channel = manifest?.resource?.channel
@@ -3803,6 +3831,9 @@ function templatePresetFromManifest(manifest: Record<string, any> | null | undef
     account_weight: safeNumber(channel.account_weight, 1),
     auto_update_models: channel.auto_update_models !== false,
     model_id_rewrite_rules: normalizeModelIdRewriteRules(channel.model_id_rewrite_rules),
+    // 代码渠道模板：builtin_type 决定新建渠道时的类型，code 是 spec 源码。
+    builtin_type: safeString(channel.builtin_type) || undefined,
+    code: safeString(channel.code) || undefined,
     models: Array.isArray(channel.chat_protocols)
       ? Array.from(new Set(channel.chat_protocols.flatMap((row: any) => Array.isArray(row?.models) ? row.models.map(String) : [])))
       : [],
@@ -4377,6 +4408,93 @@ export function UnifiedProviderModal({
     }
   }, [isCreate, initCreate, resolvedId, createdId])
 
+  // 「同步市场数据」：把本渠道对应的市场模板拉回来，只覆盖当前 Tab 承载的字段，
+  // 写进草稿并提示用户点「保存」生效（不自动落库）。按 local.<slug> 匹配模板 id，
+  // slug 规则与服务端 channel_template_export._slug 完全一致。
+  const [syncingMarket, setSyncingMarket] = useState(false)
+  const handleSyncFromMarket = useCallback(async () => {
+    if (templateMode || !resolvedId) return
+    const nameForSlug = remarkText.trim() || detail?.remark || resolvedId
+    const slug = channelTemplateSlug(nameForSlug)
+    if (!slug) {
+      setError('无法从渠道名生成市场模板标识，请先填写渠道名称')
+      return
+    }
+    // 按 Tab 分组：只把当前 Tab 承载的字段从市场数据 merge 进草稿，
+    // 避免把用户在其他 Tab 的未保存编辑一起冲掉。
+    const TAB_FIELDS: Record<ProviderTab, string[]> = {
+      overview: [],
+      meta: [],
+      basic: ['remark', 'tags', 'icon', 'enabled', 'website_url'],
+      code: ['code'],
+      config: ['base_url', 'timeout', 'retry_count', 'extra_retry_status_codes', 'billing_mode', 'chat_protocols', 'models_path', 'image_path', 'video_path', 'speech_path', 'rate_limit'],
+      models: ['auto_update_models', 'model_id_rewrite_rules'],
+      limits: [],
+      accounts: [],
+      stats: [],
+      test: [],
+    }
+    setSyncingMarket(true)
+    setError(null)
+    setSaveNotice(null)
+    try {
+      const manifest = await fetchMarketplaceManifest('channels', `local.${slug}`)
+      const preset = templatePresetFromManifest(manifest as Record<string, any>)
+      if (!preset) throw new Error('市场模板内容为空或不合法')
+      const keys = TAB_FIELDS[activeTab]
+      if (keys.length === 0) {
+        setSaveNotice('当前 Tab 的配置不随渠道模板发布，无市场数据可同步。')
+        return
+      }
+      const patch: Record<string, unknown> = {}
+      for (const key of keys) {
+        if (key === 'remark') {
+          if (preset.remark !== undefined) patch.remark = preset.remark
+        } else if (key === 'enabled') {
+          if (preset.enabled !== undefined) patch.enabled = preset.enabled
+        } else if (key === 'chat_protocols') {
+          // 对话协议行不在 detail 里，单独走 chatProtocols state（保存也读它）。
+          continue
+        } else if (key in (preset as Record<string, unknown>)) {
+          patch[key] = (preset as Record<string, any>)[key]
+        }
+      }
+      // 对话协议行：与 initCreate/loadData 同口径映射后写 chatProtocols state。
+      if (keys.includes('chat_protocols') && Array.isArray(preset.chat_protocols) && preset.chat_protocols.length > 0) {
+        const rows = normalizeChatProtocolRows(preset.chat_protocols)
+        setChatProtocols(rows)
+        setExpandedChatProtocols(new Set(rows.map((_, index) => index)))
+      }
+      // 同步顶部的独立 state（这些不在 detail 里）。
+      if ('remark' in patch) setRemarkText(safeString(patch.remark))
+      if ('enabled' in patch) setEnabled(safeBoolean(patch.enabled))
+      if ('extra_retry_status_codes' in patch && Array.isArray(patch.extra_retry_status_codes)) {
+        setExtraRetryStatusCodesText((patch.extra_retry_status_codes as number[]).join(', '))
+      }
+      if (Object.keys(patch).length > 0) {
+        setDetail((prev) => prev ? { ...prev, ...patch } : prev)
+      }
+      // 冻结策略不在 detail 里，单独走 limitPolicy + freeze 三个 state。
+      if (activeTab === 'limits' && preset.freeze_policy) {
+        const fp = preset.freeze_policy
+        const rules = Array.isArray(fp.rules)
+          ? fp.rules.map((rule) => normalizeFreezeRuleInput(rule as Record<string, any>))
+          : []
+        const enabledFlag = fp.enabled !== false
+        setLimitPolicy((prev) => prev ? { ...prev, freeze_policy: { ...prev.freeze_policy, enabled: enabledFlag, rules } } : prev)
+        setFreezePolicyEnabled(enabledFlag)
+        setFreezeRules(rules.map((r) => ({ ...r })))
+      }
+      setSaveNotice('已从市场拉回模板数据，点「保存」生效。')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '同步市场数据失败'
+      // 模板不存在（尚未发布）与真实错误分开提示，前者不是故障。
+      setError(/不存在|404|HTTP 404/.test(msg) ? '本渠道尚未发布过市场模板，无法同步。' : msg)
+    } finally {
+      setSyncingMarket(false)
+    }
+  }, [templateMode, resolvedId, remarkText, detail?.remark, activeTab])
+
   // 打开/关闭：重置 tab 与清理状态。与数据加载分开，避免 create 落库后
   // resolvedId 变化触发的重载把用户所在 tab 冲回基础配置。
   useEffect(() => {
@@ -4549,7 +4667,7 @@ export function UnifiedProviderModal({
     try {
       if (templateMode) {
         // 模板模式：不落 provider，把表单组装成市场 manifest 交给父层 upsert 到 GitHub。
-        const slug = (templateMeta.name || remarkText).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-._]+|[-._]+$/g, '')
+        const slug = channelTemplateSlug(templateMeta.name || remarkText)
         if (!slug) {
           setError('模板标识（Name）不能为空')
           setActiveTab('meta')
@@ -4588,6 +4706,10 @@ export function UnifiedProviderModal({
               rate_limit: { ...(detail.rate_limit ?? {}) },
               auto_update_models: safeBoolean(detail.auto_update_models),
               model_id_rewrite_rules: normalizeModelIdRewriteRules(detail.model_id_rewrite_rules),
+              // 代码渠道模板：builtin_type + spec 源码随模板存回市场，
+              // 否则在市场管理页编辑一次模板就丢源码。
+              ...(detail.builtin_type ? { builtin_type: safeString(detail.builtin_type) } : {}),
+              ...(detail.builtin_type === 'code' ? { code: safeString(detail.code) } : {}),
             },
             freeze_policy: { enabled: freezePolicyEnabled, refresh_freeze_on_failure: freezeRefreshOnFailure, rules: freezeRules },
           },
@@ -4974,6 +5096,10 @@ export function UnifiedProviderModal({
   // 模板模式隐藏账号/统计/测试：模板只保存可移植配置，没有账号也没有运行数据。
   // 代码渠道：源码是核心，单开一个 Tab，创建/编辑态都紧跟基础配置之后。
   const isCodeChannel = createBuiltinType === 'code' || detail?.builtin_type === 'code'
+  // 「同步市场数据」按钮：只在这些 Tab 显示——它们承载的字段才会随渠道模板发布到市场
+  // （账号管理/数据统计/测试不发布）。模板编辑态本身在改市场数据，且新建态无 id 可匹配，均不显示。
+  const marketSyncTabs: ProviderTab[] = ['basic', 'code', 'config', 'models', 'limits']
+  const showMarketSync = !templateMode && !!resolvedId && marketSyncTabs.includes(activeTab)
   const tabs: Array<{ key: ProviderTab; label: string }> = [
     ...(templateMode ? [{ key: 'meta' as ProviderTab, label: '模板信息' }] : []),
     { key: 'basic', label: '基础配置' },
@@ -5115,6 +5241,14 @@ export function UnifiedProviderModal({
               <span />
             )}
             <div style={{ display: 'flex', gap: '10px' }}>
+              {showMarketSync && (
+                <button
+                  onClick={() => void handleSyncFromMarket()}
+                  disabled={loading || saving || syncingMarket}
+                  title="把本渠道对应的市场模板拉回当前表单（只覆盖当前 Tab 的字段），点「保存」生效"
+                  style={btnGhost}
+                ><CloudDownload style={btnIcon} />{syncingMarket ? '同步中...' : '同步市场数据'}</button>
+              )}
               <button onClick={() => { void loadData() }} disabled={loading || saving} style={btnGhost}><RefreshCw style={btnIcon} />{loading ? '刷新中...' : '刷新'}</button>
               <button onClick={() => guardAccountEditDiscard(onClose)} disabled={saving} style={btnGhost}><X style={btnIcon} />取消</button>
               <button onClick={() => void handleSave()} disabled={saving || loading} style={btnPrimary}><Check style={btnIcon} />{saving ? '保存中...' : '保存'}</button>

@@ -28,6 +28,9 @@ import {
   type ToolKind,
   listIosHosts,
   getIosHostDevices,
+  getAllIosHostDevices,
+  scanIosHost,
+  scanAllIosHosts,
   claimIosDevice,
   listIosSigningProfiles,
   createIosSigningProfile,
@@ -35,9 +38,11 @@ import {
   deleteIosSigningProfile,
   loginAppleId,
   verifyAppleId2fa,
+  sendAppleIdSms,
   startIosWdaJob,
   getIosWdaJobStatus,
   cancelIosWdaJob,
+  controlIosRunner,
   type IosHostNode,
   type IosDiscoveredDevice,
   type IosSigningProfile,
@@ -226,8 +231,9 @@ export function UserToolsPage() {
   const [deviceToRevoke, setDeviceToRevoke] = useState<DeviceResource | null>(null)
   const [deviceToDelete, setDeviceToDelete] = useState<DeviceResource | null>(null)
 
-  // iOS WDA management dialogs
+  // iOS DeviceKit runner management dialogs
   const [iosSigningDialogOpen, setIosSigningDialogOpen] = useState(false)
+  const [iosScanOpen, setIosScanOpen] = useState(false)
 
   useEffect(() => {
     getCdpConnectionInfo().then(setConnInfo).catch(() => setConnInfo(null))
@@ -356,9 +362,15 @@ export function UserToolsPage() {
     return (
       <div className="flex gap-2">
         {activeKind === "ios" && (
-          <Button size="sm" variant="outline" onClick={() => setIosSigningDialogOpen(true)}>
-            签名配置
-          </Button>
+          <>
+            <Button size="sm" variant="outline" onClick={() => setIosScanOpen(true)}>
+              <Search className="size-4" />
+              扫描设备
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setIosSigningDialogOpen(true)}>
+              签名配置
+            </Button>
+          </>
         )}
         <Button size="sm" onClick={cfg.onClick}>
           <Plus className="size-4" />
@@ -431,6 +443,7 @@ export function UserToolsPage() {
               devices={iosDevices}
               onOpen={(device) => setDetailDeviceId(device.id)}
               onDelete={setDeviceToDelete}
+              onInitialize={(device) => setDetailDeviceId(device.id)}
             />
           )}
         </section>
@@ -469,6 +482,14 @@ export function UserToolsPage() {
       />
 
       <MailCreateDialog open={mailCreateOpen} onOpenChange={setMailCreateOpen} onCreated={() => void reloadMail()} />
+
+      <IosScanDialog
+        open={iosScanOpen}
+        onOpenChange={setIosScanOpen}
+        onChanged={() => void reloadDevices()}
+        onOpenDevice={(id) => setDetailDeviceId(id)}
+        onOpenSigningProfiles={() => setIosSigningDialogOpen(true)}
+      />
 
       {/* 平台随工具页签走：「添加 Android/iOS 设备」按钮在哪个 Tab 点开，弹框就走哪条接入方案。 */}
       <AddDeviceDialog
@@ -726,10 +747,13 @@ function DeviceControlVersionBar() {
   )
 }
 
-function DeviceResourceList({ devices, onOpen, onDelete }: {
+function DeviceResourceList({ devices, onOpen, onDelete, onInitialize }: {
   devices: DeviceResource[]
   onOpen: (device: DeviceResource) => void
   onDelete: (device: DeviceResource) => void
+  /** iOS：设备行「初始化」按钮——打开签名配置弹框（prepare 在详情面板里触发，
+   *  行内按钮是引导入口，避免用户先进详情才能装 runner）。 */
+  onInitialize?: (device: DeviceResource) => void
 }) {
   if (devices.length === 0) {
     return <ResourceEmpty icon={Smartphone} text="还没有设备，点右上角按钮接入设备。" />
@@ -778,6 +802,12 @@ function DeviceResourceList({ devices, onOpen, onDelete }: {
                   <Settings className="size-4" />
                   详情
                 </Button>
+                {ios && onInitialize && (
+                  <Button variant="outline" size="sm" onClick={() => onInitialize(device)}>
+                    <Wrench className="size-4" />
+                    初始化
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -1150,7 +1180,7 @@ function DeviceDetailDialog({
             </div>
           )}
 
-          {ios && device?.data?.ios && (
+          {ios && Boolean((device.data as Record<string, unknown> | undefined)?.ios) && (
             <IosWdaPanel device={device} onChanged={() => onOpenChange(false)} />
           )}
 
@@ -1193,17 +1223,20 @@ function DeviceDetailDialog({
 }
 
 // =============================================================================
-// iOS WDA 管理面板：签名配置 + 产物选择 + WDA job 控制
+// iOS DeviceKit Runner 管理面板：签名配置 + 产物选择 + runner job 控制
 // =============================================================================
 
 function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged: () => void }) {
-  const iosData = device.data?.ios as Record<string, unknown> | undefined
+  const data = device.data as Record<string, unknown> | undefined
+  const iosData = data?.ios as Record<string, unknown> | undefined
   const wdaState = (iosData?.wda_state as string) || "missing"
   const profileExpiresAt = iosData?.profile_expires_at as string | undefined
   // 自动续签：prepare_wda 成功后服务端写入 auto_renew=true + last_renew_job_id。
   // 扫描器到期前自动派发 renew job；这里读 last_renew_job_id 轮询，运行中显示徽章。
   const autoRenewEnabled = (iosData?.auto_renew as boolean | undefined) ?? false
   const lastRenewJobId = (iosData?.last_renew_job_id as string | undefined) || null
+  const runnerOnline = (iosData?.device_control_online as boolean | undefined) ?? device.online
+
 
   const [signingProfiles, setSigningProfiles] = useState<IosSigningProfile[]>([])
   const [wdaMarketVersion, setWdaMarketVersion] = useState<string>("")
@@ -1215,13 +1248,13 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
   // prepare 落库的绑定回退（不传空串默认，避免回落官方 id 覆盖用户自己的）。
   const selectedProfile = signingProfiles.find((p) => p.id === selectedProfileId) || null
   const selectedProfileKind = selectedProfile?.kind
-  const [wdaBundleId, setWdaBundleId] = useState("com.facebook.WebDriverAgentRunner.xctrunner")
+  const [wdaBundleId, setWdaBundleId] = useState("com.deviceboxhq.goios.devicekit.runner")
   const [jobRunning, setJobRunning] = useState(false)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [jobSnapshot, setJobSnapshot] = useState<IosWdaJobSnapshot | null>(null)
   const [autoRenewRunning, setAutoRenewRunning] = useState(false)
 
-  // Load signing profiles + 当前市场 WDA iOS 版本（只读展示，产物由宿主节点自动下载）
+  // Load signing profiles + 当前市场 DeviceKit runner 版本（只读展示，产物由宿主节点自动下载）
   useEffect(() => {
     void loadResources()
   }, [])
@@ -1253,10 +1286,10 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
           if (snapshot.status === "completed" || snapshot.status === "failed") {
             setJobRunning(false)
             if (snapshot.status === "completed") {
-              toast.success("WDA 准备完成")
+              toast.success("runner 准备完成")
               onChanged()
             } else {
-              toast.error(`WDA job 失败: ${snapshot.message}`)
+              toast.error(`runner job 失败: ${snapshot.message}`)
             }
           }
         }
@@ -1362,6 +1395,24 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
     }
   }
 
+  const [runnerBusy, setRunnerBusy] = useState(false)
+  const doRunnerControl = async (action: "start" | "stop" | "restart") => {
+    setRunnerBusy(true)
+    try {
+      await controlIosRunner(device.id, action)
+      toast.success(
+        action === "start" ? "已请求启动 runner 守护" :
+        action === "stop" ? "已请求停止 runner 守护" :
+        "已请求重启 runner 守护"
+      )
+      onChanged()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : `runner ${action} 失败`)
+    } finally {
+      setRunnerBusy(false)
+    }
+  }
+
   const expiryDisplay = profileExpiresAt
     ? new Date(profileExpiresAt).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" })
     : "-"
@@ -1369,8 +1420,11 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
   return (
     <div className="flex flex-col gap-3 rounded-lg border p-3">
       <div className="flex items-center justify-between">
-        <div className="text-sm font-medium">WebDriverAgent 管理</div>
+        <div className="text-sm font-medium">DeviceKit Runner 管理</div>
         <div className="flex items-center gap-1">
+          <Badge variant={runnerOnline ? "default" : "secondary"}>
+            {runnerOnline ? "守护在线" : "守护已停止"}
+          </Badge>
           {autoRenewEnabled && (
             <Badge variant="outline" className="border-blue-500 text-blue-600">自动续签</Badge>
           )}
@@ -1432,7 +1486,7 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
 
           {selectedProfileKind === "apple_id" ? (
             <div className="flex flex-col gap-1.5">
-              <Label>WDA Bundle ID</Label>
+              <Label>DeviceKit Runner Bundle ID</Label>
               <div className="text-xs text-muted-foreground">
                 Apple ID 免费签名由服务端按团队域作用域自动派生 App ID
                 （官方 id + 团队后缀），无需填写；登录有效即可全自动准备/续期
@@ -1441,26 +1495,25 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              <Label>WDA Bundle ID</Label>
+              <Label>DeviceKit Runner Bundle ID</Label>
               <Input
                 value={wdaBundleId}
                 onChange={(e) => setWdaBundleId(e.target.value)}
-                placeholder="com.facebook.WebDriverAgentRunner.xctrunner"
+                placeholder="com.deviceboxhq.goios.devicekit.runner"
               />
               <div className="text-xs text-muted-foreground">
-                ASC / P12 付费证书保持默认即可；免费签名（自备 P12）须填你在 Xcode 里
-                创建的 App ID（如 com.你的名字.WebDriverAgentRunner），须与描述文件
-                匹配。仅首次「准备 WDA」生效，续期/重装自动沿用。
+                ASC / P12 证书保持默认 DeviceKit Bundle ID；免费签名（自备 P12）须填你在开发者门户
+                创建的、与描述文件匹配的 Runner App ID。仅首次初始化生效，续期/重装自动沿用。
               </div>
             </div>
           )}
 
           <div className="flex flex-col gap-1.5">
-            <Label>WDA 产物</Label>
+            <Label>DeviceKit Runner 产物</Label>
             <div className="text-xs text-muted-foreground">
               {wdaMarketVersion
                 ? `市场当前版本 v${wdaMarketVersion}，宿主节点自动下载并按所选签名配置重签安装，无需手动选择。`
-                : "WDA 产物由市场自动获取，宿主节点下载并按所选签名配置重签安装；当前市场尚未发布 iOS 包。"}
+                : "DeviceKit Runner 产物由市场自动获取，宿主节点下载并按所选签名配置重签安装；当前市场尚未发布 iOS 包。"}
             </div>
           </div>
 
@@ -1470,7 +1523,22 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
               onClick={() => void startWdaJob("prepare")}
               disabled={!selectedProfileId}
             >
-              准备 WDA
+              初始化 Runner
+            </Button>
+            {runnerOnline ? (
+              <Button size="sm" variant="outline" onClick={() => void doRunnerControl("stop")} disabled={runnerBusy}>
+                {runnerBusy ? <Spinner className="size-3" /> : null}
+                停止守护
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => void doRunnerControl("start")} disabled={runnerBusy}>
+                {runnerBusy ? <Spinner className="size-3" /> : null}
+                启动守护
+              </Button>
+            )}
+            <Button size="sm" variant="outline" onClick={() => void doRunnerControl("restart")} disabled={runnerBusy}>
+              {runnerBusy ? <Spinner className="size-3" /> : null}
+              重启守护
             </Button>
             {wdaState === "ready" || wdaState === "renewal_due" || wdaState === "expired" ? (
               <>
@@ -1478,7 +1546,7 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
                   立即续期
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => void startWdaJob("reinstall")}>
-                  重装
+                  重装 Runner
                 </Button>
               </>
             ) : null}
@@ -1569,6 +1637,11 @@ function IosSigningProfileDialog({
   const [applePassword, setApplePassword] = useState("")
   const [appleCode, setAppleCode] = useState("")
   const [appleLoginToken, setAppleLoginToken] = useState<string | null>(null)
+  // SMS 2FA：login 返回 method=="sms" 时带受信电话号码列表，用户选号后发码再验码。
+  const [appleMethod, setAppleMethod] = useState<"trusteddevice" | "sms" | null>(null)
+  const [applePhoneNumbers, setApplePhoneNumbers] = useState<Array<{ id: number; number_with_dial_code: string }>>([])
+  const [appleSelectedPhoneId, setAppleSelectedPhoneId] = useState<number | null>(null)
+  const [appleSmsSending, setAppleSmsSending] = useState(false)
   // Apple 登录出口代理（gsa.apple.com 拒数据中心 IP 时经代理登录）。列表来自
   // 用户侧代理池精简视图，仅 network 模式可选。
   const [appleProxies, setAppleProxies] = useState<TeamProxyEntry[]>([])
@@ -1619,6 +1692,9 @@ function IosSigningProfileDialog({
       setApplePassword("")
       setAppleCode("")
       setAppleLoginToken(null)
+      setAppleMethod(null)
+      setApplePhoneNumbers([])
+      setAppleSelectedPhoneId(null)
     } else {
       resetForm()
     }
@@ -1644,7 +1720,19 @@ function IosSigningProfileDialog({
       })
       if (result.status === "2fa_required") {
         setAppleLoginToken(result.login_token || null)
-        toast.info("验证码已发送到你的 Apple 设备，请输入")
+        setAppleMethod(result.method || null)
+        setApplePhoneNumbers(result.phone_numbers || [])
+        // SMS 默认选第一个号码；trusted-device 无号码列表。
+        if (result.phone_numbers && result.phone_numbers.length > 0) {
+          setAppleSelectedPhoneId(result.phone_numbers[0].id)
+        } else {
+          setAppleSelectedPhoneId(null)
+        }
+        toast.info(
+          result.method === "sms"
+            ? "请选择受信电话号码并触发短信验证"
+            : "验证码已发送到你的 Apple 设备，请输入"
+        )
       } else {
         toast.success(editing ? "重新登录成功，配置已更新" : "登录成功，已创建签名配置")
         resetForm()
@@ -1673,6 +1761,10 @@ function IosSigningProfileDialog({
       toast.error("请再次输入 Apple ID 密码（完成验证需要）")
       return
     }
+    if (appleMethod === "sms" && !appleSelectedPhoneId) {
+      toast.error("请先选择受信电话号码")
+      return
+    }
     setSaving(true)
     try {
       await verifyAppleId2fa({
@@ -1681,6 +1773,8 @@ function IosSigningProfileDialog({
         password: applePassword,
         code: appleCode.trim(),
         profile_id: editing?.id,
+        // SMS 路径带选中的 phone_id；trusted-device 忽略。
+        phone_id: appleMethod === "sms" ? appleSelectedPhoneId || undefined : undefined,
         proxy_config_id: appleProxyId || undefined,
         anisette_server: appleAnisetteServer || undefined,
       })
@@ -1691,9 +1785,41 @@ function IosSigningProfileDialog({
       void loadProfiles()
       onChanged()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "验证失败，请重新登录")
+      // 码错（-21669）：服务端保留 pending，login_token 仍有效，清空码让用户重输。
+      const msg = e instanceof Error ? e.message : "验证失败，请重新登录"
+      if (msg.includes("验证码错误")) {
+        setAppleCode("")
+      }
+      toast.error(msg)
     } finally {
       setSaving(false)
+    }
+  }
+
+  // SMS 2FA：用户选好号码后触发发送（Apple 会把短信码发到该号码）。
+  const sendAppleSms = async () => {
+    if (!appleLoginToken) {
+      toast.error("登录会话已失效，请返回重新登录")
+      return
+    }
+    if (!appleSelectedPhoneId) {
+      toast.error("请先选择受信电话号码")
+      return
+    }
+    setAppleSmsSending(true)
+    try {
+      await sendAppleIdSms({
+        login_token: appleLoginToken,
+        email: appleEmail.trim(),
+        phone_id: appleSelectedPhoneId,
+        proxy_config_id: appleProxyId || undefined,
+        anisette_server: appleAnisetteServer || undefined,
+      })
+      toast.info("短信验证码已发送，请输入收到的 6 位码")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "短信发送失败")
+    } finally {
+      setAppleSmsSending(false)
     }
   }
 
@@ -1802,6 +1928,10 @@ function IosSigningProfileDialog({
     setApplePassword("")
     setAppleCode("")
     setAppleLoginToken(null)
+    setAppleMethod(null)
+    setApplePhoneNumbers([])
+    setAppleSelectedPhoneId(null)
+    setAppleSmsSending(false)
   }
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -1821,16 +1951,16 @@ function IosSigningProfileDialog({
       ? "需 Apple Developer Program 付费账号（约 ¥688/年）。p8 密钥在 App Store Connect → 用户和访问 → 集成 中创建（需账户持有人权限）。签名与续期全程自动，材料长期有效。"
       : kind === "apple_id"
         ? "用你的 Apple ID（免费，无需付费账号、无需 Mac）：登录一次即自动申请证书、注册设备并签名，含 7 天自动续期。需已开启双重认证并在受信设备上收验证码。"
-        : "自备签名证书（P12 + 描述文件）。免费 Apple ID 证书 7 天过期、到期需重新导出并在此更换；付费开发者证书约 1 年。用此配置时 WDA Bundle ID 须填证书覆盖的 App ID。"
+        : "自备签名证书（P12 + 描述文件）。免费 Apple ID 证书 7 天过期、到期需重新导出并在此更换；付费开发者证书约 1 年。用此配置时 Runner Bundle ID 须填证书覆盖的 App ID。"
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] w-[92vw] max-w-2xl overflow-y-auto">
+      <DialogContent className="flex h-[92vh] w-[calc(100vw-2rem)] max-w-[1400px] flex-col overflow-hidden">
         {view === "list" ? (
           <>
             <DialogHeader>
               <DialogTitle>签名配置管理</DialogTitle>
-              <DialogDescription>管理 WDA 签名方式，列表中展示创建时间与材料有效性状态</DialogDescription>
+              <DialogDescription>管理 iOS Runner 签名方式，列表中展示创建时间与材料有效性状态</DialogDescription>
             </DialogHeader>
 
             <div className="flex flex-col gap-3">
@@ -1849,7 +1979,7 @@ function IosSigningProfileDialog({
               ) : profiles.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 rounded-lg border p-6">
                   <p className="text-center text-xs text-muted-foreground">
-                    暂无签名配置，先添加一个才能「准备 WDA」
+                    暂无签名配置，先添加一个才能初始化 Runner
                   </p>
                   <Button size="sm" variant="outline" onClick={() => openForm(null)}>
                     <Plus className="size-4" />
@@ -1996,9 +2126,43 @@ function IosSigningProfileDialog({
                     ) : (
                       <>
                         <div className="rounded border border-blue-500/40 bg-blue-500/5 p-2 text-xs leading-5 text-muted-foreground">
-                          验证码已推送到你的 Apple 受信设备（iPhone/Mac 弹窗），输入显示的
-                          6 位码完成登录。没收到？返回重新登录可再次触发推送。
+                          {appleMethod === "sms" ? (
+                            <>选择一个受信电话号码触发短信验证码，输入收到的 6 位码完成登录。</>
+                          ) : (
+                            <>验证码已推送到你的 Apple 受信设备（iPhone/Mac 弹窗），输入显示的
+                              6 位码完成登录。没收到？返回重新登录可再次触发推送。</>
+                          )}
                         </div>
+                        {appleMethod === "sms" && (
+                          <>
+                            <div className="flex flex-col gap-1.5">
+                              <Label>受信电话号码</Label>
+                              <Select
+                                value={appleSelectedPhoneId ? String(appleSelectedPhoneId) : ""}
+                                onValueChange={(v) => setAppleSelectedPhoneId(Number(v))}
+                              >
+                                <SelectTrigger><SelectValue placeholder="选择号码" /></SelectTrigger>
+                                <SelectContent>
+                                  {applePhoneNumbers.map((p) => (
+                                    <SelectItem key={p.id} value={String(p.id)}>
+                                      {p.number_with_dial_code}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="w-fit"
+                              onClick={() => void sendAppleSms()}
+                              disabled={appleSmsSending || !appleSelectedPhoneId}
+                            >
+                              {appleSmsSending ? <Spinner className="size-4" /> : null}
+                              发送短信验证码
+                            </Button>
+                          </>
+                        )}
                         <div className="flex flex-col gap-1.5">
                           <Label>验证码</Label>
                           <Input
@@ -2146,7 +2310,7 @@ function IosSigningProfileDialog({
                   {detail.kind === "p12" && (
                     <p className="text-xs leading-5 text-muted-foreground">
                       {detail.status === "expired"
-                        ? "材料已过期，请在下方原地更换新证书——否则 WDA 签名/续期将持续失败。"
+                        ? "材料已过期，请在下方原地更换新证书——否则 Runner 签名/续期将持续失败。"
                         : "材料到期后在此原地更换即可，使用它的设备无缝续用（配置 id 不变）。"}
                     </p>
                   )}
@@ -2514,10 +2678,9 @@ function AddDeviceDialog({
       .finally(() => setDeviceControlLoaded(true))
   }, [open])
 
-  // iOS 新流程：选 ios_host 节点 → 扫描设备 → 认领 → 引导 WDA 准备
+  // iOS 单台认领：选宿主节点 → 填 UDID → 认领。批量扫描走顶部「扫描设备」入口。
   const [iosHostId, setIosHostId] = useState("")
-  const [iosDiscoveredDevices, setIosDiscoveredDevices] = useState<IosDiscoveredDevice[]>([])
-  const [iosScanning, setIosScanning] = useState(false)
+  const [iosManualUdid, setIosManualUdid] = useState("")
   const [iosClaiming, setIosClaiming] = useState(false)
   const [iosClaimedDeviceId, setIosClaimedDeviceId] = useState<string | null>(null)
 
@@ -2548,29 +2711,16 @@ function AddDeviceDialog({
       .finally(() => setIosHostsLoading(false))
   }, [open, platform])
 
-  // Scan devices when iOS host is selected
-  const scanIosDevices = async () => {
+  // Claim one iOS device by UDID (single-device manual add path).
+  const claimDevice = async (udid: string, deviceName: string) => {
     if (!iosHostId) {
       toast.error("请先选择 iOS 宿主节点")
       return
     }
-    setIosScanning(true)
-    try {
-      const { devices } = await getIosHostDevices(iosHostId)
-      setIosDiscoveredDevices(devices)
-      if (devices.length === 0) {
-        toast.error("未发现设备，请确认 iPhone 已 USB 连接到该节点")
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "扫描设备失败")
-      setIosDiscoveredDevices([])
-    } finally {
-      setIosScanning(false)
+    if (!udid) {
+      toast.error("请输入设备 UDID")
+      return
     }
-  }
-
-  // Claim iOS device
-  const claimDevice = async (udid: string, deviceName: string) => {
     setIosClaiming(true)
     try {
       const { device_id } = await claimIosDevice({
@@ -2580,7 +2730,6 @@ function AddDeviceDialog({
       })
       setIosClaimedDeviceId(device_id)
       toast.success(`已接入设备：${label.trim() || deviceName}`)
-      // Start polling for device readiness
       setTimeout(() => {
         onPaired()
         onOpenChange(false)
@@ -2653,7 +2802,7 @@ function AddDeviceDialog({
     setPairedDevice(null)
     setKnownIds(new Set())
     setIosHostId("")
-    setIosDiscoveredDevices([])
+    setIosManualUdid("")
     setIosClaimedDeviceId(null)
   }
 
@@ -2673,13 +2822,13 @@ function AddDeviceDialog({
         if (!v) reset()
       }}
     >
-      <DialogContent className="max-h-[88vh] w-[92vw] max-w-lg overflow-x-hidden overflow-y-auto">
+      <DialogContent className="flex h-[90vh] w-[calc(100vw-2rem)] max-w-[1280px] flex-col overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{platform === "android" ? "添加 Android 设备" : "添加 iOS 设备"}</DialogTitle>
           <DialogDescription>
             {platform === "android"
               ? "手机安装控制 App，生成配对码后在 App 内填入即可接入。"
-              : "iPhone 用数据线连到一台运行 iOS 宿主节点的电脑（Windows/Linux/Mac 均可，无需 Mac），手机「信任此电脑」后扫描认领即可接入；接入后在设备列表「准备 WDA」，宿主节点自动下载、签名并安装到手机。"}
+              : "iPhone 用数据线连到一台运行 iOS 宿主节点的电脑（Windows/Linux/Mac 均可，无需 Mac），手机「信任此电脑」后扫描认领即可接入；接入后在设备列表「初始化 Runner」，宿主节点自动下载、签名并安装到手机。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -2693,13 +2842,13 @@ function AddDeviceDialog({
                       用数据线把 iPhone 连到运行 iOS 宿主节点的电脑，并在手机弹窗里「信任此电脑」。
                     </p>
                     <p className="text-xs leading-5 text-muted-foreground">
-                      iPhone 接入由宿主节点经 WDA 驱动，<b>无需在手机上手动安装任何 App</b>——
-                      这点与 Android（装控制 App + 配对码）的方案不同。WDA 由宿主节点在
-                      接入后的「准备 WDA」步骤自动下载、重签并安装到手机；宿主节点
+                      iPhone 接入由宿主节点经 DeviceKit Runner 驱动，<b>无需在手机上手动安装任何 App</b>——
+                      这点与 Android（装控制 App + 配对码）的方案不同。Runner 由宿主节点在
+                      接入后的「初始化 Runner」步骤自动下载、重签并安装到手机；宿主节点
                       Windows/Linux/Mac 均可，无需 Mac 或 Xcode。
                     </p>
                     <p className="text-xs leading-5 text-muted-foreground">
-                      接入后先在设备列表「准备 WDA」里配置签名方式：Apple ID 免费
+                      接入后先在设备列表「初始化 Runner」里配置签名方式：Apple ID 免费
                       全自动（推荐，登录一次即可、含 7 天自动续期）、付费 App Store Connect
                       API Key（全自动）或自备 P12 证书（免费 Apple ID 证书 7 天过期）。
                     </p>
@@ -2727,56 +2876,40 @@ function AddDeviceDialog({
                       </Select>
                       {iosHosts.length === 0 && !iosHostsLoading && (
                         <p className="text-xs text-muted-foreground">
-                          暂无可用的 iOS 宿主节点。请先接入具备 ios_mgmt 能力的节点。
+                          暂无可用的 iOS 宿主节点。请先接入具备 ios_mgmt 能力的节点，
+                          或用顶部「扫描设备」批量发现并接入。
                         </p>
                       )}
                     </div>
                   </TutorialStep>
 
                   {iosHostId && (
-                    <TutorialStep index={3} title="扫描设备并接入">
+                    <TutorialStep index={3} title="输入设备 UDID 认领">
                       <div className="flex flex-col gap-2">
-                        <Button onClick={() => void scanIosDevices()} disabled={iosScanning}>
-                          {iosScanning ? <Spinner className="size-4" /> : "扫描设备"}
-                        </Button>
-
-                        {iosDiscoveredDevices.length > 0 && (
-                          <div className="flex flex-col gap-2">
-                            <Label className="text-xs text-muted-foreground">发现的设备</Label>
-                            <div className="flex flex-col gap-2 rounded-md border p-2">
-                              {iosDiscoveredDevices.map((dev) => (
-                                <div
-                                  key={dev.udid}
-                                  className="flex items-center justify-between gap-3 rounded border bg-muted/20 p-2"
-                                >
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-sm font-medium">{dev.name}</div>
-                                    <div className="truncate text-xs text-muted-foreground">
-                                      {dev.model} · iOS {dev.product_version} · {dev.connection_type}
-                                    </div>
-                                    <div className="truncate text-xs text-muted-foreground">UDID: ...{dev.udid.slice(-8)}</div>
-                                  </div>
-                                  {dev.claimed ? (
-                                    <Badge variant="outline">已接入</Badge>
-                                  ) : (
-                                    <Button
-                                      size="sm"
-                                      onClick={() => void claimDevice(dev.udid, dev.name)}
-                                      disabled={iosClaiming}
-                                    >
-                                      {iosClaiming ? <Spinner className="size-3" /> : "接入"}
-                                    </Button>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          在宿主节点上用 <code>ios.exe list</code> 或
+                          <code>idevice_id -l</code> 拿到 iPhone 的 UDID，填入下方认领。
+                          要批量扫描多台设备，请改用顶部「扫描设备」。
+                        </p>
                         <div className="flex flex-col gap-1.5">
-                          <Label className="text-xs text-muted-foreground">设备名称（可选，接入后可改）</Label>
+                          <Label>设备 UDID</Label>
+                          <Input
+                            value={iosManualUdid}
+                            onChange={(e) => setIosManualUdid(e.target.value)}
+                            placeholder="00008101-XXXXXXXX"
+                          />
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <Label>设备名称（可选，接入后可改）</Label>
                           <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="我的 iPhone" />
                         </div>
+                        <Button
+                          onClick={() => void claimDevice(iosManualUdid.trim(), label.trim() || iosManualUdid.trim())}
+                          disabled={!iosManualUdid.trim() || iosClaiming}
+                        >
+                          {iosClaiming ? <Spinner className="size-4" /> : <Plus className="size-4" />}
+                          认领设备
+                        </Button>
                       </div>
                     </TutorialStep>
                   )}
@@ -2887,7 +3020,7 @@ function AddDeviceDialog({
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium">设备已接入</div>
                 <div className="mt-0.5 text-xs text-muted-foreground">
-                  接下来在设备列表点「准备 WDA」，宿主节点会自动下载、签名、安装并启动 WDA
+                  接下来在设备列表点「初始化 Runner」，宿主节点会自动下载、签名、安装并启动 DeviceKit Runner。
                 </div>
               </div>
             </div>
@@ -2903,8 +3036,401 @@ function AddDeviceDialog({
 }
 
 // =============================================================================
-// 步骤行：接入引导（AndroidSetupGuide / CdpSetupGuide）共用的编号条目
+// iOS 扫描页面（独立弹框）：扫描全部/指定宿主 → 多选认领 → 初始化 Runner
 // =============================================================================
+
+function IosScanDialog({
+  open,
+  onOpenChange,
+  onChanged,
+  onOpenDevice,
+  onOpenSigningProfiles,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onChanged: () => void
+  onOpenDevice: (id: number) => void
+  onOpenSigningProfiles: () => void
+}) {
+  // 宿主来源："all" = 全部节点；否则为单节点 id。
+  const [hostScope, setHostScope] = useState("all")
+  const [iosHosts, setIosHosts] = useState<IosHostNode[]>([])
+  const [iosHostsLoading, setIosHostsLoading] = useState(false)
+  const [devices, setDevices] = useState<IosDiscoveredDevice[]>([])
+  const [scanning, setScanning] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [claiming, setClaiming] = useState(false)
+  const [label, setLabel] = useState("")
+  const [profiles, setProfiles] = useState<IosSigningProfile[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState<number | null>(null)
+  const [iosResources, setIosResources] = useState<DeviceResource[]>([])
+
+  useEffect(() => {
+    if (!open) return
+    void listIosHosts().then(({ hosts }) => setIosHosts(hosts)).catch(() => setIosHosts([]))
+      .finally(() => setIosHostsLoading(false))
+    void listIosSigningProfiles().then(({ profiles }) => setProfiles(profiles)).catch(() => setProfiles([]))
+    void listDeviceResources().then((data) => setIosResources(data.devices.filter((d) => d.platform === "ios"))).catch(() => setIosResources([]))
+  }, [open])
+
+  const deviceKey = (dev: IosDiscoveredDevice) => `${dev.node_id || ""}:${dev.udid}`
+
+  const [hostStates, setHostStates] = useState<Array<{ node_id: string; node_name: string; online: boolean; device_count: number; error: string | null }>>([])
+
+  const runScan = async () => {
+    setScanning(true)
+    setSelected(new Set())
+    setHostStates([])
+    try {
+      if (hostScope === "all") {
+        await scanAllIosHosts()
+        // discover 是异步的：节点收到帧后 Rescan 并上报 DevicesReport。
+        // 轮询读缓存直到拿到结果或超时（USB 枚举 + lockdown 可能 2-3 秒）。
+        let all: IosDiscoveredDevice[] = []
+        let hosts: Array<{ node_id: string; node_name: string; online: boolean; devices: IosDiscoveredDevice[]; error: string | null }> = []
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 1000))
+          const res = await getAllIosHostDevices()
+          hosts = res.hosts
+          all = res.devices
+          // 至少一个节点报了无错误 + 有设备，或所有节点都报了结果（错误或空），就停。
+          const settled = hosts.length > 0 && hosts.every((h) => !h.online || h.error !== null || h.devices.length > 0 || i >= 4)
+          if (all.length > 0 || settled) break
+        }
+        setHostStates(hosts.map((h) => ({
+          node_id: h.node_id,
+          node_name: h.node_name,
+          online: h.online,
+          device_count: h.devices.length,
+          error: h.error,
+        })))
+        setDevices(all)
+        if (all.length === 0) {
+          const offline = hosts.filter((h) => !h.online).map((h) => h.node_name).join("、")
+          const errored = hosts.filter((h) => h.online && h.error).map((h) => `${h.node_name}: ${h.error}`).join("；")
+          const empty = hosts.filter((h) => h.online && !h.error && h.devices.length === 0).map((h) => h.node_name).join("、")
+          const parts: string[] = []
+          if (hosts.length === 0) parts.push("没有 ios_host 节点——请先接入一台 node-ios（role=ios_host）")
+          if (offline) parts.push(`离线: ${offline}`)
+          if (errored) parts.push(`错误: ${errored}`)
+          if (empty) parts.push(`无设备: ${empty}`)
+          toast.error(parts.length ? parts.join(" | ") : "未发现设备")
+        }
+      } else {
+        await scanIosHost(hostScope)
+        let single: IosDiscoveredDevice[] = []
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 1000))
+          const res = await getIosHostDevices(hostScope)
+          single = res.devices
+          if (single.length > 0 || i >= 4) break
+        }
+        const host = iosHosts.find((h) => h.node_id === hostScope)
+        setDevices(single.map((d) => ({ ...d, node_id: hostScope, node_name: host?.name || hostScope })))
+        if (single.length === 0) {
+          toast.error(`未发现设备，请确认 iPhone 已 USB 连接到 ${host?.name || hostScope} 并已「信任此电脑」`)
+        }
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "扫描设备失败")
+      setDevices([])
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const toggle = (dev: IosDiscoveredDevice) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      const k = deviceKey(dev)
+      if (next.has(k)) next.delete(k)
+      else next.add(k)
+      return next
+    })
+  }
+
+  // 找到该设备的资源 id（claimed 设备才有），用于初始化或打开详情。
+  const resourceIdFor = (dev: IosDiscoveredDevice): number | null => {
+    if (!dev.claimed || !dev.device_id) return null
+    const res = iosResources.find((r) => r.device_id === dev.device_id)
+    return res?.id ?? null
+  }
+
+  const claimOne = async (dev: IosDiscoveredDevice): Promise<number | null> => {
+    try {
+      const { resource_id } = await claimIosDevice({
+        node_id: dev.node_id || "",
+        udid: dev.udid,
+        label: label.trim() || dev.name,
+      })
+      return resource_id
+    } catch (e) {
+      toast.error(`${dev.name || dev.udid.slice(-8)} 接入失败：${e instanceof Error ? e.message : e}`)
+      return null
+    }
+  }
+
+  // 接入选中（仅认领，不初始化）。
+  const claimSelected = async () => {
+    const picked = devices.filter((d) => selected.has(deviceKey(d)) && !d.claimed)
+    if (picked.length === 0) {
+      toast.error("请先勾选要接入的设备（已接入的不可重复认领）")
+      return
+    }
+    setClaiming(true)
+    let ok = 0
+    for (const dev of picked) {
+      if ((await claimOne(dev)) !== null) ok++
+    }
+    setClaiming(false)
+    if (ok > 0) {
+      toast.success(`已接入 ${ok}/${picked.length} 台设备`)
+      onChanged()
+      await runScan()
+    }
+  }
+
+  // 接入并初始化选中：claim 后立即调 prepare（需要签名配置）。
+  const claimAndInitialize = async () => {
+    const picked = devices.filter((d) => selected.has(deviceKey(d)) && !d.claimed)
+    if (picked.length === 0) {
+      toast.error("请先勾选要接入的设备")
+      return
+    }
+    if (!selectedProfileId) {
+      toast.error("请先选择签名配置")
+      return
+    }
+    setClaiming(true)
+    let ok = 0
+    for (const dev of picked) {
+      const rid = await claimOne(dev)
+      if (rid === null) continue
+      try {
+        await startIosWdaJob(rid, {
+          device_id: dev.udid,
+          action: "prepare",
+          signing_profile_id: selectedProfileId,
+        })
+        ok++
+      } catch (e) {
+        toast.error(`${dev.name || dev.udid.slice(-8)} 初始化失败：${e instanceof Error ? e.message : e}`)
+      }
+    }
+    setClaiming(false)
+    if (ok > 0) {
+      toast.success(`已认领并开始初始化 ${ok}/${picked.length} 台`)
+      onChanged()
+      await runScan()
+    }
+  }
+
+  // 对已接入设备触发初始化（prepare）。
+  const initializeOne = async (dev: IosDiscoveredDevice) => {
+    const rid = resourceIdFor(dev)
+    if (rid === null) {
+      toast.error("找不到该设备的资源 id，请刷新设备列表")
+      return
+    }
+    if (!selectedProfileId) {
+      onOpenSigningProfiles()
+      toast.error("请先选择签名配置")
+      return
+    }
+    try {
+      await startIosWdaJob(rid, {
+        device_id: dev.udid,
+        action: "prepare",
+        signing_profile_id: selectedProfileId,
+      })
+      toast.success(`已开始初始化：${dev.name || dev.udid.slice(-8)}`)
+      onChanged()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "初始化失败")
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex h-[94vh] w-[calc(100vw-1rem)] max-w-[1600px] flex-col overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>扫描 iOS 设备</DialogTitle>
+          <DialogDescription>
+            选择宿主来源（主服务器 / 远程节点 / 全部），扫描 USB 与已配对网络设备，勾选后批量接入与初始化。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-4">
+          {/* 宿主来源 + 扫描 */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs text-muted-foreground">宿主来源</Label>
+              <Select value={hostScope} onValueChange={setHostScope}>
+                <SelectTrigger className="w-64"><SelectValue placeholder="全部节点" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部节点</SelectItem>
+                  <SelectItem value="__local_server__" disabled>
+                    主服务器（本机，待启用直连）
+                  </SelectItem>
+                  {iosHosts.map((h) => (
+                    <SelectItem key={h.node_id} value={h.node_id}>
+                      {h.name || h.node_id} {!h.online && "(离线)"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button onClick={() => void runScan()} disabled={scanning || iosHostsLoading}>
+              {scanning ? <Spinner className="size-4" /> : <Search className="size-4" />}
+              扫描
+            </Button>
+            <div className="flex flex-1 justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => void claimSelected()} disabled={claiming || selected.size === 0}>
+                {claiming ? <Spinner className="size-3" /> : null}
+                接入选中（{selected.size}）
+              </Button>
+              <Button size="sm" onClick={() => void claimAndInitialize()} disabled={claiming || selected.size === 0 || !selectedProfileId}>
+                {claiming ? <Spinner className="size-3" /> : null}
+                接入并初始化（{selected.size}）
+              </Button>
+            </div>
+          </div>
+
+          {/* 签名配置 + 标签 */}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs text-muted-foreground">签名配置（初始化用）</Label>
+              <Select
+                value={selectedProfileId?.toString() || ""}
+                onValueChange={(v) => setSelectedProfileId(v ? Number(v) : null)}
+              >
+                <SelectTrigger className="w-64"><SelectValue placeholder="选择签名配置" /></SelectTrigger>
+                <SelectContent>
+                  {profiles.length === 0 ? (
+                    <div className="p-2 text-xs text-muted-foreground">暂无签名配置</div>
+                  ) : (
+                    profiles.map((p) => (
+                      <SelectItem key={p.id} value={p.id.toString()} disabled={p.status === "expired"}>
+                        {p.name} ({p.kind === "asc" ? "ASC p8" : p.kind === "apple_id" ? "Apple ID" : "P12"})
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+              {profiles.length === 0 && (
+                <Button variant="link" size="sm" className="w-fit p-0" onClick={onOpenSigningProfiles}>
+                  先添加签名配置 →
+                </Button>
+              )}
+            </div>
+            <div className="flex flex-1 flex-col gap-1.5">
+              <Label className="text-xs text-muted-foreground">设备名称前缀（可选）</Label>
+              <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="我的 iPhone" />
+            </div>
+          </div>
+
+          {/* 扫描结果 */}
+          {devices.length > 0 ? (
+            <div className="flex flex-col gap-2 rounded-md border p-2">
+              <Label className="text-xs text-muted-foreground">发现 {devices.length} 台设备</Label>
+              {devices.map((dev) => {
+                const key = deviceKey(dev)
+                const rid = resourceIdFor(dev)
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-3 rounded border bg-muted/20 p-2"
+                  >
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      {!dev.claimed && (
+                        <input
+                          type="checkbox"
+                          checked={selected.has(key)}
+                          onChange={() => toggle(dev)}
+                          className="size-4"
+                        />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium">{dev.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {dev.model} · iOS {dev.product_version} · {dev.connection_type}
+                          {dev.node_name ? ` · ${dev.node_name}` : ""}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">UDID: ...{dev.udid.slice(-8)}</div>
+                      </div>
+                    </div>
+                    {dev.claimed ? (
+                      <div className="flex items-center gap-2">
+                        {dev.wda_state && (
+                          <Badge variant="outline">{dev.wda_state}</Badge>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => rid !== null && onOpenDevice(rid)}
+                          disabled={rid === null}
+                        >
+                          打开设备
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => void initializeOne(dev)} disabled={!selectedProfileId}>
+                          初始化
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => void (async () => {
+                          const rid2 = await claimOne(dev)
+                          if (rid2 !== null) {
+                            toast.success(`已接入：${dev.name || dev.udid.slice(-8)}`)
+                            onChanged()
+                            await runScan()
+                          }
+                        })()}
+                        disabled={claiming}
+                      >
+                        {claiming ? <Spinner className="size-3" /> : "接入"}
+                      </Button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
+              {scanning ? "扫描中…" : "点「扫描」发现设备"}
+            </div>
+          )}
+
+          {/* 宿主级状态：让用户看清空结果到底是是因为没节点、节点离线、还是节点上没设备 */}
+          {hostStates.length > 0 && (
+            <div className="flex flex-col gap-1 rounded-md border bg-muted/20 p-2 text-xs">
+              <div className="font-medium text-muted-foreground">宿主状态</div>
+              {hostStates.map((h) => (
+                <div key={h.node_id} className="flex items-center justify-between gap-2">
+                  <span className="truncate">{h.node_name}</span>
+                  <span className={
+                    !h.online ? "text-destructive" :
+                    h.error ? "text-destructive" :
+                    h.device_count > 0 ? "text-primary" : "text-muted-foreground"
+                  }>
+                    {!h.online ? "离线" : h.error ? `错误: ${h.error}` : `${h.device_count} 台设备`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
 
 function TutorialStep({
   index,

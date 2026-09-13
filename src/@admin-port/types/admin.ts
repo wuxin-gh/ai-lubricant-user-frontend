@@ -262,6 +262,8 @@ export interface ProviderCreatePreset {
   template_warnings?: string[];
   /** 代码渠道（builtin_type='code'）的 Provider Python 源码，来自渠道目录预设。 */
   code?: string;
+  /** 渠道模板携带的 builtin_type：新建渠道时据此决定类型（'code' 走代码渠道）。 */
+  builtin_type?: string;
   // 复制流程携带：以下字段后端 _provider_base_response 已返回，复制时需原样带进新建草稿。
   supports_image_generation?: boolean;
   supports_video_generation?: boolean;

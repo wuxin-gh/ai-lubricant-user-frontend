@@ -283,6 +283,9 @@ export interface IosDiscoveredDevice {
   profile_expires_at?: string
   last_error?: string
   config_revision_applied?: number
+  /** 全节点扫描聚合时由服务端打上：来源节点 id 与名称（单节点扫描时不带）。 */
+  node_id?: string
+  node_name?: string
 }
 
 export interface IosSigningProfile {
@@ -306,6 +309,9 @@ export interface IosAppleIdLoginResult {
   method?: "trusteddevice" | "sms"
   login_token?: string
   profile?: IosSigningProfile
+  /** SMS 路径返回的受信电话号码列表（trusted-device 路径为 undefined）。
+   *  id 用于后续 2fa/sms 端点的 phone_id 参数。 */
+  phone_numbers?: Array<{ id: number; number_with_dial_code: string }>
 }
 
 export interface IosWdaJobSnapshot {
@@ -326,15 +332,44 @@ export interface IosWdaJobSnapshot {
 }
 
 export function listIosHosts(): Promise<{ hosts: IosHostNode[] }> {
-  return toolFetch(`/ios-hosts`)
+  // 后端返回 { ios_hosts: [...] }；归一化成 { hosts } 供调用方解构。
+  return toolFetch<{ ios_hosts?: IosHostNode[]; hosts?: IosHostNode[] }>(`/resources/ios-hosts`)
+    .then((r) => ({ hosts: r.ios_hosts ?? r.hosts ?? [] }))
 }
 
 export function getIosHostDevices(nodeId: string): Promise<{ devices: IosDiscoveredDevice[] }> {
-  return toolFetch(`/ios-hosts/${encodeURIComponent(nodeId)}/devices`)
+  return toolFetch(`/resources/ios-hosts/${encodeURIComponent(nodeId)}/devices`)
+}
+
+/** 扫描全部 ios_host 节点：并行取各节点 inventory，合并打平（每台带 node_id/
+ *  node_name）。单节点失败不阻塞其余（hosts[].error 记原因）。 */
+export function getAllIosHostDevices(): Promise<{
+  hosts: Array<{ node_id: string; node_name: string; online: boolean; devices: IosDiscoveredDevice[]; error: string | null }>
+  devices: IosDiscoveredDevice[]
+}> {
+  return toolFetch(`/resources/ios-hosts/all/devices`)
+}
+
+/** 触发一个节点重新 enumerate（异步：ack 只表示已接受）。 */
+export function scanIosHost(nodeId: string): Promise<{ node_id: string; request_id: string }> {
+  return toolFetch(`/resources/ios-hosts/${encodeURIComponent(nodeId)}/scan`, { method: "POST" })
+}
+
+/** 触发全部在线节点重新 enumerate（异步）。 */
+export function scanAllIosHosts(): Promise<{ hosts: Array<{ node_id: string; dispatched: boolean; error: string | null }> }> {
+  return toolFetch(`/resources/ios-hosts/all/scan`, { method: "POST" })
+}
+
+/** 启停常驻 runner 守护循环（不重 claim、不动凭据）。装 runner 走 WDA job。 */
+export function controlIosRunner(resourceId: number, action: "start" | "stop" | "restart"): Promise<{ node_id: string; udid: string; action: string }> {
+  return toolFetch(`/resources/${resourceId}/runner-control`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  })
 }
 
 export function claimIosDevice(body: { node_id: string; udid: string; label: string }): Promise<{ resource_id: number; device_id: string }> {
-  return toolFetch(`/ios-claims`, { method: "POST", body: JSON.stringify(body) })
+  return toolFetch(`/resources/ios-claims`, { method: "POST", body: JSON.stringify(body) })
 }
 
 export function listIosSigningProfiles(): Promise<{ profiles: IosSigningProfile[] }> {
@@ -389,12 +424,31 @@ export function verifyAppleId2fa(body: {
   password: string
   code: string
   profile_id?: number
+  /** SMS 路径：前端从 login 返回的 phone_numbers 里选的号码 id。
+   *  trusted-device 路径忽略此字段。 */
+  phone_id?: number
   /** 与 login 同口径：2FA 完成那步请求也经同一代理出网。 */
   proxy_config_id?: string
   /** 与 login 同口径：远程 anisette 服务器。 */
   anisette_server?: string
 }): Promise<IosAppleIdLoginResult> {
   return toolFetch(`/signing-profiles/apple-id/verify-2fa`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    baseOverride: "/api/v1/users/ios",
+  })
+}
+
+/** SMS 2FA：method=="sms" 时前端选号后触发短信发送。
+ *  login 返回 phone_numbers 时调用；Apple 拒发新码但旧码仍有效也判成功。 */
+export function sendAppleIdSms(body: {
+  login_token: string
+  email: string
+  phone_id: number
+  proxy_config_id?: string
+  anisette_server?: string
+}): Promise<{ login_token: string; phone_id: number; sms_sent: boolean }> {
+  return toolFetch(`/signing-profiles/apple-id/2fa/sms`, {
     method: "POST",
     body: JSON.stringify(body),
     baseOverride: "/api/v1/users/ios",
