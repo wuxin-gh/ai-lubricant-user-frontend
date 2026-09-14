@@ -3832,7 +3832,11 @@ function templatePresetFromManifest(manifest: Record<string, any> | null | undef
     auto_update_models: channel.auto_update_models !== false,
     model_id_rewrite_rules: normalizeModelIdRewriteRules(channel.model_id_rewrite_rules),
     // 代码渠道模板：builtin_type 决定新建渠道时的类型，code 是 spec 源码。
-    builtin_type: safeString(channel.builtin_type) || undefined,
+    // 只认已知内置类型——老模板可能残留 'custom' 之类非法值，带进去新建会被后端
+    // 拒成「未知的内置渠道类型」。非已知值一律丢弃（回落自定义渠道）。
+    builtin_type: BUILTIN_TYPE_OPTIONS.some((o) => o.value === safeString(channel.builtin_type))
+      ? safeString(channel.builtin_type)
+      : undefined,
     code: safeString(channel.code) || undefined,
     models: Array.isArray(channel.chat_protocols)
       ? Array.from(new Set(channel.chat_protocols.flatMap((row: any) => Array.isArray(row?.models) ? row.models.map(String) : [])))
@@ -4640,12 +4644,6 @@ export function UnifiedProviderModal({
     if (isCreate && createBuiltinType === 'code' && !safeString(detail.code).trim()) {
       setError('请粘贴渠道源码（一个 spec 类：普通类 + @staticmethod 钩子）')
       setActiveTab('code')
-      return
-    }
-    // 模板没有账号这一层，跳过「至少一个 API Key」校验。
-    if (!templateMode && isCreate && isCustom && buildCreateAccountsPayload().length === 0) {
-      setError('请先在账号管理中填写至少一个 API Key')
-      setActiveTab('accounts')
       return
     }
     const retryCodeTokens = extraRetryStatusCodesText
@@ -7334,7 +7332,12 @@ export function Channels() {
         onSelect={(entry) => {
           setCreatePreset(entry.preset)
           setCreatePresetOrigin('catalog')
-          setInitialBuiltinType(entry.builtin_type || '')
+          // 只认已知内置类型：老模板/脏数据里的 'custom' 等非法值会让新建报
+          // 「未知的内置渠道类型」，此处直接丢弃回落自定义渠道。
+          const knownType = BUILTIN_TYPE_OPTIONS.some((o) => o.value === (entry.builtin_type || ''))
+            ? (entry.builtin_type || '')
+            : ''
+          setInitialBuiltinType(knownType)
           setCreateModalOpen(true)
         }}
       />
