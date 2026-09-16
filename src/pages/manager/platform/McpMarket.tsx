@@ -907,7 +907,7 @@ function McpMarketSettings({ open, initialPrincipalId, onClose, onChanged }: {
       api={userManagerApi}
       onOpenAgent={(principalId) => {
         void getAgentByMcpUser(principalId).then((r) => {
-          if (r.agent_id != null) window.location.href = `/console/agents?agentId=${r.agent_id}`
+          if (r.agent_id != null) window.location.href = `/agent-mode/manage?agentId=${r.agent_id}`
           else toast.error('该 principal 未绑定 Agent')
         }).catch((e: any) => toast.error(e?.message || '反查 Agent 失败'))
       }}

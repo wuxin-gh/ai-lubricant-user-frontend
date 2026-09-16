@@ -1,13 +1,16 @@
 import * as React from "react"
 import NavCommunity from "./nav-community"
-import NavProject from "./nav-project"
 import NavUser from "./nav-user"
+import CodingProjectNav from "./coding-project-nav"
+import ProjectTaskNav from "./project-task-nav"
+import { ConsoleNav } from "./console-nav"
+import { ModeSwitcher } from "./mode-switcher"
+import { ProjectSwitcher } from "./project-switcher"
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -16,23 +19,23 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "@/components/ui/sidebar"
-import { Bot, Blocks, ChevronDown, ChevronRight, List, MessageSquare, Server, Wrench } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, List } from "lucide-react"
 import { IS_ONLINE_EDITION } from "@/utils/edition"
 import { publicUrl } from "@/utils/public-url"
 import { useTranslation } from "react-i18next"
 import { useAppRuntime } from "@/components/app-runtime-provider"
+import { useActiveMode } from "@/hooks/use-active-mode"
 import { Link, useLocation } from "react-router-dom"
 
-// AI 工具导航项：聊天（多模态）、Agent 对话、资源中心、我的工具、执行节点。个人 MCP /
-// Skill / 插件 / 提示词 / 市场收敛到资源中心页面；CDP 浏览器 / 邮箱实例独立为「我的工具」；
-// 执行节点从原「配置」弹框提为顶级页（只读）。
-const AI_TOOL_ITEMS: { to: string; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { to: "/console/chat", label: "聊天", icon: MessageSquare },
-  { to: "/console/mcp", label: "资源中心", icon: Blocks },
-  { to: "/console/my-tools", label: "我的工具", icon: Wrench },
-  { to: "/console/nodes", label: "执行节点", icon: Server },
-]
-
+/**
+ * 控制台侧栏。信息架构改为六模式（src/config/modes.ts）：
+ *
+ * - 顶部模式切换器（ModeSwitcher）→ 当前模式的导航项（ConsoleNav）。
+ * - 原「AI 工具」硬编码 4 项（聊天/资源中心/我的工具/执行节点）已由模式导航取代。
+ * - 当前项目切换器（ProjectSwitcher）+ 当前项目的功能页菜单（CodingProjectNav）
+ *   只在 Coding 模式渲染。
+ * - 活跃 Agent 平铺列表只在 Agent 模式渲染。
+ */
 export default function UserSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
@@ -40,9 +43,10 @@ export default function UserSidebar({
   const { serverConfig } = useAppRuntime()
   const location = useLocation()
   const isCnRegion = serverConfig?.region === "cn"
+  const activeMode = useActiveMode()
   const [agents, setAgents] = React.useState<Array<{ id: number; name: string; display_name: string; enabled: boolean }>>([])
   const [agentsExpanded, setAgentsExpanded] = React.useState(false)
-  const isAgentChatActive = location.pathname === "/console/agent-chat"
+  const isAgentChatActive = location.pathname === "/agent-mode/chat"
   const activeAgentId = new URLSearchParams(location.search).get("agentId")
   // 最多 3 个活跃 Agent 直接平铺成一级菜单；多出来的收进「Agent 列表」二级菜单，
   // 不超过 3 个时那个一级菜单整体不出现。
@@ -55,7 +59,10 @@ export default function UserSidebar({
     if (isOverflowAgentActive) setAgentsExpanded(true)
   }, [isOverflowAgentActive])
 
+  // Agent 平铺列表只在 Agent 模式下有意义，其它模式不拉取、不渲染。
+  const showAgents = activeMode?.id === "agent"
   React.useEffect(() => {
+    if (!showAgents) return
     let active = true
     const load = () => {
       fetch("/agent/agents", { credentials: "include" })
@@ -73,7 +80,7 @@ export default function UserSidebar({
       active = false
       window.removeEventListener("agent-manager:changed", load)
     }
-  }, [])
+  }, [showAgents])
   // 品牌副标题与管理端侧边栏保持同一个来源（managerShell.brand.subtitle），
   // 不再按 region 在「长亭百智云 / CyberServal」之间切换，避免两端文案漂移。
   const brandSubtitleKey = "managerShell.brand.subtitle"
@@ -85,7 +92,8 @@ export default function UserSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
-              <Link to="/console/tasks">
+              {/* logo → 首页（快捷导航，独立页，不属于任何模式）。 */}
+              <Link to="/home">
                 <img src={publicUrl("/ai-lubricant.svg")} alt="Ai Lubricant" className="size-8" />
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-medium">Ai Lubricant</span>
@@ -94,100 +102,85 @@ export default function UserSidebar({
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {/* 模式切换器：折叠态隐藏（图标态放不下），展开态占满一行。 */}
+          <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
+            <ModeSwitcher className="mt-1" />
+          </SidebarMenuItem>
+          {/* 当前项目 + 切换入口：仅 Coding 模式（组件内部判定）。 */}
+          <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
+            <ProjectSwitcher className="mt-1" />
+          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent className="p-2 md:p-0">
-        <SidebarGroup>
-          <SidebarGroupLabel>AI 工具</SidebarGroupLabel>
-          <SidebarMenu>
-            {AI_TOOL_ITEMS.slice(0, 1).map((item) => {
-              const Icon = item.icon
-              const active =
-                location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
-              return (
-                <SidebarMenuItem key={item.to}>
-                  <SidebarMenuButton tooltip={item.label} isActive={active} asChild>
-                    <Link to={item.to}>
-                      <Icon className="size-4" />
-                      <span>{item.label}</span>
-                    </Link>
-                  </SidebarMenuButton>
+        <ConsoleNav />
+        {/* 活跃 Agent 平铺：仅 Agent 模式。 */}
+        {showAgents && (primaryAgents.length > 0 || overflowAgents.length > 0) ? (
+          <SidebarGroup>
+            <SidebarMenu>
+              {primaryAgents.map((agent) => {
+                const active = isAgentChatActive && activeAgentId === String(agent.id)
+                const label = agent.display_name || agent.name
+                return (
+                  <SidebarMenuItem key={agent.id}>
+                    <SidebarMenuButton tooltip={label} isActive={active} asChild>
+                      <Link to={`/agent-mode/chat?agentId=${agent.id}`}>
+                        <Bot className="size-4" />
+                        <span className="truncate">{label}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                )
+              })}
+              {overflowAgents.length > 0 && (
+                <SidebarMenuItem>
+                  <div className="flex items-center">
+                    <button
+                      type="button"
+                      className="ml-1 flex size-5 shrink-0 items-center justify-center text-muted-foreground/70 hover:text-primary"
+                      aria-label={agentsExpanded ? "收起" : "展开"}
+                      onClick={() => setAgentsExpanded((current) => !current)}
+                    >
+                      {agentsExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                    </button>
+                    <SidebarMenuButton
+                      tooltip="Agent 列表"
+                      isActive={isOverflowAgentActive}
+                      onClick={() => setAgentsExpanded((current) => !current)}
+                    >
+                      <List className="size-4" />
+                      <span>Agent 列表</span>
+                    </SidebarMenuButton>
+                  </div>
+                  {agentsExpanded && (
+                    <SidebarMenuSub className="mr-0 gap-0.5 pl-2">
+                      {overflowAgents.map((agent) => {
+                        const active = isAgentChatActive && activeAgentId === String(agent.id)
+                        return (
+                          <SidebarMenuSubItem key={agent.id}>
+                            <SidebarMenuSubButton asChild size="sm" isActive={active} className="w-full">
+                              <Link to={`/agent-mode/chat?agentId=${agent.id}`}>
+                                <Bot className="size-3.5 shrink-0" />
+                                <span className="truncate">{agent.display_name || agent.name}</span>
+                              </Link>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        )
+                      })}
+                    </SidebarMenuSub>
+                  )}
                 </SidebarMenuItem>
-              )
-            })}
-            {/* 活跃 Agent 直接作为一级菜单。原来的「Agent 对话」父项已去掉，
-                配置入口移到顶栏刷新按钮旁的「管理」按钮。 */}
-            {primaryAgents.map((agent) => {
-              const active = isAgentChatActive && activeAgentId === String(agent.id)
-              const label = agent.display_name || agent.name
-              return (
-                <SidebarMenuItem key={agent.id}>
-                  <SidebarMenuButton tooltip={label} isActive={active} asChild>
-                    <Link to={`/console/agent-chat?agentId=${agent.id}`}>
-                      <Bot className="size-4" />
-                      <span className="truncate">{label}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              )
-            })}
-            {overflowAgents.length > 0 && (
-              <SidebarMenuItem>
-                <div className="flex items-center">
-                  <button
-                    type="button"
-                    className="ml-1 flex size-5 shrink-0 items-center justify-center text-muted-foreground/70 hover:text-primary"
-                    aria-label={agentsExpanded ? "收起" : "展开"}
-                    onClick={() => setAgentsExpanded((current) => !current)}
-                  >
-                    {agentsExpanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-                  </button>
-                  <SidebarMenuButton
-                    tooltip="Agent 列表"
-                    isActive={isOverflowAgentActive}
-                    onClick={() => setAgentsExpanded((current) => !current)}
-                  >
-                    <List className="size-4" />
-                    <span>Agent 列表</span>
-                  </SidebarMenuButton>
-                </div>
-                {agentsExpanded && (
-                  <SidebarMenuSub className="mr-0 gap-0.5 pl-2">
-                    {overflowAgents.map((agent) => {
-                      const active = isAgentChatActive && activeAgentId === String(agent.id)
-                      return (
-                        <SidebarMenuSubItem key={agent.id}>
-                          <SidebarMenuSubButton asChild size="sm" isActive={active} className="w-full">
-                            <Link to={`/console/agent-chat?agentId=${agent.id}`}>
-                              <Bot className="size-3.5 shrink-0" />
-                              <span className="truncate">{agent.display_name || agent.name}</span>
-                            </Link>
-                          </SidebarMenuSubButton>
-                        </SidebarMenuSubItem>
-                      )
-                    })}
-                  </SidebarMenuSub>
-                )}
-              </SidebarMenuItem>
-            )}
-            {AI_TOOL_ITEMS.slice(1).map((item) => {
-              const Icon = item.icon
-              const active =
-                location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
-              return (
-                <SidebarMenuItem key={item.to}>
-                  <SidebarMenuButton tooltip={item.label} isActive={active} asChild>
-                    <Link to={item.to}>
-                      <Icon className="size-4" />
-                      <span>{item.label}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              )
-            })}
-          </SidebarMenu>
-        </SidebarGroup>
-        <NavProject />
+              )}
+            </SidebarMenu>
+          </SidebarGroup>
+        ) : null}
+        {/* 当前项目的功能页菜单 + 该项目的任务快捷列表：仅 Coding 模式。 */}
+        {activeMode?.id === "coding" ? (
+          <>
+            <CodingProjectNav />
+            <ProjectTaskNav />
+          </>
+        ) : null}
       </SidebarContent>
       <SidebarFooter className="md:p-0">
         <div className="flex items-stretch gap-2 group-data-[collapsible=icon]:flex-col">
@@ -199,7 +192,7 @@ export default function UserSidebar({
             />
           )}
         </div>
-        {/* 用户头像 + 通知入口 + 管理后台。「配置」弹框已拆解：执行节点进侧栏顶级页、
+        {/* 用户头像 + 通知入口。「配置」弹框已拆解：执行节点进侧栏顶级页、
             Git 身份进「管理项目」弹框、通知渠道进头像菜单。 */}
         <NavUser />
       </SidebarFooter>

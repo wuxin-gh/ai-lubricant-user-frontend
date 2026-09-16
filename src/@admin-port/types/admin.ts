@@ -292,6 +292,101 @@ export interface ChannelCatalogResponse {
   error?: string;
 }
 
+// ==================== 外部供应商框架导入（New API 等） ====================
+
+export interface ChannelImporterInfo {
+  id: string;
+  display_name: string;
+  supports_api_fetch: boolean;
+  supports_paste: boolean;
+  docs_url: string;
+}
+
+/** 一个待导入的外部渠道。密钥面只有掩码预览，后端绝不回显原始 key。 */
+export interface ExternalChannelCandidate {
+  candidate_id: string;
+  source_id: string;
+  remark: string;
+  base_url: string;
+  enabled: boolean;
+  /** false 表示该渠道类型不支持导入（如签名鉴权），errors 里是原因。 */
+  importable: boolean;
+  protocol: string;
+  chat_protocols: ChatProtocolConfig[];
+  models: string[];
+  model_rows: Array<{ upstream_model_id: string; model_id: string }>;
+  model_id_rewrite_rules: ModelIdRewriteEntry[];
+  tags: string[];
+  account_usernames: string[];
+  account_count: number;
+  has_keys: boolean;
+  key_preview: string[];
+  account_weight: number;
+  source_meta: Record<string, unknown>;
+  /** 非空表示本地已有同地址渠道；选「覆盖」或「合并账号」时按它定位。 */
+  conflict?: { provider_name: string; remark: string } | null;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface ChannelImportPreviewRequest {
+  source: string;
+  mode: "fetch" | "paste";
+  base_url?: string;
+  token?: string;
+  user_id?: string;
+  proxy_config_id?: string;
+  page_size?: number;
+  max_pages?: number;
+  include_disabled?: boolean;
+  text?: string;
+  format?: string;
+  add_source_tag?: boolean;
+}
+
+export interface ChannelImportPreviewResponse {
+  ok: boolean;
+  source: string;
+  scanned: number;
+  fetched: number;
+  candidates: ExternalChannelCandidate[];
+  dropped: Array<{ source_id: string; remark: string; reason: string }>;
+  warnings: string[];
+}
+
+export interface ChannelImportCommitRequest extends ChannelImportPreviewRequest {
+  selection: Array<Partial<ExternalChannelCandidate> & { candidate_id: string }>;
+  on_conflict: "skip" | "overwrite" | "merge_accounts";
+}
+
+export interface ChannelImportResultItem {
+  candidate_id: string;
+  provider_name?: string;
+  accounts?: number;
+  models?: number;
+  reason?: string;
+  existing?: string;
+  error?: string;
+}
+
+export interface ChannelImportCommitResponse {
+  ok: boolean;
+  created: ChannelImportResultItem[];
+  overwritten: ChannelImportResultItem[];
+  merged: ChannelImportResultItem[];
+  skipped: ChannelImportResultItem[];
+  failed: ChannelImportResultItem[];
+  warnings: string[];
+  summary: {
+    selected: number;
+    created: number;
+    overwritten: number;
+    merged: number;
+    skipped: number;
+    failed: number;
+  };
+}
+
 export interface ChannelTemplateManifestV1 {
   schema: "ai-lubricant.channel-template/v1";
   id: string;
@@ -546,6 +641,12 @@ export interface ProviderAccountAuthStartResponse extends OkResponse {
   poll_interval?: number;
   /** 完成方式（与 account_schema.auth_start.completion 一致），前端据此决定是否显示补投输入框。 */
   completion?: "poll" | "callback" | "loopback" | string;
+  /** 渠道自定义的补投框占位符（如短信验证码渠道：「请输入收到的 6 位短信验证码」）。 */
+  replay_hint?: string;
+  /** 渠道自定义的补投按钮文案（如「提交验证码」）。 */
+  replay_label?: string;
+  /** 渠道自定义的「授权进行中」提示（如「已发送短信，请提交 6 位验证码…」）。 */
+  polling_hint?: string;
   message?: string;
 }
 

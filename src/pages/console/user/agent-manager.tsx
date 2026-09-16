@@ -1061,7 +1061,7 @@ export default function AgentManagerWorkspace({
                           />
                           <p className="text-xs text-muted-foreground">
                             上游临时限流（429）时 Agent 自动带退避重试的次数；0 = 关闭。
-                            白名单/渠道禁用等配置类失败不会自动重试，需在页面手动重试。
+                            白名单/供应商禁用等配置类失败不会自动重试，需在页面手动重试。
                           </p>
                         </div>
                       </TabsContent>

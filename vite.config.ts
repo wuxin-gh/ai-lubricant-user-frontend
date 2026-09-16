@@ -105,6 +105,17 @@ export default defineConfig(({ command, mode }) => {
           target: env.TARGET,
           changeOrigin: true,
           secure: false,
+          // /agent 是后端 Agent API 前缀，但前端 Agent 模式路由 /agent-mode/* 也
+          // 以它开头。bypass 让浏览器 HTML 导航（/agent-mode/chat 等）落到 SPA，
+          // XHR/fetch（/agent/agents 等 API）照常代理到后端。
+          bypass: (req: { headers: Record<string, string | string[] | undefined>; method?: string }) => {
+            const accept = String(req.headers['accept'] || '')
+            const isNavigation = req.method === 'GET' && accept.includes('text/html')
+            if (isNavigation) {
+              return '/index.html'
+            }
+            return undefined
+          },
         },
         // MCP market/runtime endpoints (ai-lubricant's own MCP, not MonkeyCode's).
         // The admin ``mcp.ts`` client hits ``/mcp/*`` directly; without this the

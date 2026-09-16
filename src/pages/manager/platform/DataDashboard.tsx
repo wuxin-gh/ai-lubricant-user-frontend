@@ -2,7 +2,7 @@
  * 数据仪表盘（平台管理页）。
  * 从 admin-frontend 的 antd 版重写为 shadcn；数据层继续复用 `@/@admin-port/api/*`（纯 axios）。
  * 图表委托同目录的 shadcn + recharts 版 UsageChart（./UsageCharts）。
- * 保留原有全部指标、序列、排行榜与交互（渠道/APIKey/模型筛选、图表类型、单位、时间范围、刷新）。
+ * 保留原有全部指标、序列、排行榜与交互（供应商/APIKey/模型筛选、图表类型、单位、时间范围、刷新）。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -474,7 +474,7 @@ export function DataDashboard() {
   return (
     <TooltipProvider>
       <AdminPage primaryActions={<ManagerRefreshButton loading onClick={() => void fetchStats()} />}>
-        {/* 第一排：使用统计标题 + 说明；渠道 / 图表类型 / 单位 / 时间 / 刷新在同一列 */}
+        {/* 第一排：使用统计标题 + 说明；供应商 / 图表类型 / 单位 / 时间 / 刷新在同一列 */}
         <Card size="sm" className="shadow-none">
           <CardContent className="flex flex-wrap items-center gap-4 px-4 py-3">
             <div className="min-w-0 flex-1">
@@ -484,9 +484,9 @@ export function DataDashboard() {
 
             <div className="flex items-center gap-1.5">
               <Select value={providerDraft || ALL} onValueChange={(v) => updateProvider(v === ALL ? '' : v)} disabled={providerLoading}>
-                <SelectTrigger className="w-[150px]"><SelectValue placeholder="全部渠道" /></SelectTrigger>
+                <SelectTrigger className="w-[150px]"><SelectValue placeholder="全部供应商" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={ALL}>全部渠道</SelectItem>
+                  <SelectItem value={ALL}>全部供应商</SelectItem>
                   {providerOptions.map((p) => (
                     <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
                   ))}
@@ -650,7 +650,7 @@ export function DataDashboard() {
           </Card>
           <div className="flex h-full flex-col gap-3">
             <MiniRanking title="模型 Top3" icon={<ChartColumn />} iconColor="#3b82f6" rows={rankings?.model_usage_top} metric="tokens" timeUnit={timeUnit} nameOf={modelLabel} className="flex-1" />
-            <MiniRanking title="渠道 Top3" icon={<Database />} iconColor="#8b5cf6" rows={rankings?.provider_usage_top} metric="tokens" timeUnit={timeUnit} nameOf={providerLabel} className="flex-1" />
+            <MiniRanking title="供应商 Top3" icon={<Database />} iconColor="#8b5cf6" rows={rankings?.provider_usage_top} metric="tokens" timeUnit={timeUnit} nameOf={providerLabel} className="flex-1" />
           </div>
         </div>
 
@@ -708,19 +708,19 @@ export function DataDashboard() {
               )}
               {showProviderRankings && (
                 <>
-                  <span className="mt-6 block text-xs text-muted-foreground">渠道排行榜</span>
+                  <span className="mt-6 block text-xs text-muted-foreground">供应商排行榜</span>
                   <div className="mt-1.5 mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    <RankingTable title="使用量前 10 渠道" rows={rankings?.provider_usage_top} metric="tokens" timeUnit={timeUnit} nameOf={providerLabel} />
-                    <RankingTable title="请求次数前 10 渠道" rows={rankings?.provider_requests_top} metric="requests" timeUnit={timeUnit} nameOf={providerLabel} />
+                    <RankingTable title="使用量前 10 供应商" rows={rankings?.provider_usage_top} metric="tokens" timeUnit={timeUnit} nameOf={providerLabel} />
+                    <RankingTable title="请求次数前 10 供应商" rows={rankings?.provider_requests_top} metric="requests" timeUnit={timeUnit} nameOf={providerLabel} />
                   </div>
-                  <span className="text-xs text-muted-foreground">渠道指标排行</span>
+                  <span className="text-xs text-muted-foreground">供应商指标排行</span>
                   <div className="mt-1.5 grid grid-cols-1 gap-3 lg:grid-cols-3">
-                    <RankingTable title="成功率前 10 渠道" rows={rankings?.provider_success_rate_top} metric="success_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
-                    <RankingTable title="响应最快前 10 渠道" rows={rankings?.provider_speed_top} metric="avg_duration_ms" timeUnit={timeUnit} nameOf={providerLabel} compact />
-                    <RankingTable title="缓存命中率前 10 渠道" rows={rankings?.provider_cache_hit_top} metric="cache_hit_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
+                    <RankingTable title="成功率前 10 供应商" rows={rankings?.provider_success_rate_top} metric="success_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
+                    <RankingTable title="响应最快前 10 供应商" rows={rankings?.provider_speed_top} metric="avg_duration_ms" timeUnit={timeUnit} nameOf={providerLabel} compact />
+                    <RankingTable title="缓存命中率前 10 供应商" rows={rankings?.provider_cache_hit_top} metric="cache_hit_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
                   </div>
                   <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
-                    <RankingTable title="失败率前 10 渠道" rows={rankings?.provider_failure_rate_top} metric="failure_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
+                    <RankingTable title="失败率前 10 供应商" rows={rankings?.provider_failure_rate_top} metric="failure_rate" timeUnit={timeUnit} nameOf={providerLabel} compact />
                   </div>
                 </>
               )}

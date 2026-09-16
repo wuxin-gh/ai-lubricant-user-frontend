@@ -50,12 +50,10 @@ import {
 import { getProviders, getProviderUpstreamModels } from '@/@admin-port/api/providers'
 import type { ProviderLite, ProviderUpstreamModelItem } from '@/@admin-port/types/admin'
 import { UnifiedProviderModal } from './Channels'
-import { ModelRoutingContent } from './ModelRouting'
 import { RealModelRoutingDialog, type RealModelRoutingTarget } from './RealModelRouting'
 
 type ViewMode = 'card' | 'table'
-type MarketplaceTab = 'marketplace' | 'unconfigured' | 'custom'
-type StatusFilter = 'configured' | 'missing' | 'no-route' | 'runtime' | 'all'
+type StatusFilter = 'all' | 'missing' | 'no-route' | 'runtime'
 type ImportSource = 'catalog:llm-metadata' | 'catalog:openrouter' | 'catalog:modelsdev' | `channel:${string}`
 type ModalState =
   | { kind: 'metadata'; mode: 'add' | 'edit'; model: UnifiedModel | null; lockModelId?: boolean }
@@ -108,7 +106,7 @@ interface UnifiedModel extends Record<string, unknown> {
   _providers: string[]
   _routes: Record<string, unknown>[]
   _reason: string | null
-  // 渠道策略配置（model_groups kind='real' 行的顶层列，非元数据）：顶层白/黑名单是激活方案的
+  // 供应商策略配置（model_groups kind='real' 行的顶层列，非元数据）：顶层白/黑名单是激活方案的
   // 投影，schemes/active_scheme 承载多档位降级。导入候选/目录条目不带这些字段，为空。
   _providerWhitelist: string[]
   _providerBlacklist: string[]
@@ -148,10 +146,11 @@ interface GlobalConfigFormState {
 
 const PAGE_SIZES = [12, 24, 48, 96]
 
-// 模型广场 tab 已承担「已配置 / 未配置」的切分，这里只剩运行态/渠道维度。
+// 真实模型 + 未配置模型合并展示：状态过滤兼顾运行态、供应商维度与缺元数据。
 const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'all', label: '全部' },
-  { key: 'no-route', label: '无渠道' },
+  { key: 'missing', label: '未配置' },
+  { key: 'no-route', label: '无供应商' },
   { key: 'runtime', label: 'runtime' },
 ]
 
@@ -185,7 +184,7 @@ function recordValue(value: unknown): Record<string, unknown> {
 
 // 解析 real 行的方案数组。id 缺失（旧数据）时按位置补 legacy-{序号}，与后端
 // PostgresClient._normalize_schemes 对齐；按 id 去重。models 在真实模型下恒为自身，
-// 这里保留后端给的值，由渠道策略弹框在保存时补齐。
+// 这里保留后端给的值，由供应商策略弹框在保存时补齐。
 function schemeArrayValue(value: unknown): RealModelScheme[] {
   if (!Array.isArray(value)) return []
   const result: RealModelScheme[] = []
@@ -242,7 +241,7 @@ function normalizeMetadata(entry: ModelMetadataEntry | Record<string, unknown> |
   }
 }
 
-// 把渠道上游模型条目（含 provider 原始 raw）归一化成 UnifiedModel。
+// 把供应商上游模型条目（含 provider 原始 raw）归一化成 UnifiedModel。
 // 只映射元数据支持的字段，未知字段丢弃；capabilities 仅取 raw 自带 capabilities 键，
 // 不把整个 raw 塞进去。model_id 置空，由调用方覆盖为目标行 model_id。
 function normalizeUpstreamItem(item: ProviderUpstreamModelItem): UnifiedModel {
@@ -381,11 +380,11 @@ function getOriginalSource(model: UnifiedModel): { provider: string; upstreamMod
 
 function getStatusLabel(model: UnifiedModel): { label: string; tone: 'green' | 'red' | 'yellow' } {
   if (!model._hasMeta) return { label: '未配置', tone: 'red' }
-  if (!model._runtime) return { label: '无渠道', tone: 'yellow' }
+  if (!model._runtime) return { label: '无供应商', tone: 'yellow' }
   return { label: '可用', tone: 'green' }
 }
 
-// 卡片/表格上的渠道策略摘要：生效档位的渠道过滤 + 备用方案数。
+// 卡片/表格上的供应商策略摘要：生效档位的供应商过滤 + 备用方案数。
 // 备用方案 = 显式勾选 is_backup 且非生效的方案（与后端降级链口径一致）。
 function routingSummary(model: UnifiedModel): { label: string; tone: TagTone; backups: number } {
   const backups = model._schemes.filter((scheme) => scheme.is_backup && scheme.id !== model._activeScheme).length
@@ -395,7 +394,7 @@ function routingSummary(model: UnifiedModel): { label: string; tone: TagTone; ba
   if (model._providerBlacklist.length) {
     return { label: `黑 ${model._providerBlacklist.join('、')}`, tone: 'yellow', backups }
   }
-  return { label: '不限渠道', tone: 'default', backups }
+  return { label: '不限供应商', tone: 'default', backups }
 }
 
 function createFormState(model: UnifiedModel | null, defaultModelId = ''): MetadataFormState {
@@ -539,14 +538,14 @@ function CapabilityTags({ model }: { model: UnifiedModel }) {
   return <span className="flex flex-wrap gap-1">{tags}</span>
 }
 
-// 卡片/表格上的渠道策略摘要标签：生效档位的渠道过滤 + 备用方案数。点击等同于打开渠道策略弹框。
+// 卡片/表格上的供应商策略摘要标签：生效档位的供应商过滤 + 备用方案数。点击等同于打开供应商策略弹框。
 function RoutingTags({ model, onOpen }: { model: UnifiedModel; onOpen: () => void }) {
   if (!model._hasMeta) return <span className="text-xs text-muted-foreground">—</span>
   const summary = routingSummary(model)
   return (
     <span className="flex flex-wrap items-center gap-1">
-      <Tag tone={summary.tone} title="点击配置渠道策略" onClick={onOpen}>{summary.label}</Tag>
-      {summary.backups > 0 ? <Tag tone="yellow" title="生效档位无可用渠道时按顺序降级的备用方案数">备用 {summary.backups}</Tag> : null}
+      <Tag tone={summary.tone} title="点击配置供应商策略" onClick={onOpen}>{summary.label}</Tag>
+      {summary.backups > 0 ? <Tag tone="yellow" title="生效档位无可用供应商时按顺序降级的备用方案数">备用 {summary.backups}</Tag> : null}
     </span>
   )
 }
@@ -619,9 +618,7 @@ export function ModelMetadata() {
   const [data, setData] = useState<ModelMetadataResponse | null>(null)
   const [providerSummaries, setProviderSummaries] = useState<ProviderLite[]>([])
   const [search, setSearch] = useState('')
-  const [tab, setTab] = useState<MarketplaceTab>('custom')
-  const [createCustomSignal, setCreateCustomSignal] = useState(0)
-  const [status, setStatus] = useState<StatusFilter>('configured')
+  const [status, setStatus] = useState<StatusFilter>('all')
   const [selectedProviders, setSelectedProviders] = useState<string[]>([])
   const [minTokens, setMinTokens] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
@@ -630,7 +627,7 @@ export function ModelMetadata() {
   const [page, setPage] = useState(1)
   const [modal, setModal] = useState<ModalState>(null)
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null)
-  // 真实模型渠道策略弹框：只在「真实模型」tab 的卡片/表格操作区打开（编辑按钮旁）。
+  // 真实模型供应商策略弹框：只在「真实模型」tab 的卡片/表格操作区打开（编辑按钮旁）。
   // 存 model_id 而非整行对象，保证刷新后弹框读到的是最新一行（避免拿旧快照覆盖 schemes）。
   const [routingModelId, setRoutingModelId] = useState<string | null>(null)
   const [routingSaving, setRoutingSaving] = useState(false)
@@ -638,8 +635,6 @@ export function ModelMetadata() {
   const [formError, setFormError] = useState<string | null>(null)
   const [importState, setImportState] = useState<ImportState>({ source: 'catalog:llm-metadata', loading: false, error: null, search: '', page: 1, candidates: [] })
   const importRequestRef = useRef(0)
-  // 自定义模型 tab 嵌入 ModelRoutingContent；刷新计数器递增时让子组件重新加载
-  const [customRefreshSignal, setCustomRefreshSignal] = useState(0)
   const [globalConfig, setGlobalConfig] = useState<GlobalConfigFormState>({ loading: true, tokenizerRules: [], ownedByOptions: [], selectedOwnedBy: [], thinkingGlobalEnabled: false, thinkingDefaults: {}, reasoningDefaults: {}, simulatedReasoningEffort: '', simulatedAutoSearch: false })
 
   const providerLabelMap = useMemo(() => {
@@ -696,29 +691,23 @@ export function ModelMetadata() {
       const providerLabels = model._providers.map(providerLabel).join(' ')
       const searchText = [model.model_id, model.name, model.owned_by, model._providers.join(' '), providerLabels, routesText].join(' ').toLowerCase()
       if (query && !searchText.includes(query)) return false
-      if (tab === 'custom') return false
-      // Tab 决定主集合：模型广场只显示已配置模型；未配置模型页只显示缺元数据模型。
-      if (tab === 'marketplace' && !model._hasMeta) return false
-      if (tab === 'unconfigured' && model._hasMeta) return false
-      // 未配置页没有状态二次筛选；模型广场沿用原有状态筛选。
-      if (tab === 'marketplace') {
-        if (status === 'no-route' && model._runtime) return false
-        if (status === 'runtime' && !model._runtime) return false
-        // status === 'all' 不再额外过滤
-      }
+      // 真实模型 + 未配置模型合并：状态过滤覆盖缺元数据、无供应商、运行态。
+      if (status === 'missing' && model._hasMeta) return false
+      if (status === 'no-route' && model._runtime) return false
+      if (status === 'runtime' && !model._runtime) return false
       if (selectedProviders.length > 0 && !model._providers.some((provider) => selectedProviders.includes(provider))) return false
       const outputTokens = model.max_tokens ?? 0
       if (min !== null && Number.isFinite(min) && outputTokens < min) return false
       if (max !== null && Number.isFinite(max) && outputTokens > max) return false
       return true
     })
-  }, [maxTokens, minTokens, providerLabel, search, selectedProviders, status, tab, unified])
+  }, [maxTokens, minTokens, providerLabel, search, selectedProviders, status, unified])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, totalPages)
   const pageItems = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
 
-  useEffect(() => { setPage(1) }, [search, status, tab, selectedProviders, minTokens, maxTokens, pageSize])
+  useEffect(() => { setPage(1) }, [search, status, selectedProviders, minTokens, maxTokens, pageSize])
 
   const stats = useMemo(() => ({
     modelCount: data?.summary.runtime_model_count ?? unified.length,
@@ -727,7 +716,7 @@ export function ModelMetadata() {
     providerCount: providers.length,
   }), [data, providers.length, unified])
 
-  // 渠道策略弹框的目标行：按 model_id 从最新 unified 里取，保证刷新后弹框读到最新 schemes。
+  // 供应商策略弹框的目标行：按 model_id 从最新 unified 里取，保证刷新后弹框读到最新 schemes。
   const routingTarget = useMemo<RealModelRoutingTarget | null>(() => {
     if (!routingModelId) return null
     const model = unified.find((item) => item.model_id === routingModelId)
@@ -751,7 +740,7 @@ export function ModelMetadata() {
     setRoutingModelId(model.model_id)
   }, [])
 
-  // 渠道策略窄写：PUT /admin/model-metadata/{id}/routing 只改渠道过滤/方案，不触碰元数据。
+  // 供应商策略窄写：PUT /admin/model-metadata/{id}/routing 只改供应商过滤/方案，不触碰元数据。
   const saveRouting = useCallback(async (body: { schemes: RealModelScheme[]; active_scheme: string }) => {
     const modelId = routingModelId
     if (!modelId) return
@@ -964,14 +953,14 @@ export function ModelMetadata() {
     setGlobalConfig((current) => ({ ...current, tokenizerRules: current.tokenizerRules.filter((_, ruleIndex) => ruleIndex !== index) }))
   }, [])
 
-  // 渠道 id 即渠道名，弹窗自行按 id 拉取详情，这里不再反查快照列表。
+  // 供应商 id 即供应商名，弹窗自行按 id 拉取详情，这里不再反查快照列表。
   const openProviderEditor = useCallback((providerName: string) => {
     setEditingProviderId(providerName)
   }, [])
 
   const providerTags = useCallback((model: UnifiedModel) => (
     <span className="flex flex-wrap gap-1">
-      {model._providers.length > 0 ? model._providers.map((provider) => <Tag key={provider} tone="blue" title={`${provider}（点击编辑渠道）`} onClick={() => openProviderEditor(provider)}>{providerLabel(provider)}</Tag>) : <span className="text-xs text-muted-foreground">无渠道</span>}
+      {model._providers.length > 0 ? model._providers.map((provider) => <Tag key={provider} tone="blue" title={`${provider}（点击编辑供应商）`} onClick={() => openProviderEditor(provider)}>{providerLabel(provider)}</Tag>) : <span className="text-xs text-muted-foreground">无供应商</span>}
     </span>
   ), [openProviderEditor, providerLabel])
 
@@ -989,7 +978,7 @@ export function ModelMetadata() {
   const renderActions = useCallback((model: UnifiedModel) => {
     return (
       <div className="flex w-full flex-nowrap items-center justify-end gap-1.5 overflow-x-auto">
-        {model._hasMeta ? <><Button onClick={() => openMetadataModal('edit', model)}>编辑</Button><Button onClick={() => openRoutingModal(model)} disabled={saving}>渠道策略</Button><Button tone="danger" disabled={saving} onClick={() => void handleDelete(model)}>删除</Button></> : <Button tone="primary" onClick={() => openMetadataModal('add', model)}>创建元数据</Button>}
+        {model._hasMeta ? <><Button onClick={() => openMetadataModal('edit', model)}>编辑</Button><Button onClick={() => openRoutingModal(model)} disabled={saving}>供应商策略</Button><Button tone="danger" disabled={saving} onClick={() => void handleDelete(model)}>删除</Button></> : <Button tone="primary" onClick={() => openMetadataModal('add', model)}>创建元数据</Button>}
         <span className="mx-0.5 w-px self-stretch bg-border" />
         <Button onClick={() => openImportModal(model)} disabled={saving}>导入</Button>
       </div>
@@ -1092,7 +1081,7 @@ export function ModelMetadata() {
             rowKey="key"
             emptyText={importState.loading ? '正在拉取模型列表...' : '暂无匹配模型'}
             columns={[
-              { key: 'provider', label: '渠道商', width: '130px', render: (_value, row) => <span className="font-mono text-[11px] text-purple-500 dark:text-purple-400">{row.provider || (importState.source === 'catalog:openrouter' ? 'OpenRouter' : '—')}</span> },
+              { key: 'provider', label: '供应商', width: '130px', render: (_value, row) => <span className="font-mono text-[11px] text-purple-500 dark:text-purple-400">{row.provider || (importState.source === 'catalog:openrouter' ? 'OpenRouter' : '—')}</span> },
               { key: 'sourceId', label: '源模型 ID', render: (_value, row) => <span className="font-mono text-xs text-foreground">{row.sourceId || '—'}</span> },
               { key: 'name', label: '名称', width: '190px', render: (_value, row) => <span className="text-xs text-muted-foreground">{row.name || '—'}</span> },
               { key: 'limits', label: 'ctx/out', width: '120px', render: (_value, row) => <span className="font-mono">{formatCount(row.contextLength)} / {formatCount(row.outputLimit)}</span> },
@@ -1237,52 +1226,40 @@ export function ModelMetadata() {
   }
 
   return (
-    <AdminPage title="" contentStyle={{ gap: '16px' }}>
+    <AdminPage title="模型元数据" description="真实模型与未配置模型合并展示：按状态过滤区分缺元数据、无供应商、运行态；元数据可编辑，供应商策略在「模型策略」页配置。" contentStyle={{ gap: '16px' }}>
       <ManagerPageActions primary={
         <>
           <ManagerRefreshButton
-            loading={tab === 'custom' ? false : loading}
-            onClick={() => { if (tab === 'custom') setCustomRefreshSignal((v) => v + 1); else void loadData() }}
+            loading={loading}
+            onClick={() => void loadData()}
           />
-          <ManagerHeaderActionButton onClick={() => { setTab('custom'); setCreateCustomSignal((value) => value + 1) }}>
-            新增自定义模型
-          </ManagerHeaderActionButton>
           <ManagerHeaderActionButton onClick={openGlobalConfigModal}>
             模型全局配置
           </ManagerHeaderActionButton>
         </>
       } />
       {error && <Alert variant="destructive"><AlertTitle>加载/操作错误</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border bg-card p-1.5">
-        <Chip active={tab === 'custom'} onClick={() => setTab('custom')}>自定义模型</Chip>
-        <Chip active={tab === 'marketplace'} onClick={() => { setTab('marketplace'); setStatus('configured') }}>真实模型</Chip>
-        <Chip active={tab === 'unconfigured'} onClick={() => { setTab('unconfigured'); setStatus('missing') }}>未配置模型</Chip>
-      </div>
-      {tab === 'custom' ? (
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <ModelRoutingContent createSignal={createCustomSignal} refreshSignal={customRefreshSignal} registerTopRefresh={false} />
-        </div>
-      ) : <div className="grid min-h-0 flex-1 items-stretch gap-4" style={{ gridTemplateColumns: 'minmax(280px, 320px) minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
-        <SectionCard title="筛选" description="按配置状态、渠道和输出 token 范围筛选" style={{ height: '100%', display: 'flex', flexDirection: 'column' }} bodyStyle={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      <div className="grid min-h-0 flex-1 items-stretch gap-4" style={{ gridTemplateColumns: 'minmax(280px, 320px) minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
+        <SectionCard title="筛选" description="按状态、供应商和输出 token 范围筛选" style={{ height: '100%', display: 'flex', flexDirection: 'column' }} bodyStyle={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div className="flex min-h-0 flex-1 flex-col gap-[18px]">
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 model_id / name / 渠道 / upstream" />
-            {tab === 'marketplace' ? <div className="flex flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">状态</div><div className="flex flex-wrap gap-1.5">{STATUS_FILTERS.map((item) => <Chip key={item.key} active={status === item.key} onClick={() => setStatus(item.key)}>{item.label}</Chip>)}</div></div> : null}
+            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 model_id / name / 供应商 / upstream" />
+            <div className="flex flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">状态</div><div className="flex flex-wrap gap-1.5">{STATUS_FILTERS.map((item) => <Chip key={item.key} active={status === item.key} onClick={() => setStatus(item.key)}>{item.label}</Chip>)}</div></div>
             <div className="flex flex-col gap-3 border-t pt-[18px]">
               <div className="flex items-center justify-between gap-2.5"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">max_tokens 范围</div><span className="font-mono text-[11px] text-muted-foreground">{formatCount(parseTokenFilter(minTokens) ?? tokenBounds.min)} - {formatCount(parseTokenFilter(maxTokens) ?? tokenBounds.max)}</span></div>
               <Slider min={sliderMin} max={sliderMax} step={sliderStep} disabled={sliderDisabled} value={[Math.min(sliderLow, sliderHigh), Math.max(sliderLow, sliderHigh)]} onValueChange={([low, high]) => { setMinTokens(String(low)); setMaxTokens(String(high)) }} />
             </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">渠道</div><div className="flex min-h-0 flex-1 flex-wrap content-start gap-1.5 overflow-y-auto">{providers.length === 0 ? <span className="text-xs text-muted-foreground">暂无渠道</span> : providers.map((provider) => <Chip key={provider} active={selectedProviders.includes(provider)} onClick={() => toggleProvider(provider)}>{providerLabel(provider)}</Chip>)}</div></div>
+            <div className="flex min-h-0 flex-1 flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">供应商</div><div className="flex min-h-0 flex-1 flex-wrap content-start gap-1.5 overflow-y-auto">{providers.length === 0 ? <span className="text-xs text-muted-foreground">暂无供应商</span> : providers.map((provider) => <Chip key={provider} active={selectedProviders.includes(provider)} onClick={() => toggleProvider(provider)}>{providerLabel(provider)}</Chip>)}</div></div>
           </div>
         </SectionCard>
         <div className="flex h-full min-w-0 flex-col gap-4">
-          <SectionCard title="模型列表" description={`显示 ${pageItems.length} / 筛选 ${filtered.length} / 全部 ${unified.length}`} style={{ height: '100%', display: 'flex', flexDirection: 'column' }} bodyStyle={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }} toolbar={<div className="flex flex-wrap items-center justify-end gap-2.5"><div className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground"><span>模型 {stats.modelCount}</span><span>未配置 {stats.missing}</span><span>可用 {stats.available}</span><span>渠道 {stats.providerCount}</span></div><Button tone="primary" onClick={() => openMetadataModal('add')}>新增元数据</Button><div className="inline-flex rounded-md border p-0.5">{(['card', 'table'] as ViewMode[]).map((mode) => <button key={mode} type="button" onClick={() => setViewMode(mode)} className={cn('rounded px-2 py-0.5 text-xs', viewMode === mode ? 'bg-primary text-primary-foreground' : 'text-muted-foreground')}>{mode === 'card' ? '卡片' : '表格'}</button>)}</div><div className="flex items-center gap-2 text-xs font-bold text-muted-foreground"><span>每页</span><NativeSelect size="sm" value={String(pageSize)} onChange={(event) => setPageSize(Number(event.target.value))}>{PAGE_SIZES.map((size) => <NativeSelectOption key={size} value={String(size)}>{size}/页</NativeSelectOption>)}</NativeSelect></div></div>}>
+          <SectionCard title="模型列表" description={`显示 ${pageItems.length} / 筛选 ${filtered.length} / 全部 ${unified.length}`} style={{ height: '100%', display: 'flex', flexDirection: 'column' }} bodyStyle={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }} toolbar={<div className="flex flex-wrap items-center justify-end gap-2.5"><div className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground"><span>模型 {stats.modelCount}</span><span>未配置 {stats.missing}</span><span>可用 {stats.available}</span><span>供应商 {stats.providerCount}</span></div><Button tone="primary" onClick={() => openMetadataModal('add')}>新增元数据</Button><div className="inline-flex rounded-md border p-0.5">{(['card', 'table'] as ViewMode[]).map((mode) => <button key={mode} type="button" onClick={() => setViewMode(mode)} className={cn('rounded px-2 py-0.5 text-xs', viewMode === mode ? 'bg-primary text-primary-foreground' : 'text-muted-foreground')}>{mode === 'card' ? '卡片' : '表格'}</button>)}</div><div className="flex items-center gap-2 text-xs font-bold text-muted-foreground"><span>每页</span><NativeSelect size="sm" value={String(pageSize)} onChange={(event) => setPageSize(Number(event.target.value))}>{PAGE_SIZES.map((size) => <NativeSelectOption key={size} value={String(size)}>{size}/页</NativeSelectOption>)}</NativeSelect></div></div>}>
             <div className="min-h-[320px] flex-1 overflow-y-auto rounded-md border bg-muted p-3">
-            {loading && !data ? <div className="p-9"><Empty><EmptyHeader><EmptyDescription>加载中...</EmptyDescription></EmptyHeader></Empty></div> : viewMode === 'card' ? <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))' }}>{pageItems.length === 0 ? <div style={{ gridColumn: '1 / -1' }}><Empty><EmptyHeader><EmptyDescription>暂无匹配模型</EmptyDescription></EmptyHeader></Empty></div> : pageItems.map((model) => { const statusInfo = getStatusLabel(model); return <div key={model.model_id} className={cn('flex flex-col gap-3 rounded-lg border p-4', model._hasMeta ? 'bg-card' : 'border-red-400/35 bg-red-400/5')}><div className="flex min-w-0 items-start justify-between gap-2"><div className="min-w-0"><div title={model.model_id} className={cn('overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[13px] font-extrabold', model._hasMeta ? 'text-foreground' : 'text-red-600 dark:text-red-400')}>{model.model_id}</div><div className="mt-[3px] text-xs text-muted-foreground">{model.name || (model._hasMeta ? '—' : '未配置元数据')}</div></div><Tag tone={statusInfo.tone}>{statusInfo.label}</Tag></div>{providerTags(model)}{routeLines(model)}<div className="grid grid-cols-2 gap-x-3 gap-y-2.5"><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">context</span><b className="block font-mono text-[13px] text-foreground">{formatCount(model.max_context_tokens)}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">max_tokens</span><b className="block font-mono text-[13px] text-foreground">{formatCount(model.max_tokens)}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">owned_by</span><b className="block text-[13px] text-foreground">{model.owned_by || '—'}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">modalities</span><b className="block text-[13px] text-foreground">{model.multimodal.join('/') || [...model.input_modalities, ...model.output_modalities].join('/') || '—'}</b></div></div><CapabilityTags model={model} /><RoutingTags model={model} onOpen={() => openRoutingModal(model)} /><OtherParams model={model} /><div className="mt-auto border-t pt-3">{renderActions(model)}</div></div> })}</div> : <SimpleTable<UnifiedModel> rows={pageItems} emptyText="暂无匹配模型" columns={[{ key: 'model_id', label: '模型ID', width: '200px', render: (_value, row) => <span className={cn('font-mono font-bold', row._hasMeta ? 'text-foreground' : 'text-red-600 dark:text-red-400')}>{row.model_id}</span> }, { key: 'name', label: '名称', width: '150px', render: (_value, row) => <span className={row.name ? 'text-foreground' : 'text-muted-foreground'}>{row.name || (row._hasMeta ? '—' : '未配置')}</span> }, { key: '_providers', label: '渠道 / Route', width: '240px', render: (_value, row) => <div className="flex flex-col gap-1.5">{providerTags(row)}{routeLines(row)}</div> }, { key: 'max_context_tokens', label: 'Context', width: '110px', render: (_value, row) => <span className="font-mono tabular-nums">{formatCount(row.max_context_tokens)}</span> }, { key: 'max_tokens', label: 'Output', width: '100px', render: (_value, row) => <span className="font-mono tabular-nums">{formatCount(row.max_tokens)}</span> }, { key: 'multimodal', label: '模态/能力', width: '180px', render: (_value, row) => <div className="flex flex-col gap-1.5"><span className="text-[11px] text-muted-foreground">{row.multimodal.join('/') || '—'}</span><CapabilityTags model={row} /></div> }, { key: '_available', label: '状态', width: '80px', render: (_value, row) => { const statusInfo = getStatusLabel(row); return <Tag tone={statusInfo.tone}>{statusInfo.label}</Tag> } }, { key: 'routing', label: '渠道策略', width: '160px', render: (_value, row) => <RoutingTags model={row} onOpen={() => openRoutingModal(row)} /> }, { key: 'other_params', label: '其他参数', width: '220px', render: (_value, row) => <div className="flex flex-col gap-2"><OtherParams model={row} /></div> }, { key: '_routes', label: '操作', width: '320px', render: (_value, row) => renderActions(row) }]} />}
+            {loading && !data ? <div className="p-9"><Empty><EmptyHeader><EmptyDescription>加载中...</EmptyDescription></EmptyHeader></Empty></div> : viewMode === 'card' ? <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(330px, 1fr))' }}>{pageItems.length === 0 ? <div style={{ gridColumn: '1 / -1' }}><Empty><EmptyHeader><EmptyDescription>暂无匹配模型</EmptyDescription></EmptyHeader></Empty></div> : pageItems.map((model) => { const statusInfo = getStatusLabel(model); return <div key={model.model_id} className={cn('flex flex-col gap-3 rounded-lg border p-4', model._hasMeta ? 'bg-card' : 'border-red-400/35 bg-red-400/5')}><div className="flex min-w-0 items-start justify-between gap-2"><div className="min-w-0"><div title={model.model_id} className={cn('overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[13px] font-extrabold', model._hasMeta ? 'text-foreground' : 'text-red-600 dark:text-red-400')}>{model.model_id}</div><div className="mt-[3px] text-xs text-muted-foreground">{model.name || (model._hasMeta ? '—' : '未配置元数据')}</div></div><Tag tone={statusInfo.tone}>{statusInfo.label}</Tag></div>{providerTags(model)}{routeLines(model)}<div className="grid grid-cols-2 gap-x-3 gap-y-2.5"><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">context</span><b className="block font-mono text-[13px] text-foreground">{formatCount(model.max_context_tokens)}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">max_tokens</span><b className="block font-mono text-[13px] text-foreground">{formatCount(model.max_tokens)}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">owned_by</span><b className="block text-[13px] text-foreground">{model.owned_by || '—'}</b></div><div><span className="text-[10px] font-bold uppercase tracking-[0.4px] text-muted-foreground">modalities</span><b className="block text-[13px] text-foreground">{model.multimodal.join('/') || [...model.input_modalities, ...model.output_modalities].join('/') || '—'}</b></div></div><CapabilityTags model={model} /><RoutingTags model={model} onOpen={() => openRoutingModal(model)} /><OtherParams model={model} /><div className="mt-auto border-t pt-3">{renderActions(model)}</div></div> })}</div> : <SimpleTable<UnifiedModel> rows={pageItems} emptyText="暂无匹配模型" columns={[{ key: 'model_id', label: '模型ID', width: '200px', render: (_value, row) => <span className={cn('font-mono font-bold', row._hasMeta ? 'text-foreground' : 'text-red-600 dark:text-red-400')}>{row.model_id}</span> }, { key: 'name', label: '名称', width: '150px', render: (_value, row) => <span className={row.name ? 'text-foreground' : 'text-muted-foreground'}>{row.name || (row._hasMeta ? '—' : '未配置')}</span> }, { key: '_providers', label: '供应商 / Route', width: '240px', render: (_value, row) => <div className="flex flex-col gap-1.5">{providerTags(row)}{routeLines(row)}</div> }, { key: 'max_context_tokens', label: 'Context', width: '110px', render: (_value, row) => <span className="font-mono tabular-nums">{formatCount(row.max_context_tokens)}</span> }, { key: 'max_tokens', label: 'Output', width: '100px', render: (_value, row) => <span className="font-mono tabular-nums">{formatCount(row.max_tokens)}</span> }, { key: 'multimodal', label: '模态/能力', width: '180px', render: (_value, row) => <div className="flex flex-col gap-1.5"><span className="text-[11px] text-muted-foreground">{row.multimodal.join('/') || '—'}</span><CapabilityTags model={row} /></div> }, { key: '_available', label: '状态', width: '80px', render: (_value, row) => { const statusInfo = getStatusLabel(row); return <Tag tone={statusInfo.tone}>{statusInfo.label}</Tag> } }, { key: 'routing', label: '供应商策略', width: '160px', render: (_value, row) => <RoutingTags model={row} onOpen={() => openRoutingModal(row)} /> }, { key: 'other_params', label: '其他参数', width: '220px', render: (_value, row) => <div className="flex flex-col gap-2"><OtherParams model={row} /></div> }, { key: '_routes', label: '操作', width: '320px', render: (_value, row) => renderActions(row) }]} />}
             </div>
             <div className="mt-4 flex justify-center"><Pager current={currentPage} total={filtered.length} pageSize={pageSize} onChange={setPage} /></div>
           </SectionCard>
         </div>
-      </div>}
+      </div>
       {renderModal()}
       <RealModelRoutingDialog
         open={routingTarget !== null}

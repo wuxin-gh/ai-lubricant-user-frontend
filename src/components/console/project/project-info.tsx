@@ -11,6 +11,7 @@ import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle }
 import { ProjectStackBadges } from "@/components/ui/stack-badges"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { isProjectRepoUnbound } from "@/utils/project"
+import { codingProjectPath } from "@/config/coding-sections"
 import { apiRequest } from "@/utils/requestUtils"
 import { IconBrandGithub, IconLoader, IconPencil, IconReload, IconSparkles, IconTrash, IconViewfinder } from "@tabler/icons-react"
 import { MoreVertical } from "lucide-react"
@@ -63,10 +64,12 @@ const ProjectInfo = ({
         setDeletingProject(undefined)
         const remainingProjects = projects.filter(p => p.id !== deletingProject.id)
         reloadProjects()
-        if (remainingProjects.length > 0) {
-          navigate(`/console/project/${remainingProjects[0].id}`)
+        // 删完留在 Coding 模式：还有项目就切到第一个，没有就去项目选择页（引导新建）。
+        // 别跳 /home——那是脱离控制台的独立页，等于把用户踢出 Coding 上下文。
+        if (remainingProjects.length > 0 && remainingProjects[0].id) {
+          navigate(codingProjectPath(remainingProjects[0].id))
         } else {
-          navigate('/console/tasks')
+          navigate("/coding")
         }
       } else {
         toast.error(resp.message || t("consoleProject.delete.toast.deleteFailed"))

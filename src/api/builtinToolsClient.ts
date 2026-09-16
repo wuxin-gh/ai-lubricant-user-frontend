@@ -188,6 +188,21 @@ export interface DeviceResource extends BuiltinToolResource {
   last_seen_at?: string
   node_id?: string
   node?: DeviceHostNode
+  /** iOS 设备身份（仅 iOS 设备有）。**顶层键**——服务端 store 会把 data JSONB
+   *  展平到顶层（_resource_value），响应里没有 "data" 这一层。此前前端读
+   *  device.data?.ios 恒为 undefined，导致 WDA 面板整块不渲染、状态恒为 missing。 */
+  ios?: {
+    udid?: string
+    node_id?: string
+    wda_state?: string
+    profile_expires_at?: string
+    wda_bundle_id?: string
+    signing_profile_id?: number
+    auto_renew?: boolean
+    last_renew_job_id?: string
+    device_control_online?: boolean
+    [key: string]: unknown
+  }
 }
 
 export function listDeviceResources(): Promise<{ devices: DeviceResource[] }> { return toolFetch(`/resources/devices`) }
@@ -265,7 +280,11 @@ export function formatExternalMcpConfig(integration: BuiltinMcpIntegration, plai
 
 export interface IosHostNode {
   node_id: string
-  name: string
+  /** 人类可读的节点名。服务端 `_binding_dict` 同时给 `name` 与 `node_name`
+   *  （历史上只给后者，而消费方读前者，导致下拉渲染出裸 UUID）。两个都标可选
+   *  以兼容旧服务端，消费方按 name → node_name → node_id 回退。 */
+  name?: string
+  node_name?: string
   online: boolean
   capabilities: Record<string, string>
 }
@@ -406,8 +425,6 @@ export function loginAppleId(body: {
   password: string
   /** 重新登录已有配置（原 id 更新，设备绑定不断）。 */
   profile_id?: number
-  /** 出口代理池条目 id（network 模式）：gsa.apple.com 拒数据中心 IP，被拒网络经代理登录。空 = 直连。 */
-  proxy_config_id?: string
   /** 远程 anisette 服务器 URL（如 ani.sidestore.io）：取真实设备指纹，避开本地虚拟指纹被 Apple 503。空 = 本地 anisette 库。 */
   anisette_server?: string
 }): Promise<IosAppleIdLoginResult> {
@@ -427,8 +444,6 @@ export function verifyAppleId2fa(body: {
   /** SMS 路径：前端从 login 返回的 phone_numbers 里选的号码 id。
    *  trusted-device 路径忽略此字段。 */
   phone_id?: number
-  /** 与 login 同口径：2FA 完成那步请求也经同一代理出网。 */
-  proxy_config_id?: string
   /** 与 login 同口径：远程 anisette 服务器。 */
   anisette_server?: string
 }): Promise<IosAppleIdLoginResult> {
@@ -445,7 +460,6 @@ export function sendAppleIdSms(body: {
   login_token: string
   email: string
   phone_id: number
-  proxy_config_id?: string
   anisette_server?: string
 }): Promise<{ login_token: string; phone_id: number; sms_sent: boolean }> {
   return toolFetch(`/signing-profiles/apple-id/2fa/sms`, {

@@ -20,11 +20,11 @@ import { toast } from "sonner"
 /**
  * 资源中心「配置」Tab：市场仓库源配置 + 节点程序版本信息。
  *
- * 市场仓库、节点程序版本、渠道目录同步共用同一个 GitHub 市场仓库。仓库地址与写入
+ * 市场仓库、节点程序版本、供应商目录同步共用同一个 GitHub 市场仓库。仓库地址与写入
  * Token 只在服务端 .env 配置（MARKETPLACE_REPO_URL / MARKETPLACE_GITHUB_TOKEN），
  * 不在此处展示或编辑；可编辑的仅市场拉取代理（存 DB 主配置，改完热更新）。
  * 版本/版本说明来自市场 raw（GitHub 下载），不是本地库；点「重新读取」只刷新
- * 这份版本信息，不修改仓库内容。渠道模板目录由后端每小时自动同步，不在配置内展示。
+ * 这份版本信息，不修改仓库内容。供应商模板目录由后端每小时自动同步，不在配置内展示。
  */
 
 type ReleaseModule = "node-versions" | "mobile-versions" | "device-control-versions"
@@ -59,7 +59,7 @@ export function ResourceConfigurationPanel() {
 
   const [proxyId, setProxyId] = useState("")
 
-  // 只读版本信息（市场 raw，三个发行模块并行拉取）。渠道模板信息不在配置内展示，
+  // 只读版本信息（市场 raw，三个发行模块并行拉取）。供应商模板信息不在配置内展示，
   // 由后端每小时自动同步。
   const [releases, setReleases] = useState<Record<ReleaseModule, ReleaseInfo | null>>(EMPTY_RELEASES)
   const [versionRefreshing, setVersionRefreshing] = useState(false)
@@ -134,7 +134,7 @@ export function ResourceConfigurationPanel() {
     <div className="space-y-4">
       <Alert>
         <AlertDescription>
-          市场仓库、节点程序版本、渠道目录同步共用同一个 GitHub 市场仓库；仓库地址与写入 Token
+          市场仓库、节点程序版本、供应商目录同步共用同一个 GitHub 市场仓库；仓库地址与写入 Token
           由服务端 .env（MARKETPLACE_REPO_URL / MARKETPLACE_GITHUB_TOKEN）统一配置，此处不再展示。
           可编辑的仅市场拉取代理，保存后立即生效，无需重启。
         </AlertDescription>

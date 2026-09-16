@@ -1,5 +1,5 @@
 /**
- * 渠道级 / 日志级配置弹框。
+ * 供应商级 / 日志级配置弹框。
  * 运行配置与测试类型分成独立工作区；测试类型采用列表 + 详情编辑。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -73,7 +73,7 @@ export const SECTION_FIELDS: Record<ConfigSection, { title: string; fields: Fiel
   scheduledTest: {
     title: '定时检测',
     fields: [
-      { kind: 'number', path: 'scheduled_test.concurrency', label: '检测并发数', hint: '所有渠道共用一个检测消费者池；并发越高越不易堆积，但对上游压力也越大。', suffix: '个' },
+      { kind: 'number', path: 'scheduled_test.concurrency', label: '检测并发数', hint: '所有供应商共用一个检测消费者池；并发越高越不易堆积，但对上游压力也越大。', suffix: '个' },
       { kind: 'number', path: 'scheduled_test.skip_if_requested_within_seconds', label: '最近请求跳过窗口', hint: '账号在这段时间内有过真实请求就跳过本轮检测（刚被流量证明可达，无需再探）。0=不跳过。', suffix: '秒' },
     ],
   },
@@ -83,7 +83,7 @@ export const SECTION_FIELDS: Record<ConfigSection, { title: string; fields: Fiel
       { kind: 'number', path: 'retry.max_retries', label: '模型重试次数', hint: '模型请求失败后的全局重试次数。', suffix: '次' },
       { kind: 'number', path: 'rate_limit.cooldown_seconds', label: '限流冷却时间', hint: '触发上游限流后，该账号暂时不再被选用的时长。', suffix: '秒' },
       { kind: 'number', path: 'rate_limit.exception_cooldown_seconds', label: '异常冷却时间', hint: '发生网络或服务端异常后，该账号的临时冷却时长。', suffix: '秒' },
-      { kind: 'toggle', path: 'rate_limit.allow_token_reservation_overflow', label: '允许渠道 token 预占触线放行', hint: '仅影响渠道账号和模型的 token 限额，不影响 API Key 限额。开启后，本次预占达到限额时仍执行并冻结后续请求；关闭后，拒绝当前渠道候选并尝试其他账号。' },
+      { kind: 'toggle', path: 'rate_limit.allow_token_reservation_overflow', label: '允许供应商 token 预占触线放行', hint: '仅影响供应商账号和模型的 token 限额，不影响 API Key 限额。开启后，本次预占达到限额时仍执行并冻结后续请求；关闭后，拒绝当前供应商候选并尝试其他账号。' },
       { kind: 'toggle', path: 'retry.context_overflow_not_retryable_enabled', label: '上下文超限不重试', hint: '开启后，命中上下文/token 超限时直接返回标准错误，不消耗重试次数。' },
     ],
   },
@@ -116,19 +116,19 @@ const TEMPLATE_VARIABLES: Array<{ token: string; desc: string }> = [
   { token: '{{client_session_id}}', desc: '客户端会话 ID' },
   { token: '{{client_request_id}}', desc: '客户端请求 ID' },
   { token: '{{account.username}}', desc: '账号用户名' },
-  { token: '{{account.provider}}', desc: '渠道协议名' },
+  { token: '{{account.provider}}', desc: '供应商协议名' },
   { token: '{{account.metadata.键名}}', desc: '账号元数据（账号编辑页配置；勿存密钥）' },
 ]
 
 /** Headers 模板值支持的变量，出站请求时按请求逐次渲染。 */
 const HEADER_TEMPLATE_VARIABLES = TEMPLATE_VARIABLES
 
-/** 测试模板 messages/body 支持的变量：通用变量 + 本次测试上下文（被测模型/账号/渠道）。 */
+/** 测试模板 messages/body 支持的变量：通用变量 + 本次测试上下文（被测模型/账号/供应商）。 */
 const TEST_TEMPLATE_VARIABLES: Array<{ token: string; desc: string }> = [
   ...TEMPLATE_VARIABLES,
   { token: '{{model}}', desc: '本次测试的被测模型' },
   { token: '{{username}}', desc: '本次测试的账号' },
-  { token: '{{provider}}', desc: '本次测试的渠道' },
+  { token: '{{provider}}', desc: '本次测试的供应商' },
 ]
 
 // Header 模板编辑行：headers 用有序键值对表示，便于改 key 并保持行顺序。
@@ -686,10 +686,10 @@ export function HeaderTemplatesEditor({
           {selected ? (
             <div className="flex flex-col gap-5">
               <div className="grid gap-3 sm:grid-cols-2">
-                <FieldHelp label="模板 ID" hint="渠道协议行保存的是这个 ID；修改后需要重新选择受影响的渠道协议。">
+                <FieldHelp label="模板 ID" hint="供应商协议行保存的是这个 ID；修改后需要重新选择受影响的供应商协议。">
                   <Input value={selected.id} placeholder="例如 cline-cli" onChange={(event) => onUpdate(selectedIdx, { id: event.target.value })} />
                 </FieldHelp>
-                <FieldHelp label="模板名称" hint="用于渠道协议配置的 Header 模板下拉展示。">
+                <FieldHelp label="模板名称" hint="用于供应商协议配置的 Header 模板下拉展示。">
                   <Input value={selected.name} placeholder="例如 Cline CLI" onChange={(event) => onUpdate(selectedIdx, { name: event.target.value })} />
                 </FieldHelp>
               </div>

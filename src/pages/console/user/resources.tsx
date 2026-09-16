@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useSearchParams } from "react-router-dom"
 import {
   listCdpClientResources,
-  createCdpClientResource,
   rotateCdpToken,
   revokeCdpToken,
   updateCdpClient,
@@ -11,7 +11,6 @@ import {
   createMailServiceResource,
   deleteMailServiceResource,
   listDeviceResources,
-  mintDevicePairingCodeResource,
   createMailAddress,
   queryMailMessages,
   getDeviceControlAppRelease,
@@ -27,11 +26,11 @@ import {
   type MailMessage,
   type ToolKind,
   listIosHosts,
+  claimIosDevice,
   getIosHostDevices,
   getAllIosHostDevices,
   scanIosHost,
   scanAllIosHosts,
-  claimIosDevice,
   listIosSigningProfiles,
   createIosSigningProfile,
   updateIosSigningProfile,
@@ -48,7 +47,6 @@ import {
   type IosSigningProfile,
   type IosWdaJobSnapshot,
 } from "@/api/builtinToolsClient"
-import { listTeamProxies, type TeamProxyEntry } from "@/api/reviewClient"
 import { UserPageActions } from "@/components/console/user-header-actions"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -106,7 +104,6 @@ import {
   Copy,
   Wrench,
   Settings,
-  Download,
   ArrowLeft,
   Search,
   Inbox,
@@ -116,7 +113,11 @@ import {
 import { IconBrandAndroid, IconBrandApple, IconBrowser } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
-import { copyToClipboard } from "@/utils/clipboard"
+
+// 共享组件：接入引导步骤卡与「添加浏览器 / 添加设备」弹框（首页快捷操作与本页共用）。
+import { CdpClientCreateDialog } from "@/components/console/quick-actions/cdp-client-create-dialog"
+import { DevicePairDialog } from "@/components/console/quick-actions/device-pair-dialog"
+import { copyText } from "@/components/console/quick-actions/copy-text"
 
 /** 资源/工具类型图标：lucide 与 tabler 混用，这里只约定「接受 className」。 */
 type ToolIcon = React.ComponentType<{ className?: string }>
@@ -135,12 +136,6 @@ function deviceIcon(platform: string): ToolIcon {
   return Smartphone
 }
 
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return ""
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
 /** ISO 时间 → 「x 秒/分钟/小时/天前」；解析失败返回空串。 */
 function formatRelativeTime(iso: string): string {
   const ts = new Date(iso).getTime()
@@ -152,14 +147,6 @@ function formatRelativeTime(iso: string): string {
   if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`
   const d = new Date(ts)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
-}
-
-async function copyText(text: string) {
-  if (await copyToClipboard(text)) {
-    toast.success("已复制")
-  } else {
-    toast.error("复制失败，请手动选择")
-  }
 }
 
 // =============================================================================
@@ -209,8 +196,22 @@ function OneTimeSecretDialog({
 // 页面主体：UI 只展示客户端 / 邮箱服务 / 设备，instance 仅留在后端兼容层
 // =============================================================================
 
+const TOOL_KIND_VALUES: ToolKind[] = ["cdp", "mail", "android", "ios"]
+
 export function UserToolsPage() {
-  const [activeKind, setActiveKind] = useState<ToolKind>("cdp")
+  // 当前工具类型由 URL 的 ?kind= 决定：这四个 Tab 已提为侧栏一级导航项
+  // （config/modes.ts 的 devices 模式），页面内不再重复画一份 Tab 栏。
+  const [searchParams, setSearchParams] = useSearchParams()
+  const kindParam = searchParams.get("kind")
+  const activeKind: ToolKind = TOOL_KIND_VALUES.includes(kindParam as ToolKind)
+    ? (kindParam as ToolKind)
+    : "cdp"
+  const setActiveKind = (next: ToolKind) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === "cdp") params.delete("kind")
+    else params.set("kind", next)
+    setSearchParams(params, { replace: true })
+  }
   const [connInfo, setConnInfo] = useState<CdpConnectionInfo | null>(null)
 
   const [clients, setClients] = useState<CdpClientResource[]>([])
@@ -384,8 +385,10 @@ export function UserToolsPage() {
     <div className="flex flex-col gap-4 py-4">
       <UserPageActions primary={addButton} />
 
+      {/* Tab 栏已提为侧栏一级导航项（config/modes.ts 的 devices 模式），
+          页面内不再重复画一份；切换由导航改 ?kind= 驱动，故这里只保留 Tabs 上下文。 */}
       <Tabs orientation="horizontal" value={activeKind} onValueChange={(v) => setActiveKind(v as ToolKind)}>
-        <TabsList className="flex-row flex-nowrap">
+        <TabsList className="hidden">
           {TOOL_KINDS.map((item) => {
             const Icon = item.icon
             return (
@@ -492,7 +495,7 @@ export function UserToolsPage() {
       />
 
       {/* 平台随工具页签走：「添加 Android/iOS 设备」按钮在哪个 Tab 点开，弹框就走哪条接入方案。 */}
-      <AddDeviceDialog
+      <DevicePairDialog
         open={addDeviceOpen}
         onOpenChange={setAddDeviceOpen}
         onPaired={() => void reloadDevices()}
@@ -769,19 +772,41 @@ function DeviceResourceList({ devices, onOpen, onDelete, onInitialize }: {
         const appVersion = typeof info.app_version === "string" ? info.app_version : ""
         const osVersion = typeof info.os_version === "string" ? info.os_version : ""
         const accEnabled = typeof info.accessibility_enabled === "boolean" ? info.accessibility_enabled : null
+        // iOS 设备的真实状态不能只看 online：一台已认领但还没跑过初始化（WDA）
+        // 的 iPhone，本来就连不上 device-control，显示「离线」是误导。按
+        // data.ios.wda_state 分出「待初始化 / 初始化中 / 已就绪 / 已过期 / 失败」，
+        // 只有 WDA 就绪之后才用在线/离线描述连接状态。
+        const iosData = device.ios
+        const wdaState = ios ? String(iosData?.wda_state || "missing") : ""
+        const iosPending = ios && (wdaState === "missing" || wdaState === "unspecified")
+        const iosPreparing = ios && wdaState === "preparing"
+        const iosReady = ios && wdaState === "ready"
+        const iosFailed = ios && (wdaState === "failed" || wdaState === "expired")
+        const stateBadge = !enabled
+          ? { variant: "secondary" as const, label: "已解除配对" }
+          : iosPending
+            ? { variant: "outline" as const, label: "待初始化" }
+            : iosPreparing
+              ? { variant: "secondary" as const, label: "初始化中" }
+              : iosFailed
+                ? { variant: "destructive" as const, label: wdaState === "expired" ? "已过期" : "初始化失败" }
+                : iosReady
+                  // WDA 就绪后连接状态才有意义；手机没插着（present=false）时
+                  // 节点仍是 claimed，插回去即自动恢复，所以这里说「未连接」
+                  // 而不是「离线」——离线会让人以为要重新认领。
+                  ? { variant: device.online ? ("default" as const) : ("secondary" as const), label: device.online ? "在线" : "未连接" }
+                  : { variant: device.online && enabled ? ("default" as const) : ("secondary" as const), label: device.online ? "在线" : "离线" }
         return (
           <ResourceCard
             key={device.id}
             icon={deviceIcon(device.platform)}
-            online={device.online && enabled}
+            online={ios ? !iosPending && device.online && enabled : device.online && enabled}
             dimmed={!enabled}
             title={device.name || model}
             badges={
               <>
                 <Badge variant="outline">{ios ? "iOS" : "Android"}</Badge>
-                <Badge variant={device.online && enabled ? "default" : "secondary"}>
-                  {!enabled ? "已解除配对" : device.online ? "在线" : "离线"}
-                </Badge>
+                <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                 {!ios && accEnabled === false && (
                   <Badge variant="destructive">无障碍未开</Badge>
                 )}
@@ -803,9 +828,9 @@ function DeviceResourceList({ devices, onOpen, onDelete, onInitialize }: {
                   详情
                 </Button>
                 {ios && onInitialize && (
-                  <Button variant="outline" size="sm" onClick={() => onInitialize(device)}>
+                  <Button variant={iosPending ? "default" : "outline"} size="sm" onClick={() => onInitialize(device)}>
                     <Wrench className="size-4" />
-                    初始化
+                    {iosPending ? "初始化" : iosPreparing ? "初始化中…" : "重新初始化"}
                   </Button>
                 )}
                 <Button
@@ -1180,7 +1205,7 @@ function DeviceDetailDialog({
             </div>
           )}
 
-          {ios && Boolean((device.data as Record<string, unknown> | undefined)?.ios) && (
+          {ios && Boolean(device.ios) && (
             <IosWdaPanel device={device} onChanged={() => onOpenChange(false)} />
           )}
 
@@ -1227,9 +1252,9 @@ function DeviceDetailDialog({
 // =============================================================================
 
 function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged: () => void }) {
-  const data = device.data as Record<string, unknown> | undefined
-  const iosData = data?.ios as Record<string, unknown> | undefined
-  const wdaState = (iosData?.wda_state as string) || "missing"
+  // 顶层 ios 键（服务端 store 把 data JSONB 展平到顶层，响应里没有 "data" 层）。
+  const iosData = device.ios
+  const wdaState = String(iosData?.wda_state || "missing")
   const profileExpiresAt = iosData?.profile_expires_at as string | undefined
   // 自动续签：prepare_wda 成功后服务端写入 auto_renew=true + last_renew_job_id。
   // 扫描器到期前自动派发 renew job；这里读 last_renew_job_id 轮询，运行中显示徽章。
@@ -1642,10 +1667,6 @@ function IosSigningProfileDialog({
   const [applePhoneNumbers, setApplePhoneNumbers] = useState<Array<{ id: number; number_with_dial_code: string }>>([])
   const [appleSelectedPhoneId, setAppleSelectedPhoneId] = useState<number | null>(null)
   const [appleSmsSending, setAppleSmsSending] = useState(false)
-  // Apple 登录出口代理（gsa.apple.com 拒数据中心 IP 时经代理登录）。列表来自
-  // 用户侧代理池精简视图，仅 network 模式可选。
-  const [appleProxies, setAppleProxies] = useState<TeamProxyEntry[]>([])
-  const [appleProxyId, setAppleProxyId] = useState("")
   // 远程 anisette 服务器（真实设备指纹，避开本地虚拟指纹被 Apple 503 拒收）。
   const [appleAnisetteServer, setAppleAnisetteServer] = useState("ani.sidestore.io")
 
@@ -1656,10 +1677,6 @@ function IosSigningProfileDialog({
       setDetail(null)
       resetForm()
       void loadProfiles()
-      // 打开弹框时拉代理池精简列表（Apple 登录出口可选）；失败静默——没代理仍可选直连。
-      void listTeamProxies()
-        .then((list) => setAppleProxies(list || []))
-        .catch(() => setAppleProxies([]))
     }
   }, [open])
 
@@ -1715,7 +1732,6 @@ function IosSigningProfileDialog({
         email: appleEmail.trim(),
         password: applePassword,
         profile_id: editing?.id,
-        proxy_config_id: appleProxyId || undefined,
         anisette_server: appleAnisetteServer || undefined,
       })
       if (result.status === "2fa_required") {
@@ -1775,7 +1791,6 @@ function IosSigningProfileDialog({
         profile_id: editing?.id,
         // SMS 路径带选中的 phone_id；trusted-device 忽略。
         phone_id: appleMethod === "sms" ? appleSelectedPhoneId || undefined : undefined,
-        proxy_config_id: appleProxyId || undefined,
         anisette_server: appleAnisetteServer || undefined,
       })
       toast.success(editing ? "重新登录成功，配置已更新" : "登录成功，已创建签名配置")
@@ -1812,7 +1827,6 @@ function IosSigningProfileDialog({
         login_token: appleLoginToken,
         email: appleEmail.trim(),
         phone_id: appleSelectedPhoneId,
-        proxy_config_id: appleProxyId || undefined,
         anisette_server: appleAnisetteServer || undefined,
       })
       toast.info("短信验证码已发送，请输入收到的 6 位码")
@@ -1955,7 +1969,7 @@ function IosSigningProfileDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[92vh] w-[calc(100vw-2rem)] max-w-[1400px] flex-col overflow-hidden">
+      <DialogContent className="flex h-[92vh] w-[calc(100vw-2rem)] max-w-[1400px] flex-col overflow-hidden sm:max-w-[820px]">
         {view === "list" ? (
           <>
             <DialogHeader>
@@ -2085,26 +2099,6 @@ function IosSigningProfileDialog({
                             onChange={(e) => setApplePassword(e.target.value)}
                             placeholder="Apple ID 密码（只用于登录，不会保存）"
                           />
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <Label>登录出口代理（可选）</Label>
-                          <Select value={appleProxyId} onValueChange={setAppleProxyId}>
-                            <SelectTrigger><SelectValue placeholder="直连（不使用代理）" /></SelectTrigger>
-                            <SelectContent>
-                              {appleProxies
-                                .filter((p) => p.mode === "network" || p.mode === "node")
-                                .map((p) => (
-                                  <SelectItem key={p.id} value={p.id}>
-                                    {p.name || p.id}
-                                    （{p.mode === "node" ? "节点隧道" : "网络代理"}）
-                                  </SelectItem>
-                                ))}
-                            </SelectContent>
-                          </Select>
-                          <p className="text-xs text-muted-foreground">
-                            gsa.apple.com 对数据中心 IP 可能直接拒绝登录。被拒时可选一个
-                            网络代理或节点隧道（请求由该节点出网）完成登录；2FA 验证同样经此出口。
-                          </p>
                         </div>
                         <div className="flex flex-col gap-1.5">
                           <Label>Anisette 服务器（推荐保留默认）</Label>
@@ -2333,711 +2327,10 @@ function IosSigningProfileDialog({
   )
 }
 
-// =============================================================================
-// 添加浏览器弹框：与「添加设备」同形态的两阶段流程。
-// 阶段一填名称并内嵌接入步骤（下载扩展 / 装扩展 / 填地址）；阶段二创建成功后
-// 显示一次性 token + 桥接地址，等扩展连上来即提示成功。
-// 接入教程不再是独立弹框——步骤就长在创建流程里（item 1 / item 5）。
-// =============================================================================
-
-function CdpClientCreateDialog({
-  connInfo,
-  open,
-  onOpenChange,
-  onCreated,
-}: {
-  connInfo: CdpConnectionInfo | null
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  /** 创建成功回调：把明文 token 交给页面弹一次性凭据框并刷新列表。 */
-  onCreated: (token: string) => Promise<void> | void
-}) {
-  const [name, setName] = useState("")
-  const [creating, setCreating] = useState(false)
-  const [created, setCreated] = useState<{ id: number; token: string } | null>(null)
-  // 已连接检测：创建后轮询列表，看这个客户端有没有连上来。
-  const [connected, setConnected] = useState(false)
-
-  const reset = () => {
-    setName("")
-    setCreated(null)
-    setConnected(false)
-  }
-
-  const create = async () => {
-    const next = name.trim()
-    if (!next) {
-      toast.error("请填写客户端名称")
-      return
-    }
-    setCreating(true)
-    try {
-      const { client, token } = await createCdpClientResource(next)
-      setCreated({ id: client.id, token })
-      await onCreated(token)
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "创建客户端失败")
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!open || !created || connected) return
-    const tick = async () => {
-      try {
-        const { clients } = await listCdpClientResources()
-        const mine = clients.find((c) => c.id === created.id)
-        if (mine?.connected) {
-          setConnected(true)
-          toast.success("扩展已连接")
-        }
-      } catch {
-        // 轮询失败不打扰用户，下一轮再试。
-      }
-    }
-    const timer = setInterval(() => void tick(), 2000)
-    return () => clearInterval(timer)
-  }, [open, created, connected])
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(v) => {
-        onOpenChange(v)
-        if (!v) reset()
-      }}
-    >
-      <DialogContent className="max-h-[88vh] w-[92vw] max-w-lg overflow-x-hidden overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>添加浏览器</DialogTitle>
-          <DialogDescription>
-            一个客户端 = 一个 Chrome 扩展连接。按下面步骤装好扩展，填入地址与 token 即接入。
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex flex-col gap-4">
-          {!created ? (
-            <>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cdp-client-name">客户端名称</Label>
-                <Input
-                  id="cdp-client-name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void create()
-                  }}
-                  placeholder="例如：办公浏览器"
-                  autoFocus
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <CdpSetupGuide connInfo={connInfo} />
-              </div>
-
-              <Button onClick={() => void create()} disabled={creating || !name.trim()}>
-                {creating ? <Spinner className="size-4" /> : <Plus className="size-4" />}
-                创建并显示 token
-              </Button>
-            </>
-          ) : (
-            <div className="flex flex-col gap-4">
-              {connected ? (
-                <div className="flex items-start gap-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-                  <IconBrowser className="mt-0.5 size-5 shrink-0 text-primary" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">扩展已连接</div>
-                    <div className="mt-0.5 truncate text-xs text-muted-foreground">{name}</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  <Spinner className="size-3.5" />
-                  等待扩展用下面的地址与 token 连接
-                </div>
-              )}
-
-              <div className="flex flex-col gap-1.5">
-                <Label>连接 token（明文只显示这一次）</Label>
-                <div className="flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-xs">
-                    {created.token}
-                  </code>
-                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => void copyText(created.token)}>
-                    <Copy className="size-4" />
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  忘了不用重建客户端——在客户端详情里「重置 token」可拿一个新的（旧的立即失效）。
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label>桥接地址（扩展内「服务器地址」）</Label>
-                {connInfo ? (
-                  <div className="flex items-center gap-2">
-                    <code className="min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-xs">
-                      {connInfo.ws_session_url}
-                    </code>
-                    <Button variant="outline" size="sm" className="shrink-0" onClick={() => void copyText(connInfo.ws_session_url)}>
-                      <Copy className="size-4" />
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Spinner className="size-3.5" />
-                    正在加载桥接地址
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            {created ? "完成" : "取消"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// =============================================================================
-// 浏览器接入引导：下载扩展 → 加载到 Chrome → 提示回本弹框填地址与 token。
-// 与 AndroidSetupGuide 对位，长在「添加浏览器」流程里。
-// =============================================================================
-
-function CdpSetupGuide({ connInfo }: { connInfo: CdpConnectionInfo | null }) {
-  return (
-    <>
-      <TutorialStep index={1} title="下载并解压扩展">
-        <p className="text-xs leading-5 text-muted-foreground">
-          下载扩展压缩包并解压到固定目录，之后不要删除或移动。
-        </p>
-        {connInfo ? (
-          <Button variant="outline" size="sm" asChild>
-            <a href={connInfo.extension_download_url} download={connInfo.extension_file_name}>
-              <Download className="size-4" />
-              下载 Chrome 扩展
-            </a>
-          </Button>
-        ) : (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Spinner className="size-3.5" />
-            正在加载下载地址
-          </div>
-        )}
-      </TutorialStep>
-
-      <TutorialStep index={2} title="加载到 Chrome">
-        <p className="text-xs leading-5 text-muted-foreground">
-          打开 <code className="rounded bg-muted px-1.5 py-0.5">chrome://extensions</code>，启用「开发者模式」，
-          点「加载已解压的扩展程序」，选中上一步解压出的目录。
-        </p>
-      </TutorialStep>
-
-      <TutorialStep index={3} title="填入地址与 token">
-        <p className="text-xs leading-5 text-muted-foreground">
-          点下方按钮创建客户端，会拿到桥接地址和一次性 token；点开扩展图标把两项填进去即连接。
-        </p>
-      </TutorialStep>
-    </>
-  )
-}
-
-// =============================================================================
-// Android 接入引导（长在「添加设备」流程里）：
-// 下载控制 App（marketplace mobile-version 直链）+ 开启无障碍服务。
-// =============================================================================
-
-function AndroidSetupGuide({
-  release,
-  loaded,
-  startIndex = 1,
-}: {
-  release: DeviceControlAppRelease | null
-  loaded: boolean
-  startIndex?: number
-}) {
-  // 优先走服务端代理下载路径（同站相对 URL）；手机/浏览器无需直连 GitHub。
-  const androidUrl = release?.android?.proxy_download_url || release?.android?.download_url || ""
-  const origin = typeof window !== "undefined" ? window.location.origin : ""
-  const androidVersion = release?.android?.version || release?.version || ""
-  const androidSize = release?.android?.size_bytes ? formatBytes(release.android.size_bytes) : ""
-  return (
-    <>
-      <TutorialStep index={startIndex} title="下载控制 App（Android）">
-        <p className="text-xs leading-5 text-muted-foreground">
-          用手机浏览器下载最新 APK 并安装；下载经本服务器代理转发（无需直连 GitHub）。
-          安装时系统会要求允许「安装未知来源应用」，请允许。
-          手机浏览器下载失败时，可复制链接发到手机上打开。
-        </p>
-        {!loaded ? (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Spinner className="size-3.5" />
-            正在获取最新版本
-          </div>
-        ) : androidUrl ? (
-          <div className="flex flex-col gap-1.5">
-            <Button variant="outline" size="sm" asChild className="w-fit">
-              <a href={androidUrl} download>
-                <Download className="size-4" />
-                下载 Android App{androidVersion ? `（v${androidVersion}${androidSize ? ` · ${androidSize}` : ""}）` : ""}
-              </a>
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-fit text-xs text-muted-foreground"
-              onClick={() => void copyText(androidUrl.startsWith("http") ? androidUrl : `${origin}${androidUrl}`)}
-            >
-              <Copy className="size-3.5" />
-              复制下载链接
-            </Button>
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            暂未发布控制 App 安装包（市场管理页「设备控制 App」上传后这里会出现下载入口）。
-          </p>
-        )}
-      </TutorialStep>
-
-      <TutorialStep index={startIndex + 1} title="开启无障碍服务">
-        <p className="text-xs leading-5 text-muted-foreground">
-          装好后打开 App，按其首页的「打开无障碍设置」按钮跳转到系统
-          <b> 设置 → 辅助功能 → 设备控制</b> 并开启（部分机型在「无障碍」或「更多设置」下）。
-          远程读屏与点击都依赖它，不开则连上后也无法操作设备。
-        </p>
-        <p className="text-xs text-muted-foreground">
-          若系统弹出通知权限（Android 13+），建议允许；省电策略会杀长连接，可在系统设置里
-          对该 App 关闭电池优化（可选）。
-        </p>
-      </TutorialStep>
-    </>
-  )
-}
-
-// =============================================================================
-// 添加设备弹框：Android（装控制 App + 配对码）与 iOS（宿主节点 + USB 扫描认领）两条
-// 完全不同的接入方案，平台由顶部工具页签决定（哪个 Tab 的「添加」按钮进来就走哪条）。
-// =============================================================================
-
-/** 设备 device_info 里的字符串字段（model / os_version / ...），空安全。 */
-function strInfo(device: DeviceResource | null, key: string): string {
-  const v = device?.device_info?.[key]
-  return typeof v === "string" ? v : ""
-}
-
-/** 内网地址：App 配对时上报的 lan_ips 数组，渲染成一行。 */
-function lanIpsInfo(device: DeviceResource | null): string {
-  const raw = device?.device_info?.lan_ips
-  if (Array.isArray(raw) && raw.length > 0) return raw.filter((x) => typeof x === "string").join(" / ")
-  return ""
-}
-
-/** 配对成功面板里的一个信息格子：有值才渲染。 */
-function DeviceInfoField({ label, value, className }: { label: string; value: string; className?: string }) {
-  if (!value) return null
-  return (
-    <div className={className ? `min-w-0 ${className}` : "min-w-0"}>
-      <span className="text-muted-foreground">{label}：</span>
-      <span className="break-all font-medium">{value}</span>
-    </div>
-  )
-}
-
-function AddDeviceDialog({
-  open,
-  onOpenChange,
-  onPaired,
-  platform,
-}: {
-  open: boolean
-  onOpenChange: (v: boolean) => void
-  onPaired: () => void
-  platform: "android" | "ios"
-}) {
-  const [label, setLabel] = useState("")
-  const [code, setCode] = useState<string | null>(null)
-  const [ttl, setTtl] = useState(0)
-  const [generating, setGenerating] = useState(false)
-
-  // 接入引导：弹框打开即拉一次 marketplace 最新安装包直链（Android=APK / iOS=IPA，
-  // 设备控制被控端）。两平台共用同一份版本信息。
-  const [deviceControlRelease, setDeviceControlRelease] = useState<DeviceControlAppRelease | null>(null)
-  const [deviceControlLoaded, setDeviceControlLoaded] = useState(false)
-  useEffect(() => {
-    if (!open) return
-    setDeviceControlLoaded(false)
-    void getDeviceControlAppRelease()
-      .then(setDeviceControlRelease)
-      .finally(() => setDeviceControlLoaded(true))
-  }, [open])
-
-  // iOS 单台认领：选宿主节点 → 填 UDID → 认领。批量扫描走顶部「扫描设备」入口。
-  const [iosHostId, setIosHostId] = useState("")
-  const [iosManualUdid, setIosManualUdid] = useState("")
-  const [iosClaiming, setIosClaiming] = useState(false)
-  const [iosClaimedDeviceId, setIosClaimedDeviceId] = useState<string | null>(null)
-
-  // iOS hosts 列表
-  const [iosHosts, setIosHosts] = useState<IosHostNode[]>([])
-  const [iosHostsLoading, setIosHostsLoading] = useState(false)
-
-  // 已知设备快照：配对码发出后轮询，出现新 device_id 即配对成功。
-  const [knownIds, setKnownIds] = useState<Set<string>>(new Set())
-  const [pairedName, setPairedName] = useState<string | null>(null)
-  // 配对成功那一刻的设备记录：手机信息（型号/系统/App 版本/内网 IP）在配对请求里
-  // 已随 device_info 落库，直接取来展示——不必等 WS register 上来。
-  const [pairedDevice, setPairedDevice] = useState<DeviceResource | null>(null)
-
-  const origin = typeof window !== "undefined" ? window.location.origin : ""
-  // 用户在 App 内只需填服务器地址（不带路径）：App 自己固定拼 /mcp/device-control 的
-  // 请求路径（pair + ws），这里展示/复制的也就是纯地址，杜绝路径不一致导致连不上。
-  const serverAddr = origin
-  const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(origin)
-
-  // Load iOS hosts when platform is iOS
-  useEffect(() => {
-    if (!open || platform !== "ios") return
-    setIosHostsLoading(true)
-    void listIosHosts()
-      .then(({ hosts }) => setIosHosts(hosts))
-      .catch(() => setIosHosts([]))
-      .finally(() => setIosHostsLoading(false))
-  }, [open, platform])
-
-  // Claim one iOS device by UDID (single-device manual add path).
-  const claimDevice = async (udid: string, deviceName: string) => {
-    if (!iosHostId) {
-      toast.error("请先选择 iOS 宿主节点")
-      return
-    }
-    if (!udid) {
-      toast.error("请输入设备 UDID")
-      return
-    }
-    setIosClaiming(true)
-    try {
-      const { device_id } = await claimIosDevice({
-        node_id: iosHostId,
-        udid,
-        label: label.trim() || deviceName,
-      })
-      setIosClaimedDeviceId(device_id)
-      toast.success(`已接入设备：${label.trim() || deviceName}`)
-      setTimeout(() => {
-        onPaired()
-        onOpenChange(false)
-      }, 1000)
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "认领设备失败")
-    } finally {
-      setIosClaiming(false)
-    }
-  }
-
-  const generate = async () => {
-    if (platform === "android") {
-      setGenerating(true)
-      setPairedName(null)
-      try {
-        try {
-          const { devices } = await listDeviceResources()
-          setKnownIds(new Set(devices.map((d) => d.device_id)))
-        } catch {
-          setKnownIds(new Set())
-        }
-        const { code, ttl } = await mintDevicePairingCodeResource(label.trim())
-        setCode(code)
-        setTtl(ttl)
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "生成配对码失败")
-      } finally {
-        setGenerating(false)
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (!open || !code || pairedName) return
-    let stop = false
-    const tick = async () => {
-      try {
-        const { devices } = await listDeviceResources()
-        const fresh = devices.find((d) => !knownIds.has(d.device_id))
-        if (fresh && !stop) {
-          setPairedName(fresh.name || fresh.device_id.slice(0, 12))
-          setPairedDevice(fresh)
-          onPaired()
-          toast.success(`已连接：${fresh.name || fresh.device_id.slice(0, 12)}`)
-        }
-      } catch {
-        // 轮询失败不打扰用户，下一轮再试。
-      }
-    }
-    const timer = setInterval(() => void tick(), 2000)
-    return () => {
-      stop = true
-      clearInterval(timer)
-    }
-  }, [open, code, knownIds, pairedName, onPaired])
-
-  const copy = (text: string, msg: string) => {
-    void copyToClipboard(text).then((ok) => {
-      if (ok) toast.success(msg)
-      else toast.error("复制失败，请手动选择")
-    })
-  }
-
-  const reset = () => {
-    setLabel("")
-    setCode(null)
-    setTtl(0)
-    setPairedName(null)
-    setPairedDevice(null)
-    setKnownIds(new Set())
-    setIosHostId("")
-    setIosManualUdid("")
-    setIosClaimedDeviceId(null)
-  }
-
-  // 每次打开都回到全新表单：radix 的 onOpenChange 只在点遮罩/ESC 时触发，
-  // 「完成」按钮和 iOS 认领成功路径直接调 onOpenChange prop，旧数据会残留到
-  // 下一次打开（表现为「要再点一次生成配对码」）。这里以 open 为准在打开时重置。
-  useEffect(() => {
-    if (open) reset()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(v) => {
-        onOpenChange(v)
-        if (!v) reset()
-      }}
-    >
-      <DialogContent className="flex h-[90vh] w-[calc(100vw-2rem)] max-w-[1280px] flex-col overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{platform === "android" ? "添加 Android 设备" : "添加 iOS 设备"}</DialogTitle>
-          <DialogDescription>
-            {platform === "android"
-              ? "手机安装控制 App，生成配对码后在 App 内填入即可接入。"
-              : "iPhone 用数据线连到一台运行 iOS 宿主节点的电脑（Windows/Linux/Mac 均可，无需 Mac），手机「信任此电脑」后扫描认领即可接入；接入后在设备列表「初始化 Runner」，宿主节点自动下载、签名并安装到手机。"}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex flex-col gap-4">
-          {!code && !iosClaimedDeviceId ? (
-            <>
-              {platform === "ios" && (
-                <>
-                  <TutorialStep index={1} title="把 iPhone 连到宿主节点">
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      用数据线把 iPhone 连到运行 iOS 宿主节点的电脑，并在手机弹窗里「信任此电脑」。
-                    </p>
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      iPhone 接入由宿主节点经 DeviceKit Runner 驱动，<b>无需在手机上手动安装任何 App</b>——
-                      这点与 Android（装控制 App + 配对码）的方案不同。Runner 由宿主节点在
-                      接入后的「初始化 Runner」步骤自动下载、重签并安装到手机；宿主节点
-                      Windows/Linux/Mac 均可，无需 Mac 或 Xcode。
-                    </p>
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      接入后先在设备列表「初始化 Runner」里配置签名方式：Apple ID 免费
-                      全自动（推荐，登录一次即可、含 7 天自动续期）、付费 App Store Connect
-                      API Key（全自动）或自备 P12 证书（免费 Apple ID 证书 7 天过期）。
-                    </p>
-                  </TutorialStep>
-
-                  <TutorialStep index={2} title="选择 iOS 宿主节点">
-                    <div className="flex flex-col gap-1.5">
-                      <Select value={iosHostId} onValueChange={setIosHostId}>
-                        <SelectTrigger><SelectValue placeholder="选择节点" /></SelectTrigger>
-                        <SelectContent>
-                          {iosHostsLoading ? (
-                            <div className="flex items-center justify-center p-2">
-                              <Spinner className="size-4" />
-                            </div>
-                          ) : iosHosts.length === 0 ? (
-                            <div className="p-2 text-xs text-muted-foreground">暂无 iOS 宿主节点</div>
-                          ) : (
-                            iosHosts.map((h) => (
-                              <SelectItem key={h.node_id} value={h.node_id}>
-                                {h.name || h.node_id} {!h.online && "(离线)"}
-                              </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
-                      {iosHosts.length === 0 && !iosHostsLoading && (
-                        <p className="text-xs text-muted-foreground">
-                          暂无可用的 iOS 宿主节点。请先接入具备 ios_mgmt 能力的节点，
-                          或用顶部「扫描设备」批量发现并接入。
-                        </p>
-                      )}
-                    </div>
-                  </TutorialStep>
-
-                  {iosHostId && (
-                    <TutorialStep index={3} title="输入设备 UDID 认领">
-                      <div className="flex flex-col gap-2">
-                        <p className="text-xs leading-5 text-muted-foreground">
-                          在宿主节点上用 <code>ios.exe list</code> 或
-                          <code>idevice_id -l</code> 拿到 iPhone 的 UDID，填入下方认领。
-                          要批量扫描多台设备，请改用顶部「扫描设备」。
-                        </p>
-                        <div className="flex flex-col gap-1.5">
-                          <Label>设备 UDID</Label>
-                          <Input
-                            value={iosManualUdid}
-                            onChange={(e) => setIosManualUdid(e.target.value)}
-                            placeholder="00008101-XXXXXXXX"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <Label>设备名称（可选，接入后可改）</Label>
-                          <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="我的 iPhone" />
-                        </div>
-                        <Button
-                          onClick={() => void claimDevice(iosManualUdid.trim(), label.trim() || iosManualUdid.trim())}
-                          disabled={!iosManualUdid.trim() || iosClaiming}
-                        >
-                          {iosClaiming ? <Spinner className="size-4" /> : <Plus className="size-4" />}
-                          认领设备
-                        </Button>
-                      </div>
-                    </TutorialStep>
-                  )}
-                </>
-              )}
-
-              {platform === "android" && (
-                <>
-                  <div className="flex flex-col gap-1.5">
-                    <Label>设备名称（可选）</Label>
-                    <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="如 我的手机" />
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <AndroidSetupGuide release={deviceControlRelease} loaded={deviceControlLoaded} />
-                  </div>
-
-                  <Button onClick={() => void generate()} disabled={generating}>
-                    {generating ? <Spinner className="size-4" /> : <Plus className="size-4" />}
-                    生成配对码
-                  </Button>
-                </>
-              )}
-            </>
-          ) : code ? (
-            <div className="flex flex-col gap-4">
-              {pairedName ? (
-                <div className="flex flex-col gap-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-                  <div className="flex items-start gap-3">
-                    <Smartphone className="mt-0.5 size-5 shrink-0 text-primary" />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium">设备已连接</div>
-                      <div className="mt-0.5 truncate text-xs text-muted-foreground">{pairedName}</div>
-                    </div>
-                    <Badge variant="outline" className="shrink-0">{pairedDevice?.online ? "在线" : "连接中"}</Badge>
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 border-t pt-3 text-xs">
-                    <DeviceInfoField label="型号" value={strInfo(pairedDevice, "model")} />
-                    <DeviceInfoField label="系统" value={strInfo(pairedDevice, "os_version")} />
-                    <DeviceInfoField label="厂商" value={strInfo(pairedDevice, "manufacturer")} />
-                    <DeviceInfoField label="App 版本" value={strInfo(pairedDevice, "app_version")} />
-                    <DeviceInfoField
-                      label="内网地址"
-                      value={lanIpsInfo(pairedDevice)}
-                      className="col-span-2"
-                    />
-                    <DeviceInfoField
-                      label="无障碍"
-                      value={
-                        pairedDevice?.device_info?.accessibility_enabled === true
-                          ? "已开启"
-                          : pairedDevice?.device_info?.accessibility_enabled === false
-                            ? "未开启（连上后无法远程操作）"
-                            : ""
-                      }
-                      className="col-span-2"
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                  <Spinner className="size-3.5" />
-                  等待设备使用配对码
-                </div>
-              )}
-
-              <div className="flex flex-col gap-1.5">
-                <Label>配对码（{Math.ceil(ttl / 60)} 分钟内有效，只能用一次）</Label>
-                <div className="flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-base font-bold tracking-[0.15em]">
-                    {code}
-                  </code>
-                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => copy(code, "已复制配对码")}>
-                    <Copy className="size-4" />
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">配对码大小写不敏感，App 内输入小写也可以。</p>
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label>服务器地址（App 内只需填这个地址，无需填路径）</Label>
-                <div className="flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-xs">
-                    {serverAddr}
-                  </code>
-                  <Button variant="outline" size="sm" className="shrink-0" onClick={() => copy(serverAddr, "已复制地址")}>
-                    <Copy className="size-4" />
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  App 会自动拼接请求路径；地址填错时 App 会提示「未能在该地址找到设备控制服务端」。
-                </p>
-                {isLoopback && (
-                  <p className="text-xs text-destructive">
-                    这是本机回环地址，手机连不上。请把 localhost 换成电脑的局域网 IP，并确保手机与电脑在同一网络。
-                  </p>
-                )}
-              </div>
-
-              <Button variant="outline" onClick={() => void generate()} disabled={generating}>
-                {generating ? <Spinner className="size-4" /> : null}
-                重新生成
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-start gap-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-              <Smartphone className="mt-0.5 size-5 shrink-0 text-primary" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium">设备已接入</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  接下来在设备列表点「初始化 Runner」，宿主节点会自动下载、签名、安装并启动 DeviceKit Runner。
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>完成</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// =============================================================================
-// iOS 扫描页面（独立弹框）：扫描全部/指定宿主 → 多选认领 → 初始化 Runner
-// =============================================================================
+// 「添加浏览器 / 添加设备」弹框与接入引导已抽到 quick-actions 共享（首页快捷操作与
+// 本页共用同一组件）：
+//   CdpClientCreateDialog → @/components/console/quick-actions/cdp-client-create-dialog
+//   AddDeviceDialog       → @/components/console/quick-actions/device-pair-dialog
 
 function IosScanDialog({
   open,
@@ -3067,11 +2360,27 @@ function IosScanDialog({
 
   useEffect(() => {
     if (!open) return
+    // 加载态必须真的置起：此前初值 false 且从不置 true，扫描按钮的
+    // disabled={... || iosHostsLoading} 形同虚设，宿主列表还在路上时点扫描会
+    // 扫到空列表。
+    setIosHostsLoading(true)
     void listIosHosts().then(({ hosts }) => setIosHosts(hosts)).catch(() => setIosHosts([]))
       .finally(() => setIosHostsLoading(false))
     void listIosSigningProfiles().then(({ profiles }) => setProfiles(profiles)).catch(() => setProfiles([]))
-    void listDeviceResources().then((data) => setIosResources(data.devices.filter((d) => d.platform === "ios"))).catch(() => setIosResources([]))
+    void reloadIosResources()
   }, [open])
+
+  // 资源列表单独抽成可重复调用：扫描只刷新**节点清单**（dev.claimed/device_id），
+  // 资源列表此前只在弹框打开时加载一次，导致刚认领完的设备在同一会话里仍找不到
+  // 对应资源（「找不到该设备的资源 id」）。扫描后必须重新拉一次。
+  const reloadIosResources = async () => {
+    try {
+      const data = await listDeviceResources()
+      setIosResources(data.devices.filter((d) => d.platform === "ios"))
+    } catch {
+      setIosResources([])
+    }
+  }
 
   const deviceKey = (dev: IosDiscoveredDevice) => `${dev.node_id || ""}:${dev.udid}`
 
@@ -3086,16 +2395,22 @@ function IosScanDialog({
         await scanAllIosHosts()
         // discover 是异步的：节点收到帧后 Rescan 并上报 DevicesReport。
         // 轮询读缓存直到拿到结果或超时（USB 枚举 + lockdown 可能 2-3 秒）。
+        //
+        // 零宿主时**不轮询**：settled 依赖 hosts.length > 0，空列表下永远
+        // false，循环会白等满 5 秒才弹提示。宿主列表在弹框打开时就已加载，
+        // 这里直接短路。
         let all: IosDiscoveredDevice[] = []
         let hosts: Array<{ node_id: string; node_name: string; online: boolean; devices: IosDiscoveredDevice[]; error: string | null }> = []
-        for (let i = 0; i < 5; i++) {
-          await new Promise((r) => setTimeout(r, 1000))
-          const res = await getAllIosHostDevices()
-          hosts = res.hosts
-          all = res.devices
-          // 至少一个节点报了无错误 + 有设备，或所有节点都报了结果（错误或空），就停。
-          const settled = hosts.length > 0 && hosts.every((h) => !h.online || h.error !== null || h.devices.length > 0 || i >= 4)
-          if (all.length > 0 || settled) break
+        if (iosHosts.length > 0) {
+          for (let i = 0; i < 5; i++) {
+            await new Promise((r) => setTimeout(r, 1000))
+            const res = await getAllIosHostDevices()
+            hosts = res.hosts
+            all = res.devices
+            // 至少一个节点报了无错误 + 有设备，或所有节点都报了结果（错误或空），就停。
+            const settled = hosts.length > 0 && hosts.every((h) => !h.online || h.error !== null || h.devices.length > 0 || i >= 4)
+            if (all.length > 0 || settled) break
+          }
         }
         setHostStates(hosts.map((h) => ({
           node_id: h.node_id,
@@ -3110,7 +2425,10 @@ function IosScanDialog({
           const errored = hosts.filter((h) => h.online && h.error).map((h) => `${h.node_name}: ${h.error}`).join("；")
           const empty = hosts.filter((h) => h.online && !h.error && h.devices.length === 0).map((h) => h.node_name).join("、")
           const parts: string[] = []
-          if (hosts.length === 0) parts.push("没有 ios_host 节点——请先接入一台 node-ios（role=ios_host）")
+          // iOS 扫描是宿主**能力**（节点机需能访问 Apple 设备服务/usbmuxd），
+          // 不是节点角色：普通执行节点升级后同样可以扫。措辞不再泄 role=ios_host
+          // 这类内部词，也不再让用户去装一个 UI 里根本没有入口的东西。
+          if (hosts.length === 0) parts.push("当前没有节点上报 iOS 扫描能力——请在节点机上安装 Apple 设备驱动（Windows 装 Apple Devices/iTunes，macOS 自带），并确认节点程序已升级")
           if (offline) parts.push(`离线: ${offline}`)
           if (errored) parts.push(`错误: ${errored}`)
           if (empty) parts.push(`无设备: ${empty}`)
@@ -3136,6 +2454,9 @@ function IosScanDialog({
       setDevices([])
     } finally {
       setScanning(false)
+      // 扫描会带回节点清单里新的 claimed/device_id，资源列表必须同步刷新，
+      // 否则刚认领的设备在本会话内仍匹配不到资源。
+      void reloadIosResources()
     }
   }
 
@@ -3163,6 +2484,14 @@ function IosScanDialog({
         udid: dev.udid,
         label: label.trim() || dev.name,
       })
+      if (!resource_id) {
+        // 服务端在认领后回写 iOS 身份时才拿得到 resource_id（它要先从节点
+        // inventory 读出配对端点签发的 device_id）。拿不到说明回写那步没成功，
+        // 此刻设备已认领（凭据在节点上），只是初始化还不能直接派发——提示用户
+        // 重新扫描即可，那时 inventory 已带 claimed 标记、资源行也已被认领。
+        toast.error(`${dev.name || dev.udid.slice(-8)} 已认领，但未能定位设备资源；请重新扫描后再初始化`)
+        return null
+      }
       return resource_id
     } catch (e) {
       toast.error(`${dev.name || dev.udid.slice(-8)} 接入失败：${e instanceof Error ? e.message : e}`)
@@ -3252,7 +2581,7 @@ function IosScanDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[94vh] w-[calc(100vw-1rem)] max-w-[1600px] flex-col overflow-hidden">
+      <DialogContent className="flex h-[94vh] w-[calc(100vw-1rem)] max-w-[1600px] flex-col overflow-hidden sm:max-w-[1600px]">
         <DialogHeader>
           <DialogTitle>扫描 iOS 设备</DialogTitle>
           <DialogDescription>
@@ -3274,7 +2603,7 @@ function IosScanDialog({
                   </SelectItem>
                   {iosHosts.map((h) => (
                     <SelectItem key={h.node_id} value={h.node_id}>
-                      {h.name || h.node_id} {!h.online && "(离线)"}
+                      {h.name || h.node_name || h.node_id} {!h.online && "(离线)"}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -3295,6 +2624,16 @@ function IosScanDialog({
               </Button>
             </div>
           </div>
+
+          {/* 零宿主前置提示：在用户点「扫描」之前就说清为什么扫不到，而不是
+              让他白等一轮再收一条含糊的报错。与 device-pair-dialog 的空态同款。 */}
+          {!iosHostsLoading && iosHosts.length === 0 && (
+            <div className="rounded-md border border-dashed p-3 text-xs leading-5 text-muted-foreground">
+              当前没有节点可以扫描 iOS 设备。扫描需要节点机能够访问 Apple 设备服务
+              （Windows 装 Apple Devices 或 iTunes，macOS 自带），且节点程序为支持该能力的版本。
+              满足条件后节点会自动上报该能力，这里即可选择它作为宿主来源。
+            </div>
+          )}
 
           {/* 签名配置 + 标签 */}
           <div className="flex flex-wrap items-end gap-3">
@@ -3431,28 +2770,6 @@ function IosScanDialog({
 }
 
 
-
-function TutorialStep({
-  index,
-  title,
-  children,
-}: {
-  index: number
-  title: string
-  children?: React.ReactNode
-}) {
-  return (
-    <div className="flex gap-3 rounded-lg border bg-muted/20 p-3">
-      <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-        {index}
-      </div>
-      <div className="min-w-0 flex-1 space-y-2">
-        <div className="font-medium">{title}</div>
-        {children}
-      </div>
-    </div>
-  )
-}
 
 // =============================================================================
 // 邮箱服务卡片：一行 = 一个邮箱服务（账户 + 转发别名），无实例概念

@@ -97,12 +97,18 @@ async function reviewFetch<T>(path: string, init?: RequestInit): Promise<T> {
   })
   const body = await response.json().catch(() => null)
   if (!response.ok) {
+    // 后端全局 handler 把所有 HTTPException 包成 OpenAI 风格信封
+    // ``{message, type, code}``（不是 FastAPI 默认的 ``{detail}``），所以两个都要读；
+    // 只读 detail 会一路落到 ``HTTP 503`` 这种没信息量的兜底文案。
     const detail = body?.detail
-    const message = typeof detail === "string"
-      ? detail
-      : detail?.code === "review_nodes_unavailable"
-        ? "review_nodes_unavailable"
-        : body?.message || `HTTP ${response.status}`
+    const detailMessage = typeof detail === "string" ? detail : undefined
+    const envelopeMessage = typeof body?.message === "string" ? body.message : undefined
+    const errorMessage = typeof detail?.error?.message === "string" ? detail.error.message : undefined
+    const message = detailMessage
+      || envelopeMessage
+      || errorMessage
+      || (detail?.code === "review_nodes_unavailable" ? "review_nodes_unavailable" : undefined)
+      || `HTTP ${response.status}`
     const error = new Error(message)
     ;(error as Error & { detail?: unknown }).detail = detail
     throw error
@@ -200,6 +206,33 @@ export function createGroupExecutionNode(
   body: { startup_method?: string; node_name?: string; proxy_config_id?: string },
 ): Promise<CreateGroupExecutionNodeResult> {
   return reviewFetch(`/api/v1/teams/groups/${encodeURIComponent(groupId)}/execution-nodes`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** 建分组（POST /api/v1/teams/groups）。后端会把创建者加为成员，故「只能看到自己的」。 */
+export interface TeamGroupCreated {
+  id: string
+  name: string
+}
+
+export function createTeamGroup(name: string): Promise<TeamGroupCreated> {
+  return reviewFetch<TeamGroupCreated>(`/api/v1/teams/groups`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  })
+}
+
+/**
+ * 在分组下创建**管理节点**（POST /teams/groups/{gid}/management-nodes）。
+ * 首页「接入自己的编辑器 → 创建隔离环境」用：平台起一个 docker 管理节点当运行位置。
+ */
+export function createGroupManagementNode(
+  groupId: string,
+  body: { startup_method?: string; node_name?: string; proxy_config_id?: string },
+): Promise<CreateGroupExecutionNodeResult> {
+  return reviewFetch(`/api/v1/teams/groups/${encodeURIComponent(groupId)}/management-nodes`, {
     method: "POST",
     body: JSON.stringify(body),
   })

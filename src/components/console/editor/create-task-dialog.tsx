@@ -260,7 +260,7 @@ export default function CreateTaskDialog({
       onCreated?.(session)
       toast.success(issue ? "任务已分配" : "任务已创建")
       if (navigateToSession) {
-        navigate(`/console/editor/${activeEditor.id}/session/${session.id}`)
+        navigate(`/coding/editor/${activeEditor.id}/session/${session.id}`)
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "创建任务失败")

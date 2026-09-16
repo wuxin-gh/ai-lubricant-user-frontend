@@ -114,7 +114,7 @@ const SELECTION_STRATEGY_OPTIONS: { value: string; label: string }[] = [
   { value: "sequential", label: "顺序（按优先级依次尝试）" },
   { value: "random_member", label: "成员随机（按自定义模型成员随机）" },
   { value: "model_random", label: "模型随机" },
-  { value: "random_all", label: "全局随机（所有可用渠道随机）" },
+  { value: "random_all", label: "全局随机（所有可用供应商随机）" },
 ]
 
 const DEFAULT_SELECTION_STRATEGY = "intelligent"
@@ -595,7 +595,7 @@ function KeyModal({
     if (!isChild) return null
     if (parentProviderWhitelist.length > 0) {
       const extra = (data.whitelist || []).filter((v) => !parentProviderWhitelist.includes(v))
-      if (extra.length) return `渠道标签白名单超出父 Key 范围：${extra.join(", ")}`
+      if (extra.length) return `供应商标签白名单超出父 Key 范围：${extra.join(", ")}`
     }
     if (parentModelWhitelist.length > 0) {
       const extra = (data.modelWhitelist || []).filter((v) => !parentModelWhitelist.includes(v))
@@ -606,7 +606,7 @@ function KeyModal({
       if (extra.length) return `编辑器客户端白名单超出父 Key 范围：${extra.join(", ")}`
     }
     const missingChannelBlack = parentProviderBlacklist.filter((v) => !(data.blacklist || []).includes(v))
-    if (missingChannelBlack.length) return `父 Key 的渠道标签黑名单不可移除：${missingChannelBlack.join(", ")}`
+    if (missingChannelBlack.length) return `父 Key 的供应商标签黑名单不可移除：${missingChannelBlack.join(", ")}`
     const missingModelBlack = parentModelBlacklist.filter((v) => !(data.modelBlacklist || []).includes(v))
     if (missingModelBlack.length) return `父 Key 的模型黑名单不可移除：${missingModelBlack.join(", ")}`
     const missingEditorProviderBlack = parentEditorProviderBlacklist.filter((v) => !(data.editorProviderBlacklist || []).includes(v))
@@ -792,24 +792,24 @@ function KeyModal({
             </Card>
 
             <div className="flex flex-col gap-1.5">
-              <Label>渠道标签白名单</Label>
+              <Label>供应商标签白名单</Label>
               <MultiSelect
                 value={data.whitelist || []}
                 options={channelOptions}
-                placeholder={isChild && parentProviderWhitelist.length > 0 ? "留空表示继承父 Key 全部允许的渠道标签" : "留空表示允许所有渠道标签"}
+                placeholder={isChild && parentProviderWhitelist.length > 0 ? "留空表示继承父 Key 全部允许的供应商标签" : "留空表示允许所有供应商标签"}
                 disabled={saving}
                 onChange={(v) => set("whitelist", v)}
               />
               {isChild && parentProviderWhitelist.length > 0 ? (
-                <span className="text-xs text-muted-foreground">候选已收窄为父 Key 允许的渠道标签</span>
+                <span className="text-xs text-muted-foreground">候选已收窄为父 Key 允许的供应商标签</span>
               ) : null}
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label>渠道标签黑名单</Label>
+              <Label>供应商标签黑名单</Label>
               <MultiSelect
                 value={data.blacklist || []}
                 options={allChannelTags}
-                placeholder="留空表示不屏蔽任何渠道标签"
+                placeholder="留空表示不屏蔽任何供应商标签"
                 disabled={saving}
                 onChange={(v) => set("blacklist", v)}
               />
@@ -831,7 +831,7 @@ function KeyModal({
                   onChange={(v) => set("editorProviderWhitelist", v)}
                 />
                 <span className="text-xs text-muted-foreground">
-                  只在创建 Claude/Codex/OpenCode 编辑器会话时检查，不影响渠道重试。
+                  只在创建 Claude/Codex/OpenCode 编辑器会话时检查，不影响供应商重试。
                 </span>
               </div>
               <div className="flex flex-col gap-1.5">
@@ -869,7 +869,7 @@ function KeyModal({
                   ))}
                 </SelectContent>
               </Select>
-              <span className="text-xs text-muted-foreground">决定命中多个可用渠道时如何挑选</span>
+              <span className="text-xs text-muted-foreground">决定命中多个可用供应商时如何挑选</span>
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -1319,7 +1319,7 @@ export function ApiKeys() {
                 <TableHead className="text-center">密钥</TableHead>
                 <TableHead className="w-[90px] text-center">子密钥</TableHead>
                 <TableHead className="w-[420px] min-w-[420px] text-center">用量 / 限制</TableHead>
-                <TableHead className="w-[260px] text-center">渠道限制</TableHead>
+                <TableHead className="w-[260px] text-center">供应商限制</TableHead>
                 <TableHead className="w-[260px] text-center">模型与策略</TableHead>
                 <TableHead className="w-[300px] text-center">操作</TableHead>
               </TableRow>

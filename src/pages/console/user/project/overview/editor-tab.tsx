@@ -189,7 +189,7 @@ export default function ProjectOverviewEditorTab({ projectId, focusEditorId, aut
     if (focusEditorId) {
       autoHandledRef.current = "focus"
       const suffix = autoOpen === "session" ? "?new=session" : ""
-      navigate(`/console/editor/${focusEditorId}${suffix}`)
+      navigate(`/coding/editor/${focusEditorId}${suffix}`)
     }
   }, [autoOpen, focusEditorId, projectId, navigate])
 
@@ -237,7 +237,7 @@ export default function ProjectOverviewEditorTab({ projectId, focusEditorId, aut
       const created = await createProjectEditor(projectId, payload)
       await load(true)
       setCreateOpen(false)
-      navigate(`/console/editor/${created.id}`)
+      navigate(`/coding/editor/${created.id}`)
       toast.success("编辑器已创建")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "创建编辑器失败")
@@ -285,7 +285,7 @@ export default function ProjectOverviewEditorTab({ projectId, focusEditorId, aut
     try {
       const created = await duplicateProjectEditor(projectId, editor.id)
       await load(true)
-      navigate(`/console/editor/${created.id}`)
+      navigate(`/coding/editor/${created.id}`)
       toast.success("编辑器已复制")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "复制编辑器失败")
@@ -352,8 +352,8 @@ export default function ProjectOverviewEditorTab({ projectId, focusEditorId, aut
                   <TableCell>{(editor.sessions || []).length}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="icon" className="size-7" title="查看详情" onClick={() => navigate(`/console/editor/${editor.id}`)}><Eye className="size-4" /></Button>
-                      <Button variant="ghost" size="icon" className="size-7" title="创建任务" onClick={() => navigate(`/console/editor/${editor.id}?new=session`)}><Plus className="size-4" /></Button>
+                      <Button variant="ghost" size="icon" className="size-7" title="查看详情" onClick={() => navigate(`/coding/editor/${editor.id}`)}><Eye className="size-4" /></Button>
+                      <Button variant="ghost" size="icon" className="size-7" title="创建任务" onClick={() => navigate(`/coding/editor/${editor.id}?new=session`)}><Plus className="size-4" /></Button>
                       <Button variant="ghost" size="icon" className="size-7" title="编辑配置" onClick={() => openConfig(editor)}><Pencil className="size-4" /></Button>
                       <Button variant="ghost" size="icon" className="size-7" title="复制编辑器" onClick={() => void duplicateEditor(editor)}><Copy className="size-4" /></Button>
                       <Button variant="ghost" size="icon" className="size-7" title="删除编辑器" onClick={() => void removeEditor(editor)}><Trash2 className="size-4 text-destructive" /></Button>

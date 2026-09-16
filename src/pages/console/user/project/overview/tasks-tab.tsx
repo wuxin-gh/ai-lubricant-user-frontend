@@ -133,7 +133,7 @@ export default function ProjectOverviewTasksTab({ projectId, refreshKey }: { pro
           {tasks.map((task) => {
             const selected = selectedIds.has(task.id)
             return (
-              <Item variant="outline" key={task.id} className={`group cursor-pointer hover:border-primary/50 ${selected ? "border-primary ring-1 ring-primary/30" : ""}`} onClick={() => navigate(`/console/task/${task.id}`)}>
+              <Item variant="outline" key={task.id} className={`group cursor-pointer hover:border-primary/50 ${selected ? "border-primary ring-1 ring-primary/30" : ""}`} onClick={() => navigate(`/coding/task/${task.id}`)}>
                 <ItemContent>
                   <ItemHeader className="items-start gap-2">
                     <Checkbox checked={selected} onCheckedChange={() => toggleSelected(task.id)} onClick={(event) => event.stopPropagation()} aria-label={`选择任务 ${getTaskDisplayName(task)}`} className="mt-0.5 shrink-0" />

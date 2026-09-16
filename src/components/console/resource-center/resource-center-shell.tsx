@@ -35,6 +35,11 @@ export interface ResourceCenterShellProps {
   /** 市场子 Tab 内容；仅当 tabs 含 market 时生效。 */
   marketTabs?: ResourceMarketTab[]
   defaultMarket?: MarketSection
+  /**
+   * 是否渲染左侧 Tab 栏。资源中心的二级 Tab 已提为侧栏一级导航项（见 config/modes.ts），
+   * 页面内再画一份会重复；此时传 false，只留内容区，Tab 切换由导航改 URL 驱动。
+   */
+  showTabList?: boolean
 }
 
 export interface ResourceMarketTab {
@@ -48,6 +53,7 @@ export function ResourceCenterShell({
   defaultTab,
   marketTabs,
   defaultMarket = "mcp",
+  showTabList = true,
 }: ResourceCenterShellProps) {
   const [searchParams, setSearchParams] = useSearchParams()
   const initial = searchParams.get("tab")
@@ -95,19 +101,21 @@ export function ResourceCenterShell({
         onValueChange={onTabChange}
         className="flex min-h-0 flex-1 flex-row gap-0"
       >
-        <aside className="w-36 shrink-0 border-r bg-muted/20 p-2">
-          <TabsList variant="line" className="h-auto w-full items-stretch justify-start gap-1 bg-transparent p-0">
-            {tabs.map((tab) => (
-              <TabsTrigger
-                key={tab.value}
-                value={tab.value}
-                className="min-h-10 w-full flex-none justify-start px-3 py-2.5 text-left"
-              >
-                {tab.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </aside>
+        {showTabList ? (
+          <aside className="w-36 shrink-0 border-r bg-muted/20 p-2">
+            <TabsList variant="line" className="h-auto w-full items-stretch justify-start gap-1 bg-transparent p-0">
+              {tabs.map((tab) => (
+                <TabsTrigger
+                  key={tab.value}
+                  value={tab.value}
+                  className="min-h-10 w-full flex-none justify-start px-3 py-2.5 text-left"
+                >
+                  {tab.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </aside>
+        ) : null}
 
         <div className="flex min-w-0 min-h-0 flex-1 flex-col">
           {tabs.map((tab) => {

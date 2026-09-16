@@ -196,7 +196,7 @@ export default function AddProjectDialog({
       setOnboardingStack(null)
       setStackScanning(true)
     } catch {
-      navigate(`/console/project/${projectId}`)
+      navigate(`/coding/project/${projectId}`)
     }
   }
 
@@ -682,7 +682,7 @@ export default function AddProjectDialog({
       if (!open && onboarding) {
         const id = onboarding.id
         setOnboarding(null)
-        navigate(`/console/project/${id}`)
+        navigate(`/coding/project/${id}`)
       }
     }}>
       <DialogContent className="sm:max-w-2xl">
@@ -707,7 +707,7 @@ export default function AddProjectDialog({
           </div>
           <div className="grid gap-2"><Label>下一步</Label><p className="text-sm text-muted-foreground">进入项目的「任务」页创建和查看全部开发任务。</p></div>
         </div>
-        <DialogFooter><Button onClick={() => { if (!onboarding) return; const id = onboarding.id; setOnboarding(null); navigate(`/console/project/${id}`) }}>进入项目管理</Button></DialogFooter>
+        <DialogFooter><Button onClick={() => { if (!onboarding) return; const id = onboarding.id; setOnboarding(null); navigate(`/coding/project/${id}`) }}>进入项目管理</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <AddIdentity

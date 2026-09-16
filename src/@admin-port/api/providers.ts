@@ -3,6 +3,11 @@ import type {
   AccountDailyUsageResponse,
   BuiltinProviderInfo,
   ChannelCatalogResponse,
+  ChannelImportCommitRequest,
+  ChannelImportCommitResponse,
+  ChannelImportPreviewRequest,
+  ChannelImportPreviewResponse,
+  ChannelImporterInfo,
   ChatProtocolConfig,
   CreateProviderResponse,
   HeaderTemplate,
@@ -763,6 +768,36 @@ export async function getChannelCatalog(): Promise<ChannelCatalogResponse> {
 /** 要求服务端立即同步渠道目录，然后返回本地快照。 */
 export async function refreshChannelCatalog(): Promise<ChannelCatalogResponse> {
   const response = await request.post<ChannelCatalogResponse>("/admin/channel-catalog/refresh");
+  return response.data;
+}
+
+// ==================== 外部供应商框架导入（New API 等） ====================
+
+/** 可用的外部供应商框架清单，供导入弹框下拉。 */
+export async function getChannelImporters(): Promise<{ items: ChannelImporterInfo[] }> {
+  const response = await request.get<{ items: ChannelImporterInfo[] }>("/admin/channel-importers");
+  return response.data;
+}
+
+/** 干跑：拉取/解析外部渠道并归一成候选清单，服务端零写入。 */
+export async function previewChannelImport(
+  payload: ChannelImportPreviewRequest,
+): Promise<ChannelImportPreviewResponse> {
+  const response = await request.post<ChannelImportPreviewResponse>(
+    "/admin/channel-importers/preview",
+    payload,
+  );
+  return response.data;
+}
+
+/** 按勾选把候选建/并成渠道；部分失败也返回 200，逐项报告结果。 */
+export async function commitChannelImport(
+  payload: ChannelImportCommitRequest,
+): Promise<ChannelImportCommitResponse> {
+  const response = await request.post<ChannelImportCommitResponse>(
+    "/admin/channel-importers/commit",
+    payload,
+  );
   return response.data;
 }
 

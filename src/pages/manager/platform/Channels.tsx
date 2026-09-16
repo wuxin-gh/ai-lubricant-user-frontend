@@ -1,5 +1,5 @@
 /**
- * 渠道管理页。
+ * 供应商管理页。
  * 从 admin-frontend 的 antd 版重写为 shadcn；数据层继续复用 `@/@admin-port/api/*`（纯 axios）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -72,6 +72,7 @@ import { fetchMarketplaceManifest } from '@/api/marketplaceAdmin'
 import { getChannelTabConfig, getModelRuleTemplates } from '@/@admin-port/api/globalConfig'
 import type {
   AccountSchemaField,
+  ChannelCatalogEntry,
   ChatProtocolConfig,
   DashboardStats,
   DetectModelResult,
@@ -98,6 +99,7 @@ import {
 import { ManagerHeaderActionButton, ManagerRefreshButton } from '@/components/manager/manager-header-actions'
 import { UsageChart, type MetricType } from './UsageCharts'
 import { ChannelCatalogSelector } from './channel-catalog/ChannelCatalogSelector'
+import { ExternalChannelImportDialog } from './channel-catalog/ExternalChannelImportDialog'
 import { ChannelIcon, isChannelIconConfigured } from './channel-catalog/ChannelIcon'
 import { FreezePolicyEditor, normalizeFreezeRuleInput } from './FreezePolicyEditor'
 import { ModelIdRewriteEditor, expandModelIdRewriteRules, normalizeModelIdRewriteRules } from './ModelIdRewriteEditor'
@@ -167,8 +169,8 @@ function getProviderModelsCount(provider: ProviderSummary): number {
   return Array.isArray(provider.models) ? provider.models.length : 0
 }
 
-// 内置渠道账号编辑模式分类
-// 'schema'：完全由后端 account_schema 驱动（代码渠道用）。字段走 renderSchemaField，
+// 内置供应商账号编辑模式分类
+// 'schema'：完全由后端 account_schema 驱动（代码供应商用）。字段走 renderSchemaField，
 //   授权按钮显隐看 schema 的 auth_start.enabled（canStartAuth），而非硬编码。
 type ChannelAuthMode = 'custom' | 'cloudflare' | 'device_auth' | 'password_login' | 'api_key' | 'manual_values' | 'schema'
 
@@ -176,35 +178,35 @@ function getChannelAuthMode(providerId: string, builtinType?: string | null): Ch
   const type = builtinType || providerId
   if (!type) return 'custom'
   if (type === 'cloudflare') return 'cloudflare'
-  // 代码渠道：账号编辑完全由后端 account_schema 决定——spec 类声明了 auth_start+设备码钩子
+  // 代码供应商：账号编辑完全由后端 account_schema 决定——spec 类声明了 auth_start+设备码钩子
   // 就冒出授权按钮（canStartAuth 驱动），否则用户名/密码手填 + 声明字段渲染。
   // 原先硬编码的 copilot/atomcode/codebuddy(device_auth) 与 eaichat(password_login)
-  // 已下架为代码渠道，走这条 schema 分支，不再需要前端认领。
+  // 已下架为代码供应商，走这条 schema 分支，不再需要前端认领。
   if (type === 'code') return 'schema'
   if (type === 'edgeone-ai') return 'manual_values'
   if (builtinType === 'custom') return 'custom'
-  // builtin_type 已下线的旧渠道行（如未清理的 qwen/gemini）落通用编辑器。
+  // builtin_type 已下线的旧供应商行（如未清理的 qwen/gemini）落通用编辑器。
   return 'custom'
 }
 
-// 各渠道对应的官网/登录页面地址
+// 各供应商对应的官网/登录页面地址
 const PROVIDER_WEBSITE_URLS: Record<string, string> = {
   'edgeone-ai': 'https://edgeone.dev',
 }
 
-// 各渠道的账号编辑文档说明
+// 各供应商的账号编辑文档说明
 const PROVIDER_DOC_GUIDE: Record<string, string> = {
   cloudflare: '请先在 Cloudflare Dashboard 创建包含 Workers AI 权限的 API Token，并获取 Account ID。',
 }
 
 type ProviderStatus = 'ok' | 'requesting' | 'cooldown' | 'expired' | 'error' | 'disabled' | 'checking'
-// 渠道类型筛选：generic = 通用渠道（配置驱动兼容接口）；custom = 自定义渠道（贴 spec 源码，
-// 底层 builtin_type='code'）；builtin = 其余内置模板渠道。
+// 供应商类型筛选：generic = 通用供应商（配置驱动兼容接口）；custom = 自定义供应商（贴 spec 源码，
+// 底层 builtin_type='code'）；builtin = 其余内置模板供应商。
 type ProviderTypeFilter = 'all' | 'generic' | 'custom' | 'builtin'
 type ProviderProtocolFilter = 'all' | 'openai' | 'anthropic' | 'responses' | 'gemini' | 'cloudflare' | 'other'
 const KNOWN_PROTOCOL_FILTERS = ['openai', 'anthropic', 'responses', 'gemini', 'cloudflare']
 type ProviderSortKey = 'updated' | 'id' | 'name' | 'accounts' | 'models'
-// 「定时更新模型」开关筛选：on = 只看开启自动更新的渠道，off = 只看关闭的。
+// 「定时更新模型」开关筛选：on = 只看开启自动更新的供应商，off = 只看关闭的。
 type ProviderAutoUpdateFilter = 'all' | 'on' | 'off'
 
 const PROVIDER_SORT_OPTIONS: { value: ProviderSortKey; label: string }[] = [
@@ -222,8 +224,8 @@ function getProviderStatus(provider: ProviderSummary): ProviderStatus {
   if ((provider.requesting_account_count || 0) > 0) return 'requesting'
   // 认证口径与账号明细一致：auth_account_count 用真实体检结果（auth_ok=True），
   // 不再用 is_init()（凭据存在≠认证有效，token/cookie 过期时仍误报正常）。
-  // 启用账号全部未通过认证时：可自动刷新的渠道显示"已过期"（等待定时任务自愈），
-  // 只能人工更新凭据的渠道显示"异常"；尚未体检的显示"待检查"。
+  // 启用账号全部未通过认证时：可自动刷新的供应商显示"已过期"（等待定时任务自愈），
+  // 只能人工更新凭据的供应商显示"异常"；尚未体检的显示"待检查"。
   if ((provider.enabled_account_count || 0) > 0 && (provider.auth_account_count || 0) === 0) {
     if ((provider.auth_failed_account_count || 0) > 0) {
       return provider.supports_token_auto_refresh ? 'expired' : 'error'
@@ -299,7 +301,7 @@ function stringifyJson(value: unknown): string {
 }
 
 // ── 冻结规则：对象 × 周期 二维模型 ──
-// 常量/归一化/摘要文案与共享编辑器同源（FreezePolicyEditor.tsx），渠道弹窗与
+// 常量/归一化/摘要文案与共享编辑器同源（FreezePolicyEditor.tsx），供应商弹窗与
 // 全局配置「默认冻结策略」Tab 共用同一套定义（import 见文件头部）。
 
 
@@ -433,6 +435,18 @@ function compactProviderModelRow(row: ProviderModelEntry): ProviderModelEntry {
     extra_config: parseJsonObject(stringifyJson(row.extra_config ?? {}), {}),
     enabled: row.enabled !== false,
   }
+}
+
+// 粘贴以 /v1（或 /v1/）结尾的供应商地址时直接去掉尾部 /v1：模型列表/对话路径已带 /v1
+// 前缀，保留会拼出重复的 /v1。返回 null 表示无需拦截默认粘贴（未发生裁剪）。
+// 供「协议」Tab 的供应商地址输入与添加供应商向导共用，两处行为必须一致。
+function stripPastedTrailingV1(input: HTMLInputElement, pasted: string): string | null {
+  if (!pasted) return null
+  const start = input.selectionStart ?? input.value.length
+  const end = input.selectionEnd ?? input.value.length
+  const combined = input.value.slice(0, start) + pasted + input.value.slice(end)
+  const stripped = combined.replace(/\/v1\/?\s*$/i, '')
+  return stripped === combined ? null : stripped
 }
 
 function defaultLimitPolicy(providerName: string): ProviderLimitPolicy {
@@ -848,7 +862,7 @@ function ModelEditorModal({
   if (!open) return null
 
   const disabled = !safeString(draft.upstream_model_id).trim()
-  const modalLabel = isNew ? '新增渠道模型' : `编辑模型 · ${safeString(draft.upstream_model_id) || '(空)'}`
+  const modalLabel = isNew ? '新增供应商模型' : `编辑模型 · ${safeString(draft.upstream_model_id) || '(空)'}`
 
   return (
     <Modal open title={modalLabel} onClose={onClose} maxWidth={560}>
@@ -863,7 +877,7 @@ function ModelEditorModal({
             <input value={safeString(draft.model_id)} onChange={(e) => update({ model_id: e.target.value })} placeholder="留空与上游相同" style={inputStyle} />
           </div>
         </div>
-        {/* 出站默认值：max_tokens（客户端未传时用渠道值，客户端传了用客户端的）。
+        {/* 出站默认值：max_tokens（客户端未传时用供应商值，客户端传了用客户端的）。
             只作为默认值，无其它作用。reasoning_effort / thinking 见下方二选一区。 */}
         <div style={grid2Style}>
           <div>
@@ -894,7 +908,7 @@ function ModelEditorModal({
           </div>
         </div>
         <span style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5, display: 'block' }}>
-          max_tokens / reasoning_effort / thinking 作为发给上游的默认值，客户端未传时生效；max_context_tokens 用于选路：预估输入超过此值的渠道模型不进候选。
+          max_tokens / reasoning_effort / thinking 作为发给上游的默认值，客户端未传时生效；max_context_tokens 用于选路：预估输入超过此值的供应商模型不进候选。
         </span>
 
         {/* 思考默认值：reasoning_effort（openai 出站）与 thinking（anthropic 出站）二选一，互斥。 */}
@@ -985,7 +999,7 @@ function ModelEditorModal({
         </div>
 
         <div>
-          <label style={labelStyle}>客户端模拟（可选，覆盖渠道配置）</label>
+          <label style={labelStyle}>客户端模拟（可选，覆盖供应商配置）</label>
           <ComboSearchSelect
             value={safeString(extraCfg.client_preset ?? 'none')}
             onChange={(v) => patchExtra({ client_preset: v ?? 'none' })}
@@ -1002,7 +1016,7 @@ function ModelEditorModal({
           />
           <span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>启用 1M 上下文声明</span>
-            <span style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>请求该渠道模型时合并 anthropic-beta: context-1m-2025-08-07，适用于要求显式声明 1M 上下文的上游。</span>
+            <span style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.5 }}>请求该供应商模型时合并 anthropic-beta: context-1m-2025-08-07，适用于要求显式声明 1M 上下文的上游。</span>
           </span>
         </label>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', borderTop: '1px solid var(--admin-border)', paddingTop: '12px' }}>
@@ -1090,6 +1104,101 @@ function ProviderModelTable({
           })}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// 上游模型勾选视图：拉取上游模型后在其中挑选要导入的行。
+// 供应商弹窗的「模型列表」Tab 与添加供应商向导第 3 步共用（两处行为必须一致）。
+// selected / search / previewApplyRewrite 都是本视图的纯显示态，随挂载重置。
+function UpstreamModelPicker({
+  draftModels,
+  hasRewriteRules,
+  defaultSelectedKeys,
+  onConfirm,
+  onCancel,
+}: {
+  draftModels: ProviderModelEntry[]
+  /** 供应商是否配了改写规则：决定预览开关的文案与是否真的过滤行。 */
+  hasRewriteRules: boolean
+  /** 打开时的默认勾选（由调用方按「已存在的上游模型 / 规则命中」算出）。 */
+  defaultSelectedKeys: Set<string>
+  onConfirm: (selectedRows: ProviderModelEntry[]) => void
+  onCancel: () => void
+}) {
+  const [rows, setRows] = useState<ProviderModelEntry[]>(draftModels)
+  const [selected, setSelected] = useState<Set<string>>(defaultSelectedKeys)
+  const [search, setSearch] = useState('')
+  const [previewApplyRewrite, setPreviewApplyRewrite] = useState(true)
+
+  // 开关的作用：预显示自动更新后库里到底是什么样子。
+  //   自动更新只保留满足规则（is_regex=true）的行，并替换成 regex_model_id；
+  //   不满足的行不会进库。
+  //   开 → 只显示 is_regex=true 的行，model_id 列显示替换后的 regex_model_id。
+  //   关 → 显示全部行，model_id 列显示上游原始 raw_model_id。
+  // 纯显示切换：不改 model_id、不改勾选、不重新拉取——草稿数据始终在内存里。
+  // 没配规则时开关开了也不过滤（自动更新本来就不滤）；配了规则但一行没命中时
+  // 照样滤成空列表——那就是自动更新后的真实结果，不再回退成「显示全部」把
+  // 「规则不生效」糊弄过去。判定与后端 has_model_id_rewrite_rules 同源。
+  const displayModelId = (row: ProviderModelEntry) =>
+    previewApplyRewrite
+      ? (safeString(row.regex_model_id).trim() || safeString(row.model_id).trim())
+      : (safeString(row.raw_model_id).trim() || safeString(row.model_id).trim())
+  const visibleEntries = rows
+    .map((row, index) => ({ row: { ...row, _display_model_id: displayModelId(row) }, index }))
+    .filter(({ row }) => !(previewApplyRewrite && hasRewriteRules && row.is_regex !== true))
+    .filter(({ row }) => modelMatchesSearch(row, search))
+  const visibleKeys = visibleEntries.map(({ row, index }) => modelDraftKey(row, index))
+  const visibleSelectedCount = visibleKeys.filter((key) => selected.has(key)).length
+
+  const setVisibleSelection = (checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      visibleKeys.forEach((key) => checked ? next.add(key) : next.delete(key))
+      return next
+    })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%' }}>
+      <div style={{ ...panelStyle, display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索上游模型 / 模型 ID" style={{ ...inputStyle, flex: '0 1 220px' }} />
+        <button onClick={() => setVisibleSelection(true)} disabled={visibleKeys.length === 0} style={btnGhost}>全选</button>
+        <button onClick={() => setVisibleSelection(false)} disabled={visibleKeys.length === 0} style={btnGhost}>全取消</button>
+        {hasRewriteRules && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--text2)', cursor: 'pointer' }} title="仅预览自动更新后的样子；开关不影响定时更新是否按规则生效">
+            <input type="checkbox" checked={previewApplyRewrite} onChange={(e) => setPreviewApplyRewrite(e.target.checked)} />
+            预览过滤结果<span style={{ opacity: 0.6 }}>（仅显示，不影响生效）</span>
+          </label>
+        )}
+        <span style={{ fontSize: '13px', color: 'var(--text2)', marginLeft: 'auto' }}>已选 {selected.size} / {rows.length}，当前筛选 {visibleSelectedCount} / {visibleKeys.length}</span>
+        <button
+          onClick={() => onConfirm(rows.filter((row, index) => selected.has(modelDraftKey(row, index))))}
+          style={btnPrimary}
+        >确认</button>
+        <button onClick={onCancel} style={btnGhost}>取消</button>
+      </div>
+      <ProviderModelTable
+        entries={visibleEntries}
+        emptyText={previewApplyRewrite && hasRewriteRules ? '没有命中规则的上游模型——自动更新后这些都不会进库' : '没有匹配的上游模型'}
+        selectable
+        selected={selected}
+        onToggleSelected={(key, checked) => setSelected((prev) => {
+          const next = new Set(prev)
+          if (checked) next.add(key)
+          else next.delete(key)
+          return next
+        })}
+        onDeleteRow={(_, index) => {
+          const removedKey = modelDraftKey(rows[index], index)
+          setRows((prev) => prev.filter((__, i) => i !== index))
+          setSelected((prev) => {
+            const next = new Set(prev)
+            next.delete(removedKey)
+            return next
+          })
+        }}
+      />
     </div>
   )
 }
@@ -1365,12 +1474,12 @@ function SectionBlock({
   )
 }
 
-// 代码渠道「使用说明」与「使用样例」已内嵌成源码区的子 Tab（CodeChannelEditorTabs.tsx），
+// 代码供应商「使用说明」与「使用样例」已内嵌成源码区的子 Tab（CodeChannelEditorTabs.tsx），
 // 使用说明正文由后端从仓库文件读取（docs/providers/code-channel.md），最小样例为目录
 // 预设的 EchoChannel；完整说明与说明性片段见产品文档站。
 
 // 账号编辑表单显式处理、或需静默丢弃的遗留键（不进“额外字段”可编辑区、不回写）。
-// rpd_limit / rpd_per_account：每日请求上限已收敛到渠道级策略表 account_rpd，
+// rpd_limit / rpd_per_account：每日请求上限已收敛到供应商级策略表 account_rpd，
 // 账号不再单独覆盖；保留在此集合防止历史残留键回显成额外字段被误改回写。
 const ACCOUNT_HANDLED_KEYS = new Set([
   'switch',
@@ -1565,6 +1674,11 @@ function AccountsTab({
   const [authError, setAuthError] = useState<string | null>(null)
   const [replayUrl, setReplayUrl] = useState('')
   const [replaying, setReplaying] = useState(false)
+  // 供应商可自定义补投框的交互文案（如短信验证码供应商：输入框提示「6 位验证码」、
+  // 按钮「提交验证码」）。为空时回落通用回调补投文案。
+  const [replayHint, setReplayHint] = useState('')
+  const [replayLabel, setReplayLabel] = useState('')
+  const [pollingHint, setPollingHint] = useState('')
   const authPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const authStateRef = useRef<string | null>(null)
   const [refreshingAuth, setRefreshingAuth] = useState<Record<string, boolean>>({})
@@ -1601,7 +1715,7 @@ function AccountsTab({
     setError(null)
     try {
       // accounts(full) 已内联返回每个账号的 cooldown/model_cooldowns 字段，
-      // 无需再并发调用 accounts/status（后者会重复触发一次渠道级冻结索引读取）。
+      // 无需再并发调用 accounts/status（后者会重复触发一次供应商级冻结索引读取）。
       const [data, proxyList, schema] = await Promise.all([
         getProviderAccounts(providerId),
         getProxies().catch(() => [] as ProxyEntry[]),
@@ -1637,7 +1751,7 @@ function AccountsTab({
     return () => onEditingChange?.(false)
   }, [isEditing, onEditingChange])
 
-  // 加载内置渠道的文档链接（仅部分渠道有，如 Cloudflare）
+  // 加载内置供应商的文档链接（仅部分供应商有，如 Cloudflare）
   useEffect(() => {
     if (!channelType) return
     let cancelled = false
@@ -1970,7 +2084,7 @@ function AccountsTab({
         price_remark: safeString(form.price_remark).trim(),
       }
       // 可见「密钥/密码」输入框统一绑定 form.password；保存时凭据写回 schema 声明的那个字段
-      // （schemaPasswordField.key）——自定义/jiekou 等继承 base 的渠道就是 password，cloudflare
+      // （schemaPasswordField.key）——自定义/jiekou 等继承 base 的供应商就是 password，cloudflare
       // 也用 password。跟着 schema 走：schema 声明哪个字段、后端 init/运行时就读哪个，二者永远一致。
       // 绝不再同时回传多个凭据字段，避免 CustomProvider init 优先级（api_key > key > password）
       // 用某个陈旧字段遮蔽本次真正填入的凭据。
@@ -1999,7 +2113,7 @@ function AccountsTab({
       if (isCloudflare) {
         const accountId = safeString(form.account_id).trim()
         if (!accountId) {
-          setError('Cloudflare 渠道必须填写 Account ID')
+          setError('Cloudflare 供应商必须填写 Account ID')
           setSaving(false)
           return
         }
@@ -2010,12 +2124,12 @@ function AccountsTab({
         const edgeoneName = safeString(form.name).trim()
         const modelName = safeString(form.model_name).trim()
         if (!edgeoneName) {
-          setError('EdgeOne 渠道必须填写二级域名 name')
+          setError('EdgeOne 供应商必须填写二级域名 name')
           setSaving(false)
           return
         }
         if (!modelName) {
-          setError('EdgeOne 渠道必须填写模型名 model_name')
+          setError('EdgeOne 供应商必须填写模型名 model_name')
           setSaving(false)
           return
         }
@@ -2078,14 +2192,14 @@ function AccountsTab({
   const schemaFields = normalizeSchemaFields(accountSchema).filter((field) =>
     !['password'].includes(field.key) && (!isTabbit || !TABBIT_TOKEN_KEYS.includes(field.key)),
   )
-  const schemaSections = Array.from(new Set(schemaFields.map((field) => safeString(field.section || '渠道字段'))))
+  const schemaSections = Array.from(new Set(schemaFields.map((field) => safeString(field.section || '供应商字段'))))
   const canStartAuth = accountSchema?.auth_start?.enabled === true
   // 完成方式：poll（纯轮询自动认领）/ callback（上游回调服务端）/ loopback（本机回调，
   // 同机自动、跨机粘 URL 补投）。决定授权区是否显示「补投回调」输入框。
   const accountCompletion = (accountSchema?.auth_start?.completion as string | undefined) || 'poll'
   const canRefreshAuth = canStartAuth || (accountSchema?.add_methods ?? []).some((m) => ['device_code', 'oauth_callback', 'callback'].includes(m))
-  // 授权 UI 是否走「设备码/回调」形态：内置 device_auth 渠道，或 schema 驱动的代码渠道声明了
-  // auth_start.enabled（spec 类声明了 begin_device_flow / build_auth_start）。code 渠道没声明
+  // 授权 UI 是否走「设备码/回调」形态：内置 device_auth 供应商，或 schema 驱动的代码供应商声明了
+  // auth_start.enabled（spec 类声明了 begin_device_flow / build_auth_start）。code 供应商没声明
   // auth_start 时退化成用户名/密码手填（与 password_login 同形）。
   const isDeviceAuthActive = authMode === 'device_auth' || (authMode === 'schema' && canStartAuth)
 
@@ -2137,6 +2251,9 @@ function AccountsTab({
     const st = authStateRef.current
     authStateRef.current = null
     setAuthPolling(false)
+    setReplayHint('')
+    setReplayLabel('')
+    setPollingHint('')
     if (providerId && st) {
       try { await cancelProviderAccountAuth(providerId, st) } catch { /* 静默 */ }
     }
@@ -2192,6 +2309,11 @@ function AccountsTab({
       if (result.verification_uri) parts.push(`授权地址：${result.verification_uri}`)
       if (result.message) parts.push(result.message)
       setAuthStartInfo(parts.join(' · ') || '授权流程已启动，请按新窗口提示完成。')
+
+      // 供应商自定义的补投交互文案（短信验证码供应商会带）；没带就回落通用文案
+      setReplayHint(safeString(result.replay_hint))
+      setReplayLabel(safeString(result.replay_label))
+      setPollingHint(safeString(result.polling_hint))
 
       const url = result.auth_url || result.verification_uri || result.login_url
       // 用固定窗口名打开：复用同一窗口，保留浏览器 cookie，避免每次开新标签
@@ -2309,7 +2431,7 @@ function AccountsTab({
                 </div>
               )}
 
-              {/* 跳转登录渠道：授权入口。schema 驱动的代码渠道声明 auth_start 后同样出现 */}
+              {/* 跳转登录供应商：授权入口。schema 驱动的代码供应商声明 auth_start 后同样出现 */}
               {isDeviceAuthActive && (
                 <div style={{ padding: '12px 14px', border: `1px solid ${authError ? 'var(--red)' : 'var(--admin-border)'}`, borderRadius: 'var(--admin-radius)', background: authError ? 'rgba(251,113,133,0.08)' : 'var(--bg3)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
@@ -2332,9 +2454,11 @@ function AccountsTab({
                   </div>
                   {authPolling && (
                     <div style={{ fontSize: '12px', color: 'var(--blue)' }}>
-                      {accountCompletion === 'loopback'
-                        ? '授权进行中。同机部署浏览器回调会自动完成；跨机若停在打不开的 127.0.0.1 地址，把地址栏整条 URL 粘到下方输入框补投。'
-                        : '授权进行中，请在弹出窗口完成授权，完成后会自动回填…'}
+                      {pollingHint
+                        ? pollingHint
+                        : accountCompletion === 'loopback'
+                          ? '授权进行中。同机部署浏览器回调会自动完成；跨机若停在打不开的 127.0.0.1 地址，把地址栏整条 URL 粘到下方输入框补投。'
+                          : '授权进行中，请在弹出窗口完成授权，完成后会自动回填…'}
                     </div>
                   )}
                   {authStartInfo && !authError ? <div style={{ fontSize: '12px', color: authPolling ? 'var(--blue)' : 'var(--green)' }}>{authStartInfo}</div> : null}
@@ -2347,23 +2471,23 @@ function AccountsTab({
                         value={replayUrl}
                         onChange={(e) => setReplayUrl(e.target.value)}
                         onKeyDown={(e) => { if (e.key === 'Enter') void submitReplayUrl() }}
-                        placeholder="浏览器回调打不开时，粘贴地址栏里的完整回调地址补投"
+                        placeholder={replayHint || '浏览器回调打不开时，粘贴地址栏里的完整回调地址补投'}
                         style={{ flex: '1 1 260px', minWidth: '220px', fontSize: '12px', padding: '6px 8px', border: '1px solid var(--admin-border)', borderRadius: 'var(--admin-radius)', background: 'var(--bg2)', color: 'var(--text)' }}
                       />
                       <button onClick={() => void submitReplayUrl()} disabled={replaying || !replayUrl.trim()} style={{ ...btnGhost, fontSize: '12px', padding: '6px 10px' }}>
-                        {replaying ? '补投中...' : '补投回调'}
+                        {replaying ? '提交中...' : (replayLabel || '补投回调')}
                       </button>
                     </div>
                   )}
                 </div>
               )}
 
-              {/* 用户名密码渠道：打开网站按钮。schema 驱动且未声明授权入口的代码渠道同样适用 */}
+              {/* 用户名密码供应商：打开网站按钮。schema 驱动且未声明授权入口的代码供应商同样适用 */}
               {(authMode === 'password_login' || (authMode === 'schema' && !canStartAuth)) && websiteUrl && (
                 <div style={{ padding: '12px 14px', border: '1px solid var(--admin-border)', borderRadius: 'var(--admin-radius)', background: 'var(--bg3)', display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
                   <div>
                     <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>获取登录凭据</div>
-                    <div style={{ fontSize: '12px', color: 'var(--text2)', marginTop: '3px' }}>{accountSchema?.add_guidance || '点击打开渠道官网登录后，填写下方用户名 / 密码。'}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text2)', marginTop: '3px' }}>{accountSchema?.add_guidance || '点击打开供应商官网登录后，填写下方用户名 / 密码。'}</div>
                   </div>
                   <button onClick={() => window.open(websiteUrl, '_blank', 'noopener')} style={btnGhost}>打开网站 ↗</button>
                 </div>
@@ -2385,9 +2509,9 @@ function AccountsTab({
                   )}
                   {schemaFields.length > 0 && authMode !== 'device_auth' && (
                     <div style={{ gridColumn: '1 / -1' }}>
-                      <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text2)', margin: '4px 0 8px' }}>渠道字段</div>
+                      <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text2)', margin: '4px 0 8px' }}>供应商字段</div>
                       <div style={grid2Style}>
-                        {schemaSections.flatMap((section) => schemaFields.filter((field) => safeString(field.section || '渠道字段') === section).map(renderSchemaField))}
+                        {schemaSections.flatMap((section) => schemaFields.filter((field) => safeString(field.section || '供应商字段') === section).map(renderSchemaField))}
                       </div>
                     </div>
                   )}
@@ -2431,7 +2555,7 @@ function AccountsTab({
                 <input value={safeString(form.price_remark)} onChange={(e) => setForm((prev) => ({ ...prev, price_remark: e.target.value }))} style={inputStyle} placeholder="账号用途、价格、额度等备注" />
               </div>
 
-              {/* 账号添加说明（仅 API Key / 自定义 / 手动值渠道展示通用引导） */}
+              {/* 账号添加说明（仅 API Key / 自定义 / 手动值供应商展示通用引导） */}
               {(authMode === 'custom' || authMode === 'api_key' || authMode === 'manual_values') && accountSchema?.add_guidance && (
                 <div style={{ padding: '12px 14px', border: '1px solid var(--admin-border)', borderRadius: 'var(--admin-radius)', background: 'var(--bg3)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>添加方式</div>
@@ -2682,6 +2806,14 @@ function AccountsTab({
                           )}
                           <td style={{ padding: '8px 8px', color: 'var(--text)' }}>
                             <span style={{ display: 'block', fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }} title={a.username}>{a.username}</span>
+                            {/* 备注：添加供应商向导批量加密钥时写入「密钥1、密钥2…」，
+                                不显示的话向导里起的名字在账号表上就完全看不见了。 */}
+                            {safeString(a.price_remark).trim() && (
+                              <span
+                                style={{ display: 'block', fontSize: '11.5px', color: 'var(--text2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}
+                                title={safeString(a.price_remark)}
+                              >{safeString(a.price_remark)}</span>
+                            )}
                           </td>
                           <td style={{ padding: '8px 12px', textAlign: 'center' }}>
                             {/* 悬浮展示认证诊断（材料/过期时间/添加方式等），见 buildAccountStatusDetails。 */}
@@ -2974,7 +3106,7 @@ type AccountTestRow = {
   durationMs?: number
 }
 
-// 测试类型现由「渠道配置 → 测试类型」维护，前端不再闭合枚举，值由配置驱动。
+// 测试类型现由「供应商配置 → 测试类型」维护，前端不再闭合枚举，值由配置驱动。
 type AccountTestType = string
 // 缺省测试类型（配置未加载/为空时兜底展示），与后端 DEFAULT_TEST_TYPES 的 key/label 对齐。
 const FALLBACK_TEST_TYPES: Array<{ key: string; label: string }> = [
@@ -2997,7 +3129,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
   const [loadError, setLoadError] = useState<string | null>(null)
   const [username, setUsername] = useState('')
   const [testType, setTestType] = useState<AccountTestType>('chat')
-  // 测试类型选项由全局配置驱动（渠道配置 → 测试类型），配置缺失回退 FALLBACK_TEST_TYPES。
+  // 测试类型选项由全局配置驱动（供应商配置 → 测试类型），配置缺失回退 FALLBACK_TEST_TYPES。
   const [testTypeOptions, setTestTypeOptions] = useState<Array<{ key: string; label: string }>>(FALLBACK_TEST_TYPES)
   const [clientType, setClientType] = useState<AccountTestClientType>('none')
   const [protocol, setProtocol] = useState('')
@@ -3007,15 +3139,15 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set())
   const abortRef = useRef<AbortController | null>(null)
 
-  // 测试协议下拉项：渠道自身配置的协议置首（作默认），再补齐后端支持的全集。
-  // 该选择只控制测试请求 body/header/parser 的协议形态，不修改渠道协议行中配置的 path。
+  // 测试协议下拉项：供应商自身配置的协议置首（作默认），再补齐后端支持的全集。
+  // 该选择只控制测试请求 body/header/parser 的协议形态，不修改供应商协议行中配置的 path。
   const protocolOptions = useMemo(() => {
     const values: string[] = []
     const push = (v: unknown) => {
       const s = safeString(v).trim().toLowerCase()
       if (s && !values.includes(s)) values.push(s)
     }
-    // 1) 渠道自身配置的协议：主协议 + chat_protocols/supported_protocols 行，置首。
+    // 1) 供应商自身配置的协议：主协议 + chat_protocols/supported_protocols 行，置首。
     push(providerProtocol)
     const supported = (rawConfig as Record<string, unknown> | null)?.supported_protocols
     if (Array.isArray(supported)) supported.forEach(push)
@@ -3030,7 +3162,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
     return values.length > 0 ? values : ['openai']
   }, [rawConfig, providerProtocol])
 
-  // 切进测试 Tab 时加载账号列表 + 渠道原始配置（协议下拉用）+ 模型白名单。
+  // 切进测试 Tab 时加载账号列表 + 供应商原始配置（协议下拉用）+ 模型白名单。
   useEffect(() => {
     if (!active || !providerId) return
     let cancelled = false
@@ -3055,7 +3187,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
       .then((models) => {
         if (cancelled) return
         // 测试发送/展示都用系统模型名（model_id）：统一入口按系统名查路由再由
-        // resolve_upstream_id 转回该渠道的上游名；直接发上游名会 404「模型不存在」。
+        // resolve_upstream_id 转回该供应商的上游名；直接发上游名会 404「模型不存在」。
         const seen = new Set<string>()
         const next: AccountTestRow[] = []
         for (const m of models || []) {
@@ -3071,7 +3203,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
           })
         }
         if (next.length === 0) {
-          setLoadModelsError('该渠道暂无可测试的模型（白名单为空）')
+          setLoadModelsError('该供应商暂无可测试的模型（白名单为空）')
         }
         setRows(next)
         setSelectedModels(new Set(next.map((r) => r.model)))
@@ -3097,7 +3229,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
     if (!protocol && protocolOptions.length > 0) setProtocol(protocolOptions[0])
   }, [protocol, protocolOptions])
 
-  // 加载测试类型选项（渠道配置 → 测试类型）。配置缺失/失败时保留 FALLBACK_TEST_TYPES。
+  // 加载测试类型选项（供应商配置 → 测试类型）。配置缺失/失败时保留 FALLBACK_TEST_TYPES。
   useEffect(() => {
     if (!active) return
     let cancelled = false
@@ -3214,7 +3346,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
             onChange={(v) => setUsername(v ?? '')}
             disabled={accounts.length === 0}
             options={accounts.map((a) => ({ value: a.username, label: `${a.username}${a.switch === false ? '（已禁用）' : ''}${a.cooldown ? '（冷却中）' : ''}` }))}
-            placeholder="该渠道暂无账号"
+            placeholder="该供应商暂无账号"
             contentZIndex={1101}
           />
         </div>
@@ -3222,7 +3354,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
           <label style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: '4px' }}>
             测试类型
             <span
-              title={'测试类型在「渠道管理 → 设置 → 测试类型」里维护。\n每个类型 = 一组消息(messages) + 附加请求体(body)；媒体类型选 operation。\n新增/改动后此下拉自动同步。'}
+              title={'测试类型在「供应商管理 → 设置 → 测试类型」里维护。\n每个类型 = 一组消息(messages) + 附加请求体(body)；媒体类型选 operation。\n新增/改动后此下拉自动同步。'}
               style={{
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 width: 14, height: 14, borderRadius: '50%', border: '1px solid var(--admin-border)',
@@ -3321,7 +3453,7 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
                   <td style={{ padding: '8px 12px', color: 'var(--text)' }}>
                     {r.display}
                     {r.upstream && r.upstream !== r.model ? (
-                      <span style={{ marginLeft: 6, fontSize: '12px', color: 'var(--text2)' }} title="该渠道实际请求的上游模型名">→ {r.upstream}</span>
+                      <span style={{ marginLeft: 6, fontSize: '12px', color: 'var(--text2)' }} title="该供应商实际请求的上游模型名">→ {r.upstream}</span>
                     ) : null}
                   </td>
                   <td style={{ padding: '8px 12px', color, wordBreak: 'break-word', fontSize: '12px' }}>
@@ -3482,7 +3614,7 @@ function ProviderStatsTab({ providerName, active }: { providerName: string; acti
                 ))}
               </div>
             )}
-            {/* 账号使用占比：按 account_username 聚合，过滤空账号。渠道编辑弹框限定到当前渠道。
+            {/* 账号使用占比：按 account_username 聚合，过滤空账号。供应商编辑弹框限定到当前供应商。
                 只画环形图，hover 切片显示账号名/数值/占比。 */}
             {(stats?.rankings?.account_usage_top?.length || stats?.rankings?.account_requests_top?.length) ? (
               <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
@@ -3595,9 +3727,9 @@ function AccountShareChart({ rows, metric }: {
   )
 }
 
-// 创建态账号编辑器：渠道尚未落库时，先在这里填好用户名 / 凭据 / 代理，
-// 点「保存」时随渠道一起提交（见 UnifiedProviderModal.buildCreateAccountsPayload）。
-// device_auth 类渠道（copilot/codex 等）走跳转授权，创建后再到账号管理里授权，这里不展示表单。
+// 创建态账号编辑器：供应商尚未落库时，先在这里填好用户名 / 凭据 / 代理，
+// 点「保存」时随供应商一起提交（见 UnifiedProviderModal.buildCreateAccountsPayload）。
+// device_auth 类供应商（copilot/codex 等）走跳转授权，创建后再到账号管理里授权，这里不展示表单。
 type CreateAccountDraft = { username: string; api_key: string; account_id: string; proxy: string; priority: number; weight: number }
 
 function CreateAccountsEditor({
@@ -3618,14 +3750,14 @@ function CreateAccountsEditor({
   if (authMode === 'device_auth') {
     return (
       <div style={{ ...panelStyle, color: 'var(--text2)', textAlign: 'center', fontSize: '13px', padding: '32px 16px' }}>
-        该渠道通过跳转授权添加账号。请先点「保存」创建渠道，随后在账号管理里发起授权。
+        该供应商通过跳转授权添加账号。请先点「保存」创建供应商，随后在账号管理里发起授权。
       </div>
     )
   }
 
   const isCloudflare = authMode === 'cloudflare'
   const isManualValues = authMode === 'manual_values'
-  // schema 驱动渠道（代码渠道）创建期还没有 account_schema，先按用户名/密码通用形态收集；
+  // schema 驱动供应商（代码供应商）创建期还没有 account_schema，先按用户名/密码通用形态收集；
   // 落库后账号管理页再按后端 schema 精细渲染（含设备码授权入口）。
   const isPasswordLike = authMode === 'password_login' || authMode === 'schema'
   const credLabel = isPasswordLike ? '密码' : (isCloudflare ? 'API Key' : 'API Key / 密钥')
@@ -3638,8 +3770,8 @@ function CreateAccountsEditor({
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       <div style={{ fontSize: '13px', color: 'var(--text2)' }}>
         {templateMode
-          ? '请填写该渠道的账号凭据；用户名留空将自动生成 key-1、key-2…'
-          : '先填好账号信息，点右下角「保存」时会创建渠道并一并提交账号。用户名留空将自动生成 key-1、key-2…'}
+          ? '请填写该供应商的账号凭据；用户名留空将自动生成 key-1、key-2…'
+          : '先填好账号信息，点右下角「保存」时会创建供应商并一并提交账号。用户名留空将自动生成 key-1、key-2…'}
       </div>
       {accounts.map((account, index) => (
         <div key={index} style={{ ...panelStyle, display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -3717,10 +3849,10 @@ function CreateAccountsEditor({
   )
 }
 
-// ── 渠道模板（市场 manifest）与渠道表单的互转 ──────────────────────────────
+// ── 供应商模板（市场 manifest）与供应商表单的互转 ──────────────────────────────
 //
-// 渠道模板就是「加完账号就能跑」的渠道配置，字段与渠道基础配置同构，只是不含账号/
-// 密钥/Cookie/Token。所以模板编辑器直接复用本文件的渠道表单（隐藏账号/统计/测试
+// 供应商模板就是「加完账号就能跑」的供应商配置，字段与供应商基础配置同构，只是不含账号/
+// 密钥/Cookie/Token。所以模板编辑器直接复用本文件的供应商表单（隐藏账号/统计/测试
 // Tab），两侧共用同一套协议行/路径/限流/冻结策略控件，字段口径不会漂移。
 //
 // manifest 结构与服务端 validator / channel_template_export.build_manifest 对齐：
@@ -3775,7 +3907,7 @@ function templateMetaFromManifest(manifest: Record<string, any> | null | undefin
 }
 
 /**
- * 渠道名 → 市场模板 id 用的 slug。必须与服务端 channel_template_export._slug 完全一致
+ * 供应商名 → 市场模板 id 用的 slug。必须与服务端 channel_template_export._slug 完全一致
  * （小写、非 [a-z0-9._-] 的字符簇替换为 '-'、去首尾 '-._'、截断 120），否则
  * 「同步市场数据」算出的 local.<slug> 匹配不到真正发布出去的模板。
  */
@@ -3800,7 +3932,7 @@ function normalizeChatProtocolRows(rows: unknown): ChatProtocolConfig[] {
   }))
 }
 
-/** manifest.resource.channel -> 渠道表单预设（复用 create 态的 presetData 路径）。 */
+/** manifest.resource.channel -> 供应商表单预设（复用 create 态的 presetData 路径）。 */
 function templatePresetFromManifest(manifest: Record<string, any> | null | undefined): ProviderCreatePreset | null {
   const channel = manifest?.resource?.channel
   if (!channel || typeof channel !== 'object') return null
@@ -3831,9 +3963,9 @@ function templatePresetFromManifest(manifest: Record<string, any> | null | undef
     account_weight: safeNumber(channel.account_weight, 1),
     auto_update_models: channel.auto_update_models !== false,
     model_id_rewrite_rules: normalizeModelIdRewriteRules(channel.model_id_rewrite_rules),
-    // 代码渠道模板：builtin_type 决定新建渠道时的类型，code 是 spec 源码。
+    // 代码供应商模板：builtin_type 决定新建供应商时的类型，code 是 spec 源码。
     // 只认已知内置类型——老模板可能残留 'custom' 之类非法值，带进去新建会被后端
-    // 拒成「未知的内置渠道类型」。非已知值一律丢弃（回落自定义渠道）。
+    // 拒成「未知的内置供应商类型」。非已知值一律丢弃（回落自定义供应商）。
     builtin_type: BUILTIN_TYPE_OPTIONS.some((o) => o.value === safeString(channel.builtin_type))
       ? safeString(channel.builtin_type)
       : undefined,
@@ -3860,17 +3992,17 @@ export function UnifiedProviderModal({
   onBack,
 }: {
   open: boolean
-  /** edit 态唯一标识：渠道 id（后端即 name）。打开只需这个。 */
+  /** edit 态唯一标识：供应商 id（后端即 name）。打开只需这个。 */
   providerId?: string
   mode?: 'edit' | 'create'
   initialTab?: ProviderTab
   initialBuiltinType?: string
   presetData?: ProviderCreatePreset | null
-  /** createPreset 是否来自渠道目录（非复制流程）。来自目录的自定义渠道
+  /** createPreset 是否来自供应商目录（非复制流程）。来自目录的自定义供应商
    *  timeout 强制走前端默认 120，不信任后端 catalog 预设里的旧 600。 */
   presetFromCatalog?: boolean
-  /** 模板模式：把渠道表单复用为渠道模板编辑器，隐藏账号/统计/测试 Tab，保存走
-   *  onSaveTemplate 而不是 provider 落库。渠道模板是市场 manifest，无账号/无 id 落库。 */
+  /** 模板模式：把供应商表单复用为供应商模板编辑器，隐藏账号/统计/测试 Tab，保存走
+   *  onSaveTemplate 而不是 provider 落库。供应商模板是市场 manifest，无账号/无 id 落库。 */
   templateMode?: boolean
   templateManifest?: {
     id?: string
@@ -3889,7 +4021,7 @@ export function UnifiedProviderModal({
   /** 数据已变化的旁路通知，供父页面刷新自身列表。不传也能正常增删改。 */
   onChanged?: (e: { type: 'saved' | 'deleted' | 'created'; id: string }) => void
   onSaveTemplate?: (manifest: Record<string, unknown>) => Promise<void>
-  /** 新建渠道时返回上一级（重新选择渠道类型）。仅 create 流程使用。 */
+  /** 新建供应商时返回上一级（重新选择供应商类型）。仅 create 流程使用。 */
   onBack?: () => void
 }) {
   const [activeTab, setActiveTab] = useState<ProviderTab>(initialTab)
@@ -3918,7 +4050,7 @@ export function UnifiedProviderModal({
   // health_check 字段已不在面板暴露：它驱动后台认证探针循环（check_account_loop），
   // 属于专用初始化任务；定时的真实检测入口在「基础配置」tab 的「定时检测」折叠块。
   const [extraRetryStatusCodesText, setExtraRetryStatusCodesText] = useState('')
-  // 定时检测：到点按测试参数跑一次真实检测；成功解冻，失败是否冻结由「冻结策略」tab 的渠道级开关控制。
+  // 定时检测：到点按测试参数跑一次真实检测；成功解冻，失败是否冻结由「冻结策略」tab 的供应商级开关控制。
   const [stEnabled, setStEnabled] = useState(false)
   const [stFreqUnit, setStFreqUnit] = useState<'daily' | 'minutes' | 'hours'>('minutes')
   const [stFreqValue, setStFreqValue] = useState(30)
@@ -3935,7 +4067,7 @@ export function UnifiedProviderModal({
   const [stRunMessage, setStRunMessage] = useState<{ ok: boolean; text: string } | null>(null)
   // 定时检测的账号多选候选：进入编辑态时加载 lite 账号列表（与 AccountTestTab 同源）。
   const [stAccountsList, setStAccountsList] = useState<ProviderAccountLite[]>([])
-  // 定时检测复用测试 tab 的测试类型/协议选项源；渠道自身协议置首。
+  // 定时检测复用测试 tab 的测试类型/协议选项源；供应商自身协议置首。
   const [stTestTypeOptions, setStTestTypeOptions] = useState<Array<{ key: string; label: string }>>(FALLBACK_TEST_TYPES)
   const stModelOptions = useMemo(() => {
     const seen = new Set<string>()
@@ -4020,7 +4152,7 @@ export function UnifiedProviderModal({
   }, [stTestTypeOptions, stTestType])
   const [freezePolicyEnabled, setFreezePolicyEnabled] = useState(true)
   const [freezeRules, setFreezeRules] = useState<ProviderLimitFreezeRule[]>([])
-  // 渠道级冻结策略属性：定时检测探测失败是否按正常请求语义记健康度并冻结/刷新 TTL（关=只探不冻）。
+  // 供应商级冻结策略属性：定时检测探测失败是否按正常请求语义记健康度并冻结/刷新 TTL（关=只探不冻）。
   // 存在 limit policy 的 freeze_policy 里，与规则一起经 updateProviderLimitPolicy 保存。
   const [freezeRefreshOnFailure, setFreezeRefreshOnFailure] = useState(true)
   const [chatProtocols, setChatProtocols] = useState<ChatProtocolConfig[]>([])
@@ -4032,11 +4164,7 @@ export function UnifiedProviderModal({
   const [upstreamSelectMode, setUpstreamSelectMode] = useState(false)
   const [upstreamDraftModels, setUpstreamDraftModels] = useState<ProviderModelEntry[]>([])
   const [upstreamSelected, setUpstreamSelected] = useState<Set<string>>(new Set())
-  const [upstreamSearch, setUpstreamSearch] = useState('')
   const [loadingUpstreamModels, setLoadingUpstreamModels] = useState(false)
-  // 获取上游模型预览开关：开 = 预显示自动更新后的结果（只显示满足规则 is_regex=true
-  // 的行、显示改名后名字）；关 = 全部行 + 原始名。默认开。仅显示，不影响后端定时更新。
-  const [previewApplyRewrite, setPreviewApplyRewrite] = useState(true)
 
   // 窗口真实大小测试
   const [detectLoading, setDetectLoading] = useState(false)
@@ -4135,7 +4263,7 @@ export function UnifiedProviderModal({
     }
   }
 
-  // 渠道模型编辑态
+  // 供应商模型编辑态
   const [editingModel, setEditingModel] = useState<{ row: ProviderModelEntry; index: number; isNew: boolean } | null>(null)
   const [rewriteRulesOpen, setRewriteRulesOpen] = useState(false)
   const iconFileInputRef = useRef<HTMLInputElement | null>(null)
@@ -4169,7 +4297,7 @@ export function UnifiedProviderModal({
   const protocolBuiltinType = isCreate ? createBuiltinType : (detail?.builtin_type || '')
   const protocolEditorEnabled = providerCategory === 0 || isProtocolEditableBuiltin(protocolBuiltinType)
 
-  // 模板 manifest 的非渠道字段（市场目录展示用），只在模板模式渲染。
+  // 模板 manifest 的非供应商字段（市场目录展示用），只在模板模式渲染。
   const [templateMeta, setTemplateMeta] = useState<TemplateMetaForm>(emptyTemplateMeta())
 
   const [limitPolicyLoading, setLimitPolicyLoading] = useState(false)
@@ -4225,13 +4353,13 @@ export function UnifiedProviderModal({
       supports_image_generation: safeBoolean(preset?.supports_image_generation),
       supports_video_generation: safeBoolean(preset?.supports_video_generation),
       supports_tts: safeBoolean(preset?.supports_tts),
-      // 代码渠道：目录 preset.code 已带 Echo 样例，回填到草稿供编辑/保存。
+      // 代码供应商：目录 preset.code 已带 Echo 样例，回填到草稿供编辑/保存。
       code: safeString(preset?.code),
       account_priority: safeNumber(preset?.account_priority, 0),
       account_weight: safeNumber(preset?.account_weight, 0),
       auto_update_models: preset?.auto_update_models ?? false,
       model_id_rewrite_rules: normalizeModelIdRewriteRules(preset?.model_id_rewrite_rules),
-      // 来自渠道目录的自定义渠道（非内置、非复制）默认超时 120 秒；
+      // 来自供应商目录的自定义供应商（非内置、非复制）默认超时 120 秒；
       // 不读 catalog 预设里的 timeout，避免后端旧快照仍是 600 时把表单带偏。
       timeout: presetFromCatalog && !createBuiltinType ? 120 : safeNumber(preset?.timeout, 120),
       retry_count: preset?.retry_count ?? null,
@@ -4287,7 +4415,7 @@ export function UnifiedProviderModal({
       setFreezePolicyEnabled(safeBoolean(policy.freeze_policy?.enabled))
       setFreezeRules(policy.freeze_policy?.rules.map((r) => ({ ...r })) || [])
     } else {
-      // 无预设：先用前端硬编码兜底填上，再异步拉全局「新增渠道默认冻结策略」覆盖。
+      // 无预设：先用前端硬编码兜底填上，再异步拉全局「新增供应商默认冻结策略」覆盖。
       // 后端 create_custom_provider 已会落一份同样口径的快照行；这里让弹窗草稿
       // 与之一致，免得二步保存把后端快照改回硬编码默认。
       setLimitPolicy(policy)
@@ -4412,7 +4540,7 @@ export function UnifiedProviderModal({
     }
   }, [isCreate, initCreate, resolvedId, createdId])
 
-  // 「同步市场数据」：把本渠道对应的市场模板拉回来，只覆盖当前 Tab 承载的字段，
+  // 「同步市场数据」：把本供应商对应的市场模板拉回来，只覆盖当前 Tab 承载的字段，
   // 写进草稿并提示用户点「保存」生效（不自动落库）。按 local.<slug> 匹配模板 id，
   // slug 规则与服务端 channel_template_export._slug 完全一致。
   const [syncingMarket, setSyncingMarket] = useState(false)
@@ -4421,7 +4549,7 @@ export function UnifiedProviderModal({
     const nameForSlug = remarkText.trim() || detail?.remark || resolvedId
     const slug = channelTemplateSlug(nameForSlug)
     if (!slug) {
-      setError('无法从渠道名生成市场模板标识，请先填写渠道名称')
+      setError('无法从供应商名生成市场模板标识，请先填写供应商名称')
       return
     }
     // 按 Tab 分组：只把当前 Tab 承载的字段从市场数据 merge 进草稿，
@@ -4447,7 +4575,7 @@ export function UnifiedProviderModal({
       if (!preset) throw new Error('市场模板内容为空或不合法')
       const keys = TAB_FIELDS[activeTab]
       if (keys.length === 0) {
-        setSaveNotice('当前 Tab 的配置不随渠道模板发布，无市场数据可同步。')
+        setSaveNotice('当前 Tab 的配置不随供应商模板发布，无市场数据可同步。')
         return
       }
       const patch: Record<string, unknown> = {}
@@ -4493,7 +4621,7 @@ export function UnifiedProviderModal({
     } catch (err) {
       const msg = err instanceof Error ? err.message : '同步市场数据失败'
       // 模板不存在（尚未发布）与真实错误分开提示，前者不是故障。
-      setError(/不存在|404|HTTP 404/.test(msg) ? '本渠道尚未发布过市场模板，无法同步。' : msg)
+      setError(/不存在|404|HTTP 404/.test(msg) ? '本供应商尚未发布过市场模板，无法同步。' : msg)
     } finally {
       setSyncingMarket(false)
     }
@@ -4503,7 +4631,7 @@ export function UnifiedProviderModal({
   // resolvedId 变化触发的重载把用户所在 tab 冲回基础配置。
   useEffect(() => {
     if (open) {
-      // 模板模式默认停在「模板信息」Tab：先填元信息再配渠道。
+      // 模板模式默认停在「模板信息」Tab：先填元信息再配供应商。
       setActiveTab(templateMode ? 'meta' : 'basic')
       // 弹窗常驻挂载：每次打开都强制折叠定时检测面板，避免上一轮展开态泄漏到新增/编辑。
       setScheduledTestExpanded(false)
@@ -4535,7 +4663,6 @@ export function UnifiedProviderModal({
       setUpstreamSelectMode(false)
       setUpstreamDraftModels([])
       setUpstreamSelected(new Set())
-      setUpstreamSearch('')
       setCreatedId(null)
       setCreateAccounts([])
     }
@@ -4564,7 +4691,7 @@ export function UnifiedProviderModal({
       send_reasoning_content: p.send_reasoning_content !== false,
       models: Array.isArray(p.models) ? p.models.map(String).filter(Boolean) : [],
     }
-    // header_template 仅在有值时才带：渠道模板 manifest 禁止携带空 header_template 键
+    // header_template 仅在有值时才带：供应商模板 manifest 禁止携带空 header_template 键
     // （validator 按 key 名拦截，与值无关），与服务端 _protocol_rows 口径一致。
     const ht = safeString(p.header_template)
     if (ht) row.header_template = ht
@@ -4572,7 +4699,7 @@ export function UnifiedProviderModal({
   })
 
   // 切换某条协议行的协议：该行的 path 按默认值追随（见 updateChatProtocolProtocol），
-  // 同时若这一行是主协议行，渠道级 models_path 也跟着走新协议默认值（gemini 是 /v1beta/models）。
+  // 同时若这一行是主协议行，供应商级 models_path 也跟着走新协议默认值（gemini 是 /v1beta/models）。
   const changeChatProtocol = (index: number, protocol: string) => {
     const nextRows = chatProtocols.map((c, i) => i === index ? updateChatProtocolProtocol(c, protocol) : c)
     setChatProtocols(nextRows)
@@ -4615,23 +4742,23 @@ export function UnifiedProviderModal({
       return
     }
     if (!remarkText.trim()) {
-      setError('渠道名称不能为空')
+      setError('供应商名称不能为空')
       setActiveTab('basic')
       return
     }
     if (isCreate && protocolEditorEnabled && createBuiltinType !== 'code' && !safeString(detail.base_url).trim()) {
-      setError('渠道地址不能为空')
+      setError('供应商地址不能为空')
       setActiveTab('config')
       return
     }
-    // 渠道地址仍以 /v1 结尾、且模型列表路径以 /v1 开头时，拼出的模型列表 URL 会出现 /v1/v1/models 这类重复前缀。
+    // 供应商地址仍以 /v1 结尾、且模型列表路径以 /v1 开头时，拼出的模型列表 URL 会出现 /v1/v1/models 这类重复前缀。
     // 拦截并提醒，用户确认后按其填写放行。
     if (protocolEditorEnabled) {
       const baseUrlForCheck = safeString(detail.base_url).trim()
       const modelsPathForCheck = safeString(detail.models_path).trim()
       if (baseUrlForCheck && modelsPathForCheck && /\/v1\/?$/i.test(baseUrlForCheck) && /^\/v1(\/|$)/i.test(modelsPathForCheck)) {
         const ok = window.confirm(
-          `渠道地址「${baseUrlForCheck}」以 /v1 结尾，模型列表路径「${modelsPathForCheck}」又以 /v1 开头，`
+          `供应商地址「${baseUrlForCheck}」以 /v1 结尾，模型列表路径「${modelsPathForCheck}」又以 /v1 开头，`
           + `拼出的模型列表 URL 会变成 ${baseUrlForCheck.replace(/\/$/, '')}${modelsPathForCheck}（重复 /v1）。\n\n确定仍要这样保存吗？`
         )
         if (!ok) {
@@ -4640,9 +4767,9 @@ export function UnifiedProviderModal({
         }
       }
     }
-    // 代码渠道：源码必须非空，否则后端 _get_provider_class 会静默回落 CustomProvider。
+    // 代码供应商：源码必须非空，否则后端 _get_provider_class 会静默回落 CustomProvider。
     if (isCreate && createBuiltinType === 'code' && !safeString(detail.code).trim()) {
-      setError('请粘贴渠道源码（一个 spec 类：普通类 + @staticmethod 钩子）')
+      setError('请粘贴供应商源码（一个 spec 类：普通类 + @staticmethod 钩子）')
       setActiveTab('code')
       return
     }
@@ -4678,7 +4805,7 @@ export function UnifiedProviderModal({
           kind: 'channel_template',
           name: slug,
           display_name: templateMeta.display_name.trim() || remarkText.trim() || slug,
-          summary: templateMeta.summary.trim() || `渠道模板「${remarkText.trim() || slug}」`,
+          summary: templateMeta.summary.trim() || `供应商模板「${remarkText.trim() || slug}」`,
           publisher: templateMeta.publisher.trim() || 'local-ai-lubricant',
           category: templateMeta.category.trim() || 'custom',
           tags: templateMeta.tagsText.split(',').map((t) => t.trim()).filter(Boolean),
@@ -4704,7 +4831,7 @@ export function UnifiedProviderModal({
               rate_limit: { ...(detail.rate_limit ?? {}) },
               auto_update_models: safeBoolean(detail.auto_update_models),
               model_id_rewrite_rules: normalizeModelIdRewriteRules(detail.model_id_rewrite_rules),
-              // 代码渠道模板：builtin_type + spec 源码随模板存回市场，
+              // 代码供应商模板：builtin_type + spec 源码随模板存回市场，
               // 否则在市场管理页编辑一次模板就丢源码。
               ...(detail.builtin_type ? { builtin_type: safeString(detail.builtin_type) } : {}),
               ...(detail.builtin_type === 'code' ? { code: safeString(detail.code) } : {}),
@@ -4713,12 +4840,12 @@ export function UnifiedProviderModal({
           },
         }
         await onSaveTemplate?.(manifest)
-        setSaveNotice('渠道模板已保存到市场仓库。')
+        setSaveNotice('供应商模板已保存到市场仓库。')
         setSaving(false)
         return
       }
       if (isCreate) {
-        // 新增态：先创建渠道拿 id（后端即 name）
+        // 新增态：先创建供应商拿 id（后端即 name）
         const res = await createCustomProvider({
           builtin_type: createBuiltinType || undefined,
           remark: remarkText.trim(),
@@ -4726,7 +4853,7 @@ export function UnifiedProviderModal({
           enabled,
           website_url: safeString(detail.website_url).trim() || undefined,
           icon: safeString(detail.icon).trim() || undefined,
-          // 代码渠道的 Provider 源码必须顶层发送，不进 protocolEditorEnabled 条件块。
+          // 代码供应商的 Provider 源码必须顶层发送，不进 protocolEditorEnabled 条件块。
           code: createBuiltinType === 'code' ? safeString(detail.code) : undefined,
           ...(protocolEditorEnabled ? {
             base_url: safeString(detail.base_url).trim(),
@@ -4794,16 +4921,16 @@ export function UnifiedProviderModal({
         try {
           await updateProviderLimitPolicy(name, nextPolicy)
         } catch (err) {
-          policyError = `渠道已创建（${name}），但冻结策略保存失败：${err instanceof Error ? err.message : '未知错误'}。可再次点击保存重试冻结策略。`
+          policyError = `供应商已创建（${name}），但冻结策略保存失败：${err instanceof Error ? err.message : '未知错误'}。可再次点击保存重试冻结策略。`
         }
-        // 渠道已落库：createdId 接管后弹窗即视同 edit 态，
+        // 供应商已落库：createdId 接管后弹窗即视同 edit 态，
         // 走与普通编辑完全相同的加载流程，用服务端返回重渲染整个弹窗。
         setCreatedId(name)
         onChanged?.({ type: 'created', id: name })
         if (policyError) {
           setError(policyError)
         } else {
-          setSaveNotice(`渠道「${remarkText.trim()}」已创建，可继续添加账号。`)
+          setSaveNotice(`供应商「${remarkText.trim()}」已创建，可继续添加账号。`)
           setActiveTab('accounts')
         }
         return
@@ -4817,7 +4944,7 @@ export function UnifiedProviderModal({
 
       const nextRateLimit = detail.rate_limit ?? {}
 
-      // 旧渠道第一次编辑保存时，website_url 为空则从渠道地址提取 origin 落库。
+      // 旧供应商第一次编辑保存时，website_url 为空则从供应商地址提取 origin 落库。
       // 只在本次 payload 生成时兜底；读取侧不回填，之后已有值会保持用户设置。
       const websiteUrl = safeString(detail.website_url).trim() || (() => {
         const raw = safeString(detail.base_url).trim()
@@ -4834,7 +4961,7 @@ export function UnifiedProviderModal({
         base_url: detail.base_url,
         website_url: websiteUrl,
         icon: safeString(detail.icon).trim(),
-        // 代码渠道源码：改 code 会触发后端完整重载（admin update_custom_provider
+        // 代码供应商源码：改 code 会触发后端完整重载（admin update_custom_provider
         // 在 code 变更 + builtin_type=='code' 时走 _load_provider_runtime 换类）。
         ...(detail.builtin_type === 'code' ? { code: safeString(detail.code) } : {}),
         chat_path: detail.chat_path,
@@ -4955,7 +5082,7 @@ export function UnifiedProviderModal({
       onChanged?.({ type: 'deleted', id: resolvedId })
       onClose()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除渠道失败')
+      setError(err instanceof Error ? err.message : '删除供应商失败')
     } finally {
       setDeleting(false)
       setDeleteConfirmOpen(false)
@@ -4963,11 +5090,11 @@ export function UnifiedProviderModal({
   }
 
   const handleFetchUpstreamModels = async () => {
-    // 渠道已落库（含 create 落库后）即可拉取上游模型。
+    // 供应商已落库（含 create 落库后）即可拉取上游模型。
     const targetId = resolvedId
     if (!targetId) {
-      // 渠道尚未落库：获取上游模型需要一个已存在的渠道地址/凭据，先点保存创建渠道。
-      setError('请先点击「保存」创建渠道，然后即可获取上游模型。')
+      // 供应商尚未落库：获取上游模型需要一个已存在的供应商地址/凭据，先点保存创建供应商。
+      setError('请先点击「保存」创建供应商，然后即可获取上游模型。')
       return
     }
     setLoadingUpstreamModels(true)
@@ -4997,7 +5124,7 @@ export function UnifiedProviderModal({
         return
       }
       // 默认勾选规则：
-      // - 渠道已有模型 → 只勾当前已存在的上游模型（原行为）。
+      // - 供应商已有模型 → 只勾当前已存在的上游模型（原行为）。
       // - 模型列表为空 → 只勾满足过滤规则（is_regex=true）的行；规则没命中任何行时
       //   一个都不勾，不做「无命中就默认全选」的兜底——全选交给用户手动点。
       const existingKeys = new Set(models.map((m) => safeString(m.upstream_model_id).trim()).filter(Boolean))
@@ -5009,7 +5136,6 @@ export function UnifiedProviderModal({
       )
       setUpstreamDraftModels(list)
       setUpstreamSelected(selectedKeys)
-      setUpstreamSearch('')
       setUpstreamSelectMode(true)
     } catch (err) {
       window.alert(err instanceof Error ? err.message : '拉取上游模型失败')
@@ -5018,16 +5144,8 @@ export function UnifiedProviderModal({
     }
   }
 
-  // 获取上游模型预览开关：开 = 预显示自动更新后的结果（只显示满足规则 is_regex=true
-  // 的行，model_id 列显示改名后的名字）；关 = 显示全部行 + 原始上游名。
-  // 纯显示切换，不改 model_id、不改勾选、不重新拉取——开关关掉也不影响定时更新
-  // 按规则过滤改名，那由后端 refresh_models 决定，跟这个开关无关。
-  const previewRewriteToggle = (
-    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--text2)', cursor: 'pointer' }} title="仅预览自动更新后的样子；开关不影响定时更新是否按规则生效">
-      <input type="checkbox" checked={previewApplyRewrite} onChange={(e) => setPreviewApplyRewrite(e.target.checked)} />
-      预览过滤结果<span style={{ opacity: 0.6 }}>（仅显示，不影响生效）</span>
-    </label>
-  )
+  // 获取上游模型预览开关的说明与过滤/勾选逻辑都随 UpstreamModelPicker 组件走
+  // （两处入口共用同一份实现），这里只保留 hasRewriteRules 供其判断是否过滤行。
 
   const handleRefreshModels = async () => {
     const targetId = resolvedId
@@ -5092,9 +5210,9 @@ export function UnifiedProviderModal({
   }
 
   // 模板模式隐藏账号/统计/测试：模板只保存可移植配置，没有账号也没有运行数据。
-  // 代码渠道：源码是核心，单开一个 Tab，创建/编辑态都紧跟基础配置之后。
+  // 代码供应商：源码是核心，单开一个 Tab，创建/编辑态都紧跟基础配置之后。
   const isCodeChannel = createBuiltinType === 'code' || detail?.builtin_type === 'code'
-  // 「同步市场数据」按钮：只在这些 Tab 显示——它们承载的字段才会随渠道模板发布到市场
+  // 「同步市场数据」按钮：只在这些 Tab 显示——它们承载的字段才会随供应商模板发布到市场
   // （账号管理/数据统计/测试不发布）。模板编辑态本身在改市场数据，且新建态无 id 可匹配，均不显示。
   const marketSyncTabs: ProviderTab[] = ['basic', 'code', 'config', 'models', 'limits']
   const showMarketSync = !templateMode && !!resolvedId && marketSyncTabs.includes(activeTab)
@@ -5113,9 +5231,9 @@ export function UnifiedProviderModal({
   ]
 
   const title = templateMode
-    ? (templateManifest ? '编辑渠道模板' : '新建渠道模板')
-    : (detail?.remark || detail?.name || (isCreate ? '新建渠道' : '渠道'))
-  // 仅使用渠道显式配置的跳转地址；未配置时不显示外链入口。
+    ? (templateManifest ? '编辑供应商模板' : '新建供应商模板')
+    : (detail?.remark || detail?.name || (isCreate ? '新建供应商' : '供应商'))
+  // 仅使用供应商显式配置的跳转地址；未配置时不显示外链入口。
   const modalWebsiteUrl = safeString(detail?.website_url).trim() || undefined
   // 开关的作用：预显示自动更新后库里到底是什么样子。
   //   自动更新只保留满足规则（is_regex=true）的行，并替换成 regex_model_id；
@@ -5131,49 +5249,10 @@ export function UnifiedProviderModal({
     detail?.model_id_rewrite_rules ?? [],
     modelRuleTemplates,
   ).some((rule) => rule.enabled)
-  const displayModelId = (row: ProviderModelEntry) =>
-    previewApplyRewrite
-      ? (safeString(row.regex_model_id).trim() || safeString(row.model_id).trim())
-      : (safeString(row.raw_model_id).trim() || safeString(row.model_id).trim())
-  const upstreamVisibleEntries = upstreamDraftModels
-    .map((row, index) => ({ row: { ...row, _display_model_id: displayModelId(row) }, index }))
-    .filter(({ row }) => !(previewApplyRewrite && hasRewriteRules && row.is_regex !== true))
-    .filter(({ row }) => modelMatchesSearch(row, upstreamSearch))
-  const upstreamVisibleKeys = upstreamVisibleEntries.map(({ row, index }) => modelDraftKey(row, index))
-  const upstreamVisibleSelectedCount = upstreamVisibleKeys.filter((key) => upstreamSelected.has(key)).length
-  const confirmUpstreamSelection = () => {
-    const existingByUpstream = new Map<string, ProviderModelEntry>()
-    models.forEach((model) => {
-      const upstream = safeString(model.upstream_model_id).trim()
-      if (upstream) existingByUpstream.set(upstream, model)
-    })
-    setModels(upstreamDraftModels
-      // 导入只按勾选集走：开关是纯显示作用，不影响导入哪些行。
-      // 过滤 is_regex 只在定时更新（refresh_models）里做，那是数据层的事。
-      .filter((row, index) => upstreamSelected.has(modelDraftKey(row, index)))
-      .map((row) => {
-        const upstream = safeString(row.upstream_model_id).trim()
-        const existing = upstream ? existingByUpstream.get(upstream) : undefined
-        return compactProviderModelRow(existing ? { ...row, ...existing, upstream_model_id: upstream } : row)
-      })
-      .filter((row) => row.upstream_model_id))
-    setUpstreamSelectMode(false)
-    setUpstreamDraftModels([])
-    setUpstreamSelected(new Set())
-    setUpstreamSearch('')
-  }
   const cancelUpstreamSelection = () => {
     setUpstreamSelectMode(false)
     setUpstreamDraftModels([])
     setUpstreamSelected(new Set())
-    setUpstreamSearch('')
-  }
-  const setVisibleUpstreamSelection = (checked: boolean) => {
-    setUpstreamSelected((prev) => {
-      const next = new Set(prev)
-      upstreamVisibleKeys.forEach((key) => checked ? next.add(key) : next.delete(key))
-      return next
-    })
   }
 
   return (
@@ -5212,12 +5291,12 @@ export function UnifiedProviderModal({
                   disabled={deleting || saving || loading}
                   style={{ ...btnDanger, opacity: (deleting || saving || loading) ? 0.6 : 1 }}
                 >
-                  {deleting ? <RefreshCw style={btnIcon} /> : <Trash2 style={btnIcon} />}{deleting ? '删除中...' : '删除渠道'}
+                  {deleting ? <RefreshCw style={btnIcon} /> : <Trash2 style={btnIcon} />}{deleting ? '删除中...' : '删除供应商'}
                 </button>
                 <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
                   <AlertDialogContent>
                     <AlertDialogHeader>
-                      <AlertDialogTitle>确定删除渠道「{remarkText.trim() || detail?.remark || resolvedId}」吗？</AlertDialogTitle>
+                      <AlertDialogTitle>确定删除供应商「{remarkText.trim() || detail?.remark || resolvedId}」吗？</AlertDialogTitle>
                       <AlertDialogDescription>此操作不可恢复。</AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -5243,7 +5322,7 @@ export function UnifiedProviderModal({
                 <button
                   onClick={() => void handleSyncFromMarket()}
                   disabled={loading || saving || syncingMarket}
-                  title="把本渠道对应的市场模板拉回当前表单（只覆盖当前 Tab 的字段），点「保存」生效"
+                  title="把本供应商对应的市场模板拉回当前表单（只覆盖当前 Tab 的字段），点「保存」生效"
                   style={btnGhost}
                 ><CloudDownload style={btnIcon} />{syncingMarket ? '同步中...' : '同步市场数据'}</button>
               )}
@@ -5257,7 +5336,7 @@ export function UnifiedProviderModal({
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%', minHeight: 0 }}>
         {/* tab bar：tab 集由 detail（custom_channel/builtin_type）决定，detail 未到位时先占位，
-            否则内置渠道会在首屏被当作自定义渠道闪现「协议」tab。
+            否则内置供应商会在首屏被当作自定义供应商闪现「协议」tab。
             tab 栏固定不滚动，滚动条只出现在下方 tab 内容区。 */}
         {!detail ? (
           <div style={{ flexShrink: 0, display: 'flex', gap: '6px', flexWrap: 'wrap', padding: '6px', border: '1px solid var(--admin-border)', borderRadius: '14px', background: 'var(--bg2)', boxShadow: '0 4px 16px rgba(0,0,0,0.04)' }}>
@@ -5301,7 +5380,7 @@ export function UnifiedProviderModal({
           </div>
         ) : (
           <>
-            {/* 模板信息：独立 Tab，模板模式才出现。先填元信息再配渠道。 */}
+            {/* 模板信息：独立 Tab，模板模式才出现。先填元信息再配供应商。 */}
             {templateMode && activeTab === 'meta' && (
               <SectionBlock title="模板信息">
                 <div style={{ ...panelStyle, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
@@ -5315,7 +5394,7 @@ export function UnifiedProviderModal({
                   </div>
                   <div>
                     <label style={labelStyle}>展示名称</label>
-                    <input value={templateMeta.display_name} onChange={(e) => setTemplateMeta((p) => ({ ...p, display_name: e.target.value }))} placeholder="留空用渠道名称" style={inputStyle} />
+                    <input value={templateMeta.display_name} onChange={(e) => setTemplateMeta((p) => ({ ...p, display_name: e.target.value }))} placeholder="留空用供应商名称" style={inputStyle} />
                   </div>
                   <div>
                     <label style={labelStyle}>版本</label>
@@ -5381,7 +5460,7 @@ export function UnifiedProviderModal({
                   </div>
                   <div style={{ gridColumn: '1 / -1' }}>
                     <label style={labelStyle}>一句话说明</label>
-                    <input value={templateMeta.summary} onChange={(e) => setTemplateMeta((p) => ({ ...p, summary: e.target.value }))} placeholder="这个渠道模板适用于什么场景" style={inputStyle} />
+                    <input value={templateMeta.summary} onChange={(e) => setTemplateMeta((p) => ({ ...p, summary: e.target.value }))} placeholder="这个供应商模板适用于什么场景" style={inputStyle} />
                   </div>
                 </div>
                 <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text2)' }}>
@@ -5392,7 +5471,7 @@ export function UnifiedProviderModal({
             {/* 基础配置 */}
             {activeTab === 'basic' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {/* 基础信息：图标（预览/上传/输入）一排，渠道名称、跳转地址、开关一排。直接平铺，不套卡片框。 */}
+              {/* 基础信息：图标（预览/上传/输入）一排，供应商名称、跳转地址、开关一排。直接平铺，不套卡片框。 */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                 <div>
                   <label style={labelStyle}>图标</label>
@@ -5438,8 +5517,8 @@ export function UnifiedProviderModal({
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', alignItems: 'start' }}>
                   <div>
-                    <label style={labelStyle}>渠道名称</label>
-                    <input value={remarkText} onChange={(e) => setRemarkText(e.target.value)} placeholder="给渠道起个名字" style={inputStyle} />
+                    <label style={labelStyle}>供应商名称</label>
+                    <input value={remarkText} onChange={(e) => setRemarkText(e.target.value)} placeholder="给供应商起个名字" style={inputStyle} />
                   </div>
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
@@ -5454,7 +5533,7 @@ export function UnifiedProviderModal({
                             <CircleQuestionMark size={14} />
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent>配置后渠道卡片标题和弹窗标题显示跳转入口；留空保存时自动用渠道地址补齐。</TooltipContent>
+                        <TooltipContent>配置后供应商卡片标题和弹窗标题显示跳转入口；留空保存时自动用供应商地址补齐。</TooltipContent>
                       </Tooltip>
                     </div>
                     <input value={safeString(detail.website_url)} onChange={(e) => setDetail((prev) => prev ? { ...prev, website_url: e.target.value } : prev)} placeholder="https://官网或控制台" style={inputStyle} />
@@ -5475,7 +5554,7 @@ export function UnifiedProviderModal({
                             <CircleQuestionMark size={14} />
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent>用于模型方案按渠道标签进行过滤</TooltipContent>
+                        <TooltipContent>用于模型方案按供应商标签进行过滤</TooltipContent>
                       </Tooltip>
                     </div>
                     <ProviderTagInput
@@ -5499,8 +5578,8 @@ export function UnifiedProviderModal({
                 <div style={{ ...panelStyle, border: '1px solid var(--admin-border)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <label style={labelStyle}>启用渠道</label>
-                      <span style={{ fontSize: '12px', color: 'var(--text2)' }}>{enabled ? '渠道已启用，对外提供服务' : '渠道已禁用，不会对外提供服务'}</span>
+                      <label style={labelStyle}>启用供应商</label>
+                      <span style={{ fontSize: '12px', color: 'var(--text2)' }}>{enabled ? '供应商已启用，对外提供服务' : '供应商已禁用，不会对外提供服务'}</span>
                     </div>
                     <button onClick={() => setEnabled((v) => !v)} style={{ ...btnPrimary, minWidth: '120px', background: enabled ? 'var(--green)' : 'var(--text2)', borderColor: enabled ? 'var(--green)' : 'var(--text2)' }}>{enabled ? '已启用' : '已禁用'}</button>
                   </div>
@@ -5518,7 +5597,7 @@ export function UnifiedProviderModal({
                   </div>
                 </div>
 
-                {/* 定时检测属于基础配置；新增态也展示，保存后随渠道一起落库。 */}
+                {/* 定时检测属于基础配置；新增态也展示，保存后随供应商一起落库。 */}
                 <div style={{ ...panelStyle, border: '1px solid var(--admin-border)' }}>
                       <div
                         role="button"
@@ -5548,7 +5627,7 @@ export function UnifiedProviderModal({
                               <label style={stLabelStyle}>
                                 检测结果范围
                                 <span
-                                  title={'只检测成功：仅测渠道已启用、账号已认证且无冻结/冷却的账号。\n只检测异常：仅测处于冻结/冷却或认证不可用的账号。\n全部：不按当前可用状态筛选，所有启用账号都测。\n禁用渠道整体跳过；禁用账号永远跳过。'}
+                                  title={'只检测成功：仅测供应商已启用、账号已认证且无冻结/冷却的账号。\n只检测异常：仅测处于冻结/冷却或认证不可用的账号。\n全部：不按当前可用状态筛选，所有启用账号都测。\n禁用供应商整体跳过；禁用账号永远跳过。'}
                                   style={stHelpMarkStyle}
                                 >?</span>
                               </label>
@@ -5596,7 +5675,7 @@ export function UnifiedProviderModal({
                                 value={stAccounts}
                                 onChange={(v) => setStAccounts(v)}
                                 options={stAccountsList.map((a) => ({ value: a.username, label: `${a.username}${a.switch === false ? '（已禁用）' : ''}${a.cooldown ? '（冷却中）' : ''}` }))}
-                                placeholder={stAccountsList.length === 0 ? '该渠道暂无账号' : '不选 = 该渠道全部账号'}
+                                placeholder={stAccountsList.length === 0 ? '该供应商暂无账号' : '不选 = 该供应商全部账号'}
                                 contentZIndex={1101}
                                 className="h-9 overflow-hidden"
                               />
@@ -5609,7 +5688,7 @@ export function UnifiedProviderModal({
                                 value={stTestModels}
                                 onChange={handleScheduledTestModelChange}
                                 options={stModelOptions}
-                                placeholder={stModelOptions.length === 0 ? '该渠道暂无模型' : '不选 = 渠道默认模型'}
+                                placeholder={stModelOptions.length === 0 ? '该供应商暂无模型' : '不选 = 供应商默认模型'}
                                 contentZIndex={1101}
                                 className="h-9 overflow-hidden"
                               />
@@ -5663,7 +5742,7 @@ export function UnifiedProviderModal({
                             <span style={{ fontSize: '12px', color: 'var(--text2)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                               <b style={{ color: 'var(--text)' }}>保留检测日志</b>
                               <span
-                                title="关闭后定时检测（成功与失败）都不写请求日志，「请求日志」里不再出现该渠道的检测记录。不影响手动测试与正常用户请求，也不改变冻结行为。"
+                                title="关闭后定时检测（成功与失败）都不写请求日志，「请求日志」里不再出现该供应商的检测记录。不影响手动测试与正常用户请求，也不改变冻结行为。"
                                 style={stHelpMarkStyle}
                               >?</span>
                             </span>
@@ -5673,7 +5752,7 @@ export function UnifiedProviderModal({
                               type="button"
                               onClick={() => void runScheduledTestNow()}
                               disabled={stRunning || !resolvedId}
-                              title={resolvedId ? '按当前表单参数立即入队一次检测，由后台异步执行' : '保存渠道后才能立即执行'}
+                              title={resolvedId ? '按当前表单参数立即入队一次检测，由后台异步执行' : '保存供应商后才能立即执行'}
                               style={{ ...btnPrimary, padding: '4px 14px', cursor: stRunning || !resolvedId ? 'not-allowed' : 'pointer', opacity: stRunning || !resolvedId ? 0.6 : 1 }}
                             >{stRunning ? '加入中...' : '立即执行'}</button>
                             {stRunMessage && (
@@ -5701,11 +5780,11 @@ export function UnifiedProviderModal({
               </div>
             )}
 
-            {/* 源码（代码渠道专属 Tab）：四子 Tab —— 代码 / 使用说明 / 使用样例 / agent 生成。
+            {/* 源码（代码供应商专属 Tab）：四子 Tab —— 代码 / 使用说明 / 使用样例 / agent 生成。
                 代码子 Tab 贴 spec 类，保存即 exec 注册、热更新换类即时生效；以服务进程权限执行，
                 仅授权管理员可编辑。使用说明与使用样例原为弹框，现已内嵌。agent 生成子 Tab
                 用与市场管理气泡同款 AgentConversation，context=code_channel 触发服务端场景，
-                agent 按代码渠道编写规则生成 spec 源码（不自动写入，用户自行复制到「代码」子 Tab）。 */}
+                agent 按代码供应商编写规则生成 spec 源码（不自动写入，用户自行复制到「代码」子 Tab）。 */}
             {activeTab === 'code' && (
               <CodeChannelEditorTabs
                 value={safeString(detail.code)}
@@ -5713,30 +5792,23 @@ export function UnifiedProviderModal({
               />
             )}
 
-            {/* 渠道配置 */}
+            {/* 供应商配置 */}
             {activeTab === 'config' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                <SectionBlock title={protocolEditorEnabled ? '协议配置' : '渠道配置（协议类参数只读）'}>
+                <SectionBlock title={protocolEditorEnabled ? '协议配置' : '供应商配置（协议类参数只读）'}>
                   <div style={grid2Style}>
                     <div>
-                      <label style={labelStyle}>渠道地址</label>
+                      <label style={labelStyle}>供应商地址</label>
                       <input
                         value={safeString(detail.base_url)}
                         onChange={(e) => setDetail((prev) => prev ? { ...prev, base_url: e.target.value } : prev)}
                         onPaste={(e) => {
-                          // 粘贴以 /v1（或 /v1/）结尾的地址时直接去掉尾部 /v1：模型列表/对话路径已带 /v1 前缀，
-                          // 保留会拼出重复的 /v1。仅在确实需要裁剪时才拦截默认粘贴，避免干扰正常输入。
-                          const pasted = e.clipboardData.getData('text')
-                          if (!pasted) return
-                          const input = e.currentTarget
-                          const start = input.selectionStart ?? input.value.length
-                          const end = input.selectionEnd ?? input.value.length
-                          const combined = input.value.slice(0, start) + pasted + input.value.slice(end)
-                          const stripped = combined.replace(/\/v1\/?\s*$/i, '')
-                          if (stripped !== combined) {
-                            e.preventDefault()
-                            setDetail((prev) => prev ? { ...prev, base_url: stripped } : prev)
-                          }
+                          // 粘贴带 /v1 结尾的地址时裁掉尾部（见 stripPastedTrailingV1）。
+                          // 仅在确实需要裁剪时才拦截默认粘贴，避免干扰正常输入。
+                          const stripped = stripPastedTrailingV1(e.currentTarget, e.clipboardData.getData('text'))
+                          if (stripped === null) return
+                          e.preventDefault()
+                          setDetail((prev) => prev ? { ...prev, base_url: stripped } : prev)
                         }}
                         style={inputStyle}
                         disabled={!protocolEditorEnabled}
@@ -5755,7 +5827,7 @@ export function UnifiedProviderModal({
                               <CircleQuestionMark size={14} strokeWidth={1.8} />
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent style={{ zIndex: 1100 }}>选定渠道后的同账号原地重试次数；留空则不做内层重试，由全局重试负责换路</TooltipContent>
+                          <TooltipContent style={{ zIndex: 1100 }}>选定供应商后的同账号原地重试次数；留空则不做内层重试，由全局重试负责换路</TooltipContent>
                         </Tooltip>
                       </label>
                       <input
@@ -5957,7 +6029,7 @@ export function UnifiedProviderModal({
                                   <div>
                                     <label style={labelStyle}>支持模型（多选，空=全部）</label>
                                     {models.length === 0 ? (
-                                      <div style={{ color: 'var(--text2)', fontSize: '12px' }}>渠道下暂无模型</div>
+                                      <div style={{ color: 'var(--text2)', fontSize: '12px' }}>供应商下暂无模型</div>
                                     ) : (
                                       <ComboMultiSelect
                                         value={(cp.models || []).filter((mid) => models.some((m) => safeString(m.upstream_model_id || m.model_id) === mid))}
@@ -5977,7 +6049,7 @@ export function UnifiedProviderModal({
                           )
                         })}
                         {chatProtocols.length === 0 && (
-                          <div style={{ color: 'var(--red, #dc2626)', fontSize: '13px' }}>暂无对话协议：至少添加一条协议行才能保存，否则该渠道无法发送对话请求。</div>
+                          <div style={{ color: 'var(--red, #dc2626)', fontSize: '13px' }}>暂无对话协议：至少添加一条协议行才能保存，否则该供应商无法发送对话请求。</div>
                         )}
                       </div>
                       <div style={grid2Style}>
@@ -5998,37 +6070,29 @@ export function UnifiedProviderModal({
             {/* 模型列表 */}
             {activeTab === 'models' && (
               upstreamSelectMode ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%' }}>
-                  <div style={{ ...panelStyle, display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-                    <input value={upstreamSearch} onChange={(e) => setUpstreamSearch(e.target.value)} placeholder="搜索上游模型 / 模型 ID" style={{ ...inputStyle, flex: '0 1 220px' }} />
-                    <button onClick={() => setVisibleUpstreamSelection(true)} disabled={upstreamVisibleKeys.length === 0} style={btnGhost}>全选</button>
-                    <button onClick={() => setVisibleUpstreamSelection(false)} disabled={upstreamVisibleKeys.length === 0} style={btnGhost}>全取消</button>
-                    {previewRewriteToggle}
-                    <span style={{ fontSize: '13px', color: 'var(--text2)', marginLeft: 'auto' }}>已选 {upstreamSelected.size} / {upstreamDraftModels.length}，当前筛选 {upstreamVisibleSelectedCount} / {upstreamVisibleKeys.length}</span>
-                    <button onClick={confirmUpstreamSelection} style={btnPrimary}>确认</button>
-                    <button onClick={cancelUpstreamSelection} style={btnGhost}>取消</button>
-                  </div>
-                  <ProviderModelTable
-                    entries={upstreamVisibleEntries}
-                    emptyText={previewApplyRewrite && hasRewriteRules ? '没有命中规则的上游模型——自动更新后这些都不会进库' : '没有匹配的上游模型'}
-                    selectable
-                    selected={upstreamSelected}
-                    onToggleSelected={(key, checked) => setUpstreamSelected((prev) => {
-                      const next = new Set(prev)
-                      if (checked) next.add(key)
-                      else next.delete(key)
-                      return next
-                    })}
-                    onDeleteRow={(_, index) => {
-                      setUpstreamDraftModels((prev) => prev.filter((__, i) => i !== index))
-                      setUpstreamSelected((prev) => {
-                        const next = new Set(prev)
-                        next.delete(modelDraftKey(upstreamDraftModels[index], index))
-                        return next
+                <UpstreamModelPicker
+                  draftModels={upstreamDraftModels}
+                  hasRewriteRules={hasRewriteRules}
+                  defaultSelectedKeys={upstreamSelected}
+                  onConfirm={(selectedRows) => {
+                    // 导入只按勾选集走：开关是纯显示作用，不影响导入哪些行。
+                    // 过滤 is_regex 只在定时更新（refresh_models）里做，那是数据层的事。
+                    const existingByUpstream = new Map<string, ProviderModelEntry>()
+                    models.forEach((model) => {
+                      const upstream = safeString(model.upstream_model_id).trim()
+                      if (upstream) existingByUpstream.set(upstream, model)
+                    })
+                    setModels(selectedRows
+                      .map((row) => {
+                        const upstream = safeString(row.upstream_model_id).trim()
+                        const existing = upstream ? existingByUpstream.get(upstream) : undefined
+                        return compactProviderModelRow(existing ? { ...row, ...existing, upstream_model_id: upstream } : row)
                       })
-                    }}
-                  />
-                </div>
+                      .filter((row) => row.upstream_model_id))
+                    cancelUpstreamSelection()
+                  }}
+                  onCancel={cancelUpstreamSelection}
+                />
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%' }}>
                   <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -6131,7 +6195,7 @@ export function UnifiedProviderModal({
                       setFreezeRules(next.rules)
                     }}
                   />
-                  {/* 渠道级开关：控制失败命中冻结规则时，已冻结对象是否按新周期刷新 TTL（与规则同存于 freeze_policy）。 */}
+                  {/* 供应商级开关：控制失败命中冻结规则时，已冻结对象是否按新周期刷新 TTL（与规则同存于 freeze_policy）。 */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', background: 'var(--bg3)', borderRadius: 'var(--admin-radius)', border: '1px solid var(--admin-border)', marginTop: '10px' }}>
                     <span
                       role="button"
@@ -6140,7 +6204,7 @@ export function UnifiedProviderModal({
                     >{freezeRefreshOnFailure ? '开' : '关'}</span>
                     <span style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.5 }}>
                       <b style={{ color: 'var(--text)' }}>失败刷新冻结周期</b>：开 → 每次失败命中规则都按新周期重设冻结 TTL；关 → 已冻结对象保留剩余时间，不被后续失败刷新（未冻结对象仍正常冻结）。对所有请求生效，含定时检测。
-                      <span title="渠道级属性，随冻结策略一起保存；对正常请求、定时检测、响应头规则一视同仁。检测/请求成功仍会解除临时冻结和账号永久冻结，不受此开关影响。" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 14, height: 14, marginLeft: 4, borderRadius: '50%', border: '1px solid var(--admin-border)', fontSize: 10, color: 'var(--text2)', cursor: 'help' }}>?</span>
+                      <span title="供应商级属性，随冻结策略一起保存；对正常请求、定时检测、响应头规则一视同仁。检测/请求成功仍会解除临时冻结和账号永久冻结，不受此开关影响。" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 14, height: 14, marginLeft: 4, borderRadius: '50%', border: '1px solid var(--admin-border)', fontSize: 10, color: 'var(--text2)', cursor: 'help' }}>?</span>
                     </span>
                   </div>
                 </SectionBlock>
@@ -6149,8 +6213,8 @@ export function UnifiedProviderModal({
 
             {/* 账号管理 */}
             {activeTab === 'accounts' && (
-              // 渠道已落库（编辑态 / 创建态点过保存后）→ 用完整账号管理组件；
-              // 创建态尚未落库 → 用创建态账号编辑器，先填好用户名/凭据，点保存时随渠道一起提交（见 buildCreateAccountsPayload）。
+              // 供应商已落库（编辑态 / 创建态点过保存后）→ 用完整账号管理组件；
+              // 创建态尚未落库 → 用创建态账号编辑器，先填好用户名/凭据，点保存时随供应商一起提交（见 buildCreateAccountsPayload）。
               resolvedId
                 ? <AccountsTab providerId={resolvedId} builtinType={detail.builtin_type || ''} active={open && activeTab === 'accounts'} onEditingChange={handleAccountEditingChange} />
                 : (
@@ -6169,7 +6233,7 @@ export function UnifiedProviderModal({
             {activeTab === 'stats' && (
               resolvedId
                 ? <ProviderStatsTab providerName={resolvedId} active={open && activeTab === 'stats'} />
-                : <div style={{ ...panelStyle, color: 'var(--text2)', textAlign: 'center', fontSize: '13px', padding: '32px 16px' }}>渠道创建后才有统计数据。</div>
+                : <div style={{ ...panelStyle, color: 'var(--text2)', textAlign: 'center', fontSize: '13px', padding: '32px 16px' }}>供应商创建后才有统计数据。</div>
             )}
 
             {/* 测试 */}
@@ -6180,7 +6244,7 @@ export function UnifiedProviderModal({
                     <AccountTestTab providerId={resolvedId} protocol={safeString(detail.protocol) || null} active={open && activeTab === 'test'} />
                   </div>
                 )
-                : <div style={{ ...panelStyle, color: 'var(--text2)', textAlign: 'center', fontSize: '13px', padding: '32px 16px' }}>渠道创建后才能测试。</div>
+                : <div style={{ ...panelStyle, color: 'var(--text2)', textAlign: 'center', fontSize: '13px', padding: '32px 16px' }}>供应商创建后才能测试。</div>
             )}
           </>
         )}
@@ -6315,7 +6379,7 @@ export function UnifiedProviderModal({
         </div>
       </Modal>
 
-      {/* 渠道模型编辑态 */}
+      {/* 供应商模型编辑态 */}
       <ModelEditorModal
         open={editingModel !== null}
         row={editingModel?.row ?? null}
@@ -6332,7 +6396,7 @@ export function UnifiedProviderModal({
         }}
       />
 
-      {/* 过滤及改写规则：改动直接落草稿，跟随渠道「保存」一起提交 */}
+      {/* 过滤及改写规则：改动直接落草稿，跟随供应商「保存」一起提交 */}
       <Modal
         open={rewriteRulesOpen && !!detail}
         title="过滤及改写规则"
@@ -6389,7 +6453,7 @@ const PROTOCOL_OPTIONS = [
 const PROTOCOL_PATH_NOTES: Record<string, { placeholder: string; note: string }> = {
   gemini: {
     placeholder: '/v1beta/models/{model}:{method}',
-    note: 'Gemini 把模型名和流式方法写在 URL 里，所以这里填模板：{model} 替换为请求模型，{method} 替换为 generateContent（非流式）或 streamGenerateContent?alt=sse（流式）。自建/中转上游按其实际前缀填写，例如 /gemini/v1beta/models/{model}:{method}；只写到 /v1beta/models 这类前缀时会自动补 /{model}:{method}；填绝对 URL 则忽略渠道地址直连。留空则按官方形态 /v1beta/models/{model}:{method} 拼接。',
+    note: 'Gemini 把模型名和流式方法写在 URL 里，所以这里填模板：{model} 替换为请求模型，{method} 替换为 generateContent（非流式）或 streamGenerateContent?alt=sse（流式）。自建/中转上游按其实际前缀填写，例如 /gemini/v1beta/models/{model}:{method}；只写到 /v1beta/models 这类前缀时会自动补 /{model}:{method}；填绝对 URL 则忽略供应商地址直连。留空则按官方形态 /v1beta/models/{model}:{method} 拼接。',
   },
 }
 
@@ -6530,31 +6594,496 @@ const REASONING_EFFORT_OPTIONS = [
 // category: 1 = CustomProvider 继承（可改超时/定时更新/客户端伪装/兼容模式）
 // category: 2 = BaseProvider 直接继承（可改超时/定时更新）
 const BUILTIN_TYPE_OPTIONS = [
-  { value: '', label: '通用渠道', category: 0 },
+  { value: '', label: '通用供应商', category: 0 },
   { value: 'cloudflare', label: 'Cloudflare Workers AI', category: 1 },
-  // 自定义渠道（原「代码渠道」）：贴一个 spec 类即跑（底层适配器是 CustomProvider 子类，没写的钩子回落配置驱动）。
+  // 自定义供应商（原「代码供应商」）：贴一个 spec 类即跑（底层适配器是 CustomProvider 子类，没写的钩子回落配置驱动）。
   // 归 category 2 表示「请求行为可被贴的代码接管」；协议配置仍完整开放，spec 未覆盖时框架按它发上游。
-  // 原先硬编码的 copilot/codebuddy/eaichat 下拉项已下架为自定义渠道，不再在此枚举。
-  { value: 'code', label: '自定义渠道', category: 2 },
+  // 原先硬编码的 copilot/codebuddy/eaichat 下拉项已下架为自定义供应商，不再在此枚举。
+  { value: 'code', label: '自定义供应商', category: 2 },
 ]
 
-// 继承 CustomProvider 且走标准通用渠道口径的内置渠道：在前端可完整编辑协议配置
-// （base_url / 路径 / 对话协议行等），与通用渠道一致。
-// 自定义渠道的 spec 类没覆盖聊天钩子时完全走配置驱动，覆盖了也常读 base_url/协议行，
+// 继承 CustomProvider 且走标准通用供应商口径的内置供应商：在前端可完整编辑协议配置
+// （base_url / 路径 / 对话协议行等），与通用供应商一致。
+// 自定义供应商的 spec 类没覆盖聊天钩子时完全走配置驱动，覆盖了也常读 base_url/协议行，
 // 故同样暴露完整协议编辑（base_url 校验在 handleSave 单独豁免）。
 const PROTOCOL_EDITABLE_BUILTIN_TYPES = new Set<string>(['code'])
 
-// 判断渠道类别：0=通用渠道，1=CustomProvider继承，2=BaseProvider继承
+// 判断供应商类别：0=通用供应商，1=CustomProvider继承，2=BaseProvider继承
 function getProviderCategory(builtinType: string): number {
   if (!builtinType) return 0
   return BUILTIN_TYPE_OPTIONS.find((o) => o.value === builtinType)?.category ?? 0
 }
 
-// 该内置渠道是否在前端暴露完整协议配置编辑（与通用渠道一致）。
-// category 0（通用渠道）恒为 true；内置渠道仅 PROTOCOL_EDITABLE_BUILTIN_TYPES 命中时为 true。
+// 该内置供应商是否在前端暴露完整协议配置编辑（与通用供应商一致）。
+// category 0（通用供应商）恒为 true；内置供应商仅 PROTOCOL_EDITABLE_BUILTIN_TYPES 命中时为 true。
 function isProtocolEditableBuiltin(builtinType?: string | null): boolean {
   if (!builtinType) return false
   return PROTOCOL_EDITABLE_BUILTIN_TYPES.has(builtinType)
+}
+
+// ── 添加供应商向导 ───────────────────────────────────────────────────────────
+//
+// 把「加一个供应商」收敛成只问必需的东西，取代原先「先选类型、再进 9 Tab 大表单」的流程：
+//   普通供应商：选择供应商 → 供应商信息（名字/地址/密钥）→ 供应商模型
+//   代码供应商：选择供应商 → 代码供应商（源码）；账号创建后在编辑弹框里逐个加
+// 选模板时，模板自带的供应商名字 / 地址 / 供应商模型直接带入第 2、3 步。
+//
+// 建完不在向导里继续配：落库后直接打开 UnifiedProviderModal 的 edit 态（按 id 加载），
+// 协议 / 冻结策略 / 数据统计 / 测试这些进阶项全在那边，向导不重复实现。
+
+/** 生成供应商账号的 username：后端要求唯一且非空，向导里用户看不到也不需要它，
+ *  所以给一个随机串，真正的「名字」放 price_remark（账号表用户名下方小字显示）。 */
+function randomKeyUsername(): string {
+  let suffix = ''
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  for (let i = 0; i < 6; i += 1) suffix += alphabet[Math.floor(Math.random() * alphabet.length)]
+  return `k-${suffix}`
+}
+
+export function ChannelCreateWizard({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean
+  onClose: () => void
+  /** 供应商已落库：父层负责刷新列表并打开该供应商的编辑弹框。 */
+  onCreated: (name: string) => void
+}) {
+  const [entry, setEntry] = useState<ChannelCatalogEntry | null>(null)
+  const [step, setStep] = useState(0)
+
+  // 第 2 步「供应商信息」（普通供应商）
+  const [remark, setRemark] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [bulkKeys, setBulkKeys] = useState('')
+  const [accountId, setAccountId] = useState('')
+
+  // 代码供应商：第 2 步源码（建供应商）；第 3 步账号直接复用 AccountsTab——
+  // 它按 providerId 拉 account_schema 渲染字段，设备码/回调授权也都支持。
+  const [code, setCode] = useState('')
+
+  // 最后一步「供应商模型」
+  const [models, setModels] = useState<ProviderModelEntry[]>([])
+  const [editingModel, setEditingModel] = useState<{ row: ProviderModelEntry; index: number; isNew: boolean } | null>(null)
+  const [upstreamDraft, setUpstreamDraft] = useState<ProviderModelEntry[] | null>(null)
+  const [loadingUpstream, setLoadingUpstream] = useState(false)
+
+  // 普通供应商：第 2 步点「创建并下一步」时落库拿到的 id。一旦有了，第 3 步就在这个
+  // 真供应商上拉上游 / 存模型；回到第 2 步只允许前进，不再重复建。
+  const [createdName, setCreatedName] = useState<string | null>(null)
+
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // 目录里只认已知内置类型：老模板/脏数据里的 'custom' 之类会让后端报
+  // 「未知的内置供应商类型」，此处直接丢弃回落通用供应商。
+  const builtinType = BUILTIN_TYPE_OPTIONS.some((o) => o.value === (entry?.builtin_type || ''))
+    ? (entry?.builtin_type || '')
+    : ''
+  const isCode = builtinType === 'code'
+  const authMode = getChannelAuthMode(builtinType, builtinType)
+  const isCloudflare = authMode === 'cloudflare'
+  const isPasswordLike = authMode === 'password_login' || authMode === 'schema'
+
+  const steps = isCode ? ['选择供应商', '代码', '账号', '供应商模型'] : ['选择供应商', '供应商信息', '供应商模型']
+
+  // 每次打开重置：向导是「一次用完就丢」的流程，不留上一轮残留。
+  useEffect(() => {
+    if (open) return
+    setEntry(null)
+    setStep(0)
+    setRemark('')
+    setBaseUrl('')
+    setBulkKeys('')
+    setAccountId('')
+    setCode('')
+    setModels([])
+    setEditingModel(null)
+    setUpstreamDraft(null)
+    setCreatedName(null)
+    setError(null)
+  }, [open])
+
+  /** 选中供应商类型：模板/内置自带的预设直接带入，用户只需补密钥。 */
+  const selectEntry = (next: ChannelCatalogEntry) => {
+    const preset = next.preset || {}
+    setEntry(next)
+    setRemark(safeString(preset.remark).trim() || safeString(next.name).trim())
+    setBaseUrl(safeString(preset.base_url).trim())
+    setCode(safeString(preset.code))
+    // 供应商模型：模板的 chat_protocols[].models 与 preset.models 都是「这个供应商有哪些模型」
+    // 的声明，合并去重后作为第 3 步的初值（口径同 templatePresetFromManifest）。
+    const presetModels = Array.isArray(preset.models) ? preset.models.map(String) : []
+    const protocolModels = Array.isArray(preset.chat_protocols)
+      ? preset.chat_protocols.flatMap((row) => Array.isArray(row?.models) ? row.models.map(String) : [])
+      : []
+    setModels(Array.from(new Set([...presetModels, ...protocolModels].filter(Boolean))).map((m) => buildModelRow({ upstream_model_id: m, model_id: m })))
+    setStep(1)
+  }
+
+  const goBack = () => {
+    setError(null)
+    if (step === 0) return
+    // 从第 2 步退回 = 重选供应商类型；退回后原来的选择保留着，重选会整体覆盖。
+    setStep(step - 1)
+  }
+
+  /** 有效密钥：批量粘贴框里每行一个，行序即落库顺序（备注 = 密钥N 按行号编号）。 */
+  const collectedKeys = (): string[] => bulkKeys.split('\n').map((line) => line.trim()).filter(Boolean)
+
+  const buildAccounts = () => {
+    const keys = collectedKeys()
+    return keys.map((value, index) => {
+      // 后端账号行接受任意字段（price_remark/account_id 等都随 JSONB 落库）；
+      // 这里显式列字段是为了让 TS 能把它认成 createCustomProvider 的 accounts 元素类型。
+      const base: { username: string; price_remark?: string; switch?: boolean; api_key?: string; password?: string; account_id?: string } = {
+        username: randomKeyUsername(),
+        // 备注即用户在向导里看到的名字（账号表用户名下方小字展示）。
+        price_remark: `密钥${index + 1}`,
+        switch: true,
+      }
+      if (isCloudflare) {
+        base.api_key = value
+        base.account_id = accountId.trim()
+      } else if (isPasswordLike) {
+        base.password = value
+      } else {
+        base.api_key = value
+      }
+      return base
+    })
+  }
+
+  /** 协议行：模板/目录预设自带；通用供应商目录也自带一条 openai 行。空则兜底一条 openai。 */
+  const presetChatProtocols: ChatProtocolConfig[] = useMemo(() => {
+    const rows = entry?.preset?.chat_protocols
+    if (Array.isArray(rows) && rows.length > 0) return normalizeChatProtocolRows(rows)
+    return [buildChatProtocolRow('openai')]
+  }, [entry])
+
+  /** 组装建供应商的 POST 载荷：普通供应商带账号+模型，代码供应商带源码、不带账号。 */
+  const buildCreatePayload = () => {
+    const preset = entry?.preset || {}
+    return {
+      builtin_type: builtinType || undefined,
+      remark: remark.trim(),
+      tags: normalizeProviderTags(preset.tags),
+      enabled: preset.enabled !== false,
+      website_url: safeString(preset.website_url).trim() || undefined,
+      icon: safeString(preset.icon).trim() || undefined,
+      base_url: baseUrl.trim(),
+      models_path: safeString(preset.models_path).trim() || undefined,
+      image_path: safeString(preset.image_path).trim() || undefined,
+      video_path: safeString(preset.video_path).trim() || undefined,
+      speech_path: safeString(preset.speech_path).trim() || undefined,
+      timeout: safeNumber(preset.timeout, 120),
+      retry_count: preset.retry_count ?? null,
+      extra_retry_status_codes: preset.extra_retry_status_codes,
+      rate_limit: { ...(preset.rate_limit ?? {}) },
+      billing_mode: preset.billing_mode === 'request' ? ('request' as const) : ('token' as const),
+      auto_update_models: preset.auto_update_models ?? false,
+      model_id_rewrite_rules: normalizeModelIdRewriteRules(preset.model_id_rewrite_rules),
+      account_priority: safeNumber(preset.account_priority),
+      account_weight: safeNumber(preset.account_weight),
+      // 协议行取模板预设；通用供应商目录自带一条 openai 行。代码供应商的 spec 自管请求，
+      // 但也需要一条行来满足后端「chat_protocols 不能为空」。
+      chat_protocols: presetChatProtocols,
+      accounts: isCode ? [] : buildAccounts(),
+      code: isCode ? code : undefined,
+      // 模板已带入的模型随创建一起落库；最后一步的改动走 replaceProviderModels。
+      models: isCode ? undefined : models.map((row) => compactProviderModelRow(row)),
+    }
+  }
+
+  /** 把上游模型列表并进草稿：已存在的行保留用户改过的 model_id / extra_config。 */
+  const mergeUpstreamRows = (rows: ProviderModelEntry[]) => {
+    const existingByUpstream = new Map<string, ProviderModelEntry>()
+    models.forEach((model) => {
+      const upstream = safeString(model.upstream_model_id).trim()
+      if (upstream) existingByUpstream.set(upstream, model)
+    })
+    setModels(rows.map((row) => {
+      const upstream = safeString(row.upstream_model_id).trim()
+      const existing = upstream ? existingByUpstream.get(upstream) : undefined
+      return compactProviderModelRow(existing ? { ...row, ...existing, upstream_model_id: upstream } : row)
+    }).filter((row) => row.upstream_model_id))
+  }
+
+  const fetchUpstream = async () => {
+    if (!createdName) return
+    setLoadingUpstream(true)
+    setError(null)
+    try {
+      // 供应商已在第 2 步落库，直接用真供应商的 upstream-models 接口探上游。
+      const data = await getProviderUpstreamModels(createdName)
+      const list = (Array.isArray(data.upstream_models) ? data.upstream_models : [])
+        .map((item) => buildUpstreamModelRow(item))
+        .filter((row) => safeString(row.upstream_model_id).trim())
+      if (list.length === 0) {
+        setError('上游返回了 0 个模型')
+        return
+      }
+      setUpstreamDraft(list)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '获取上游模型失败')
+    } finally {
+      setLoadingUpstream(false)
+    }
+  }
+
+  /** 第 2 步（普通=供应商信息 / 代码=代码）「创建并下一步」：校验后建供应商，成功即进下一步。
+   *  普通带账号+模型；代码只带源码（账号在第 3 步按真 schema 加）。 */
+  const createAndAdvance = async () => {
+    if (!entry) return
+    if (isCode) {
+      if (!code.trim()) { setError('供应商源码不能为空'); return }
+    } else {
+      if (!remark.trim()) { setError('供应商名字不能为空'); return }
+      if (!baseUrl.trim()) { setError('供应商地址不能为空'); return }
+      if (collectedKeys().length === 0) { setError('至少填写一个密钥'); return }
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await createCustomProvider(buildCreatePayload())
+      setCreatedName(res.name)
+      setStep(step + 1)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建供应商失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 最后一步：把模型存回真供应商，然后交给父层开编辑弹框。 */
+  const finalSubmit = async () => {
+    if (!createdName) return
+    setSaving(true)
+    setError(null)
+    try {
+      if (models.length > 0) await replaceProviderModels(createdName, models)
+      onCreated(createdName)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存模型失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const isLastStep = step === steps.length - 1
+  // 第 2 步（普通=供应商信息 / 代码=代码）是「创建并下一步」：点了就建供应商再进下一步。
+  // 已创建（从后面退回）只前进不重建。
+  const isCreateStep = step === 1
+  const nextLabel = isLastStep
+    ? ''
+    : (isCreateStep ? (createdName ? '下一步' : (saving ? '创建中...' : '创建并下一步')) : '下一步')
+
+  const footer = (
+    <>
+      {error && (
+        <div style={{ padding: '10px 14px', marginBottom: '12px', background: 'rgba(251, 113, 133, 0.1)', border: '1px solid var(--red)', borderRadius: 'var(--admin-radius)', fontSize: '14px', color: 'var(--red)' }}>{error}</div>
+      )}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+        <button onClick={step === 0 ? onClose : goBack} disabled={saving} style={btnGhost}>
+          <ChevronLeft style={btnIcon} />{step === 0 ? '取消' : '上一步'}
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span style={{ fontSize: '12px', color: 'var(--text2)' }}>第 {step + 1} / {steps.length} 步</span>
+          {isLastStep ? (
+            <button onClick={() => void finalSubmit()} disabled={saving || !entry} style={btnPrimary}>
+              <Check style={btnIcon} />{saving ? '保存中...' : '完成'}
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setError(null)
+                if (isCreateStep) { if (createdName) setStep(step + 1); else void createAndAdvance() }
+                else setStep(step + 1)
+              }}
+              disabled={saving || !entry}
+              style={btnPrimary}
+            >{nextLabel}</button>
+          )}
+        </div>
+      </div>
+    </>
+  )
+
+  return (
+    <Modal
+      open={open}
+      title={`添加供应商 · ${steps[step]}`}
+      onClose={onClose}
+      maxWidth={1180}
+      fixedHeight="88vh"
+      contentOverflow="hidden"
+      footer={footer}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '16px' }}>
+        {/* 步骤条：只读指示，点击回退交给「上一步」，避免跳步留下半填状态。 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', flex: '0 0 auto' }}>
+          {steps.map((label, index) => (
+            <span key={label} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {index > 0 && <span style={{ color: 'var(--text2)' }}>›</span>}
+              <span style={{
+                fontSize: '13px',
+                fontWeight: index === step ? 700 : 500,
+                color: index === step ? 'var(--textH)' : 'var(--text2)',
+                padding: '3px 10px',
+                borderRadius: '999px',
+                background: index === step ? 'var(--bg3)' : 'transparent',
+                border: `1px solid ${index === step ? 'var(--admin-border)' : 'transparent'}`,
+              }}>{label}</span>
+            </span>
+          ))}
+          {entry && <span style={{ marginLeft: 'auto', fontSize: '12px', color: 'var(--text2)' }}>已选：{entry.name}</span>}
+        </div>
+
+        <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {step === 0 && <ChannelCatalogSelector embedded onSelect={selectEntry} />}
+
+          {/* 第 2 步（普通供应商）：供应商信息 */}
+          {step === 1 && !isCode && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', overflowY: 'auto' }}>
+              <div style={grid2Style}>
+                <div>
+                  <label style={labelStyle}>供应商名字 *</label>
+                  <input value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="如 某某供应商" style={inputStyle} />
+                </div>
+                <div>
+                  <label style={labelStyle}>供应商地址 *</label>
+                  <input
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    onPaste={(e) => {
+                      const stripped = stripPastedTrailingV1(e.currentTarget, e.clipboardData.getData('text'))
+                      if (stripped === null) return
+                      e.preventDefault()
+                      setBaseUrl(stripped)
+                    }}
+                    placeholder="https://api.example.com"
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+              {isCloudflare && (
+                <div>
+                  <label style={labelStyle}>Cloudflare Account ID *</label>
+                  <input value={accountId} onChange={(e) => setAccountId(e.target.value)} placeholder="Cloudflare Account ID" style={inputStyle} />
+                  <span style={{ fontSize: '12px', color: 'var(--text2)' }}>该供应商下所有密钥共用同一个 Account ID。</span>
+                </div>
+              )}
+
+              <SectionBlock title="密钥">
+                <div style={{ fontSize: '12px', color: 'var(--text2)', lineHeight: 1.6 }}>
+                  每行一个，粘贴多行即批量添加。按行号自动命名为「密钥1、密钥2…」，账号表上以备注展示。
+                </div>
+                <textarea
+                  value={bulkKeys}
+                  onChange={(e) => setBulkKeys(e.target.value)}
+                  placeholder={'sk-aaa\nsk-bbb\nsk-ccc'}
+                  rows={6}
+                  style={{ ...inputStyle, fontFamily: 'var(--fontM)', resize: 'vertical' }}
+                />
+                {collectedKeys().length > 0 && (
+                  <div style={{ fontSize: '12px', color: 'var(--text2)' }}>将创建 {collectedKeys().length} 个账号。</div>
+                )}
+              </SectionBlock>
+            </div>
+          )}
+
+          {/* 第 2 步（代码供应商）：源码 */}
+          {step === 1 && isCode && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%', minHeight: 0 }}>
+              <div>
+                <label style={labelStyle}>供应商地址</label>
+                <input
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  onPaste={(e) => {
+                    const stripped = stripPastedTrailingV1(e.currentTarget, e.clipboardData.getData('text'))
+                    if (stripped === null) return
+                    e.preventDefault()
+                    setBaseUrl(stripped)
+                  }}
+                  placeholder="spec 自管请求时可留空"
+                  style={inputStyle}
+                />
+                <span style={{ fontSize: '12px', color: 'var(--text2)' }}>
+                  源码里写 <code>REQUIRES_BASE_URL = False</code> 可豁免必填；账号在创建后的「账号管理」里逐个添加。
+                </span>
+              </div>
+              <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                <CodeChannelEditorTabs value={code} onChange={setCode} />
+              </div>
+            </div>
+          )}
+
+          {/* 第 3 步（代码供应商）：账号。供应商已在第 2 步落库，复用 AccountsTab——
+              它按 providerId 拉后端 account_schema 渲染 spec 声明的字段，
+              设备码 / 回调授权、手动表单都跟编辑弹框同一套，不再写死用户名/密码。 */}
+          {step === 2 && isCode && createdName && (
+            <AccountsTab providerId={createdName} builtinType="code" active={open} />
+          )}
+
+          {/* 最后一步：供应商模型 */}
+          {step === steps.length - 1 && (
+            upstreamDraft ? (
+              <UpstreamModelPicker
+                draftModels={upstreamDraft}
+                hasRewriteRules={false}
+                // 默认勾选：模板已带入模型时只勾这些（口径同供应商弹窗），列表为空才全选。
+                defaultSelectedKeys={(() => {
+                  const existingUpstreams = new Set(models.map((m) => safeString(m.upstream_model_id).trim()).filter(Boolean))
+                  return new Set(upstreamDraft
+                    .map((row, index) => ({ key: modelDraftKey(row, index), upstream: safeString(row.upstream_model_id).trim() }))
+                    .filter(({ upstream }) => models.length === 0 || existingUpstreams.has(upstream))
+                    .map(({ key }) => key))
+                })()}
+                onConfirm={(rows) => { mergeUpstreamRows(rows); setUpstreamDraft(null) }}
+                onCancel={() => setUpstreamDraft(null)}
+              />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%' }}>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button onClick={() => setEditingModel({ row: buildModelRow(), index: -1, isNew: true })} style={btnPrimary}>新增模型</button>
+                  <button onClick={() => void fetchUpstream()} disabled={loadingUpstream} style={btnGhost}>
+                    {loadingUpstream ? '拉取中...' : '获取上游模型'}
+                  </button>
+                  <button onClick={() => setModels([])} style={btnDanger}>清空列表</button>
+                  <span style={{ fontSize: '13px', color: 'var(--text2)', marginLeft: 'auto' }}>共 {models.length} 个模型</span>
+                </div>
+                <ProviderModelTable
+                  entries={models.map((row, index) => ({ row, index }))}
+                  emptyText="暂无模型，可新增、或点「获取上游模型」从上游拉取；也可以创建后再配"
+                  onToggleEnabled={(_, index) => {
+                    setModels((prev) => prev.map((item, i) => i === index ? { ...item, enabled: item.enabled === false } : item))
+                  }}
+                  onEditRow={(row, index) => setEditingModel({ row, index, isNew: false })}
+                  onDeleteRow={(_, index) => setModels((prev) => prev.filter((__, i) => i !== index))}
+                />
+              </div>
+            )
+          )}
+        </div>
+      </div>
+
+      <ModelEditorModal
+        open={editingModel !== null}
+        row={editingModel?.row ?? null}
+        isNew={editingModel?.isNew ?? false}
+        onClose={() => setEditingModel(null)}
+        onSave={(row) => {
+          if (!editingModel) return
+          const next = compactProviderModelRow(row)
+          setModels((prev) => editingModel.isNew
+            ? [...prev, next]
+            : prev.map((item, i) => i === editingModel.index ? next : item))
+        }}
+      />
+    </Modal>
+  )
 }
 
 function ProviderCard({
@@ -6574,7 +7103,7 @@ function ProviderCard({
 }) {
   const status = getProviderStatus(provider)
   const statusColor = getStatusColor(status)
-  const title = provider.remark || '未命名渠道'
+  const title = provider.remark || '未命名供应商'
   const websiteUrl = safeString(provider.website_url).trim()
   // 未配置（或配置了无法识别的值）时整个图标位不渲染，不用默认图标兜底。
   const iconValue = safeString(provider.icon).trim()
@@ -6670,7 +7199,7 @@ function ProviderCard({
                 <button
                   onClick={() => onToggle(provider.id, provider.enabled)}
                   disabled={isLoading}
-                  title={provider.enabled ? '点击禁用该渠道' : '点击启用该渠道'}
+                  title={provider.enabled ? '点击禁用该供应商' : '点击启用该供应商'}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -6783,16 +7312,17 @@ export function Channels() {
   const [modalProvider, setModalProvider] = useState<ProviderSummary | null>(null)
   const [modalInitialTab, setModalInitialTab] = useState<ProviderTab>('overview')
   const [createModalOpen, setCreateModalOpen] = useState(false)
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [initialBuiltinType, setInitialBuiltinType] = useState('')
-  const [catalogOpen, setCatalogOpen] = useState(false)
   const [createPreset, setCreatePreset] = useState<ProviderCreatePreset | null>(null)
-  // 标记 createPreset 来源：'catalog' = 从渠道目录新选（自定义/内置模板，timeout 应走前端默认 120）；
-  // 'copy' = 复制现有渠道（必须保留源 timeout）。用于 initCreate 区分两条路径。
+  // 标记 createPreset 来源：'catalog' = 从供应商目录新选（自定义/内置模板，timeout 应走前端默认 120）；
+  // 'copy' = 复制现有供应商（必须保留源 timeout）。用于 initCreate 区分两条路径。
   const [createPresetOrigin, setCreatePresetOrigin] = useState<'catalog' | 'copy' | null>(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null)
 
-  // 接收来自模型元数据 provider 标签的 ?provider=<name>，立即应用到搜索过滤并高亮匹配渠道
+  // 接收来自模型元数据 provider 标签的 ?provider=<name>，立即应用到搜索过滤并高亮匹配供应商
   useEffect(() => {
     if (providerParam) {
       setSearch(providerParam)
@@ -6808,7 +7338,7 @@ export function Channels() {
       setLastRefreshTime(new Date())
       return data
     } catch (err) {
-      setError(err instanceof Error ? err.message : '获取渠道列表失败')
+      setError(err instanceof Error ? err.message : '获取供应商列表失败')
       setProviders([])
       return []
     } finally {
@@ -6848,8 +7378,8 @@ export function Channels() {
       } catch (err) {
         setError(
           err instanceof Error
-            ? `${!currentEnabled ? '启用' : '禁用'}渠道失败: ${err.message}`
-            : `${!currentEnabled ? '启用' : '禁用'}渠道失败`,
+            ? `${!currentEnabled ? '启用' : '禁用'}供应商失败: ${err.message}`
+            : `${!currentEnabled ? '启用' : '禁用'}供应商失败`,
         )
       } finally {
         setActionLoading((prev) => {
@@ -6870,7 +7400,7 @@ export function Channels() {
         await loadProviders()
       } catch (err) {
         setError(
-          err instanceof Error ? `删除渠道失败: ${err.message}` : '删除渠道失败',
+          err instanceof Error ? `删除供应商失败: ${err.message}` : '删除供应商失败',
         )
         throw err
       } finally {
@@ -6904,7 +7434,7 @@ export function Channels() {
     [deleteProviderConfirmed, deleteTarget],
   )
 
-  // 复制渠道：打开新增弹框并预填配置，用户点击创建才真正落库
+  // 复制供应商：打开新增弹框并预填配置，用户点击创建才真正落库
   const handleCopy = useCallback(
     async (provider: ProviderSummary) => {
       const id = provider.id
@@ -6927,7 +7457,7 @@ export function Channels() {
           models: Array.isArray(row.models) ? row.models.map(String) : [],
         }))
         setCreatePreset({
-          remark: `${detail.remark || '未命名渠道'} (副本)`,
+          remark: `${detail.remark || '未命名供应商'} (副本)`,
           tags: normalizeProviderTags(detail.tags),
           enabled: detail.enabled,
           protocol: detail.protocol,
@@ -6952,7 +7482,7 @@ export function Channels() {
           accounts: accounts.map((a) => ({ api_key: safeString(a.password ?? a.api_key ?? a.key), username: safeString(a.username) })),
           models: detail.models ?? [],
           // 复制时原样带过：能力开关、健康检查、定时检测、会话清理此前被漏带，
-          // 源渠道配了也会在新建草稿里丢失。
+          // 源供应商配了也会在新建草稿里丢失。
           supports_image_generation: detail.supports_image_generation,
           supports_video_generation: detail.supports_video_generation,
           supports_tts: detail.supports_tts,
@@ -6966,9 +7496,9 @@ export function Channels() {
       } catch (err) {
         // 复制失败必须显式提示：页面级 error 只在 providers.length===0 分支渲染，
         // 列表非空时它会被吞掉，用户点击「复制」后毫无反馈，看不到弹框也看不到错误。
-        const msg = err instanceof Error ? err.message : '复制渠道失败'
-        window.alert(`复制渠道失败: ${msg}`)
-        setError(`复制渠道失败: ${msg}`)
+        const msg = err instanceof Error ? err.message : '复制供应商失败'
+        window.alert(`复制供应商失败: ${msg}`)
+        setError(`复制供应商失败: ${msg}`)
       } finally {
         setActionLoading((prev) => {
           const next = { ...prev }
@@ -7023,7 +7553,7 @@ export function Channels() {
 
   const matchesAutoUpdateFilter = (p: ProviderSummary, filter: ProviderAutoUpdateFilter) => {
     if (filter === 'all') return true
-    // 缺省视为开启：与运行时口径一致（refresh_models 对未配置的渠道默认自动更新）。
+    // 缺省视为开启：与运行时口径一致（refresh_models 对未配置的供应商默认自动更新）。
     const autoUpdate = p.auto_update_models !== false
     return filter === 'on' ? autoUpdate : !autoUpdate
   }
@@ -7110,14 +7640,18 @@ export function Channels() {
 
   return (
     <AdminPage
-      title="渠道管理"
-      description="配置和管理模型服务渠道"
+      title="供应商"
+      description="配置和管理模型服务供应商（原「供应商」）"
       contentStyle={{}}
       primaryActions={
         <div className="flex items-center gap-2">
-          <ManagerHeaderActionButton onClick={() => setCatalogOpen(true)}>
+          <ManagerHeaderActionButton onClick={() => setWizardOpen(true)}>
             <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-            添加渠道
+            添加供应商
+          </ManagerHeaderActionButton>
+          <ManagerHeaderActionButton onClick={() => setImportOpen(true)}>
+            <CloudDownload className="size-4" />
+            导入外部渠道
           </ManagerHeaderActionButton>
           <ManagerRefreshButton loading={loading} onClick={() => void loadProviders()} />
           <ManagerHeaderActionButton
@@ -7168,7 +7702,7 @@ export function Channels() {
                   return next
                 }, { replace: true })
               }}
-              placeholder="搜索名称 / 备注 / 渠道地址 / 协议"
+              placeholder="搜索名称 / 备注 / 供应商地址 / 协议"
               style={{ ...inputStyle, width: '240px', minWidth: '200px' }}
             />
             <input
@@ -7198,8 +7732,8 @@ export function Channels() {
               style={{ ...selectStyle, width: '140px', minWidth: '140px' }}
             >
               <option value="all">全部类型</option>
-              <option value="generic">通用渠道</option>
-              <option value="custom">自定义渠道</option>
+              <option value="generic">通用供应商</option>
+              <option value="custom">自定义供应商</option>
               <option value="builtin">内置</option>
             </select>
             <select
@@ -7219,7 +7753,7 @@ export function Channels() {
               value={autoUpdateFilter}
               onChange={(e) => setAutoUpdateFilter(e.target.value as ProviderAutoUpdateFilter)}
               style={{ ...selectStyle, width: '136px', minWidth: '136px' }}
-              title="按「定时更新模型」开关过滤渠道"
+              title="按「定时更新模型」开关过滤供应商"
             >
               <option value="all">自动更新：全部</option>
               <option value="on">自动更新：开</option>
@@ -7282,7 +7816,7 @@ export function Channels() {
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {loading && providers.length === 0 ? (
-          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>正在加载渠道数据...</div>
+          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>正在加载供应商数据...</div>
         ) : error && providers.length === 0 ? (
           <div style={{ padding: '24px 0', color: 'var(--red)' }}>
             <div style={{ marginBottom: '12px' }}>{error}</div>
@@ -7291,9 +7825,9 @@ export function Channels() {
             </button>
           </div>
         ) : providers.length === 0 ? (
-          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>暂无渠道数据</div>
+          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>暂无供应商数据</div>
         ) : filteredProviders.length === 0 ? (
-          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>无匹配渠道</div>
+          <div style={{ padding: '24px 0', color: 'var(--text2)' }}>无匹配供应商</div>
         ) : (
           <div
             style={{
@@ -7326,20 +7860,25 @@ export function Channels() {
         onChanged={() => { void loadProviders() }}
       />
 
-      <ChannelCatalogSelector
-        open={catalogOpen}
-        onOpenChange={setCatalogOpen}
-        onSelect={(entry) => {
-          setCreatePreset(entry.preset)
-          setCreatePresetOrigin('catalog')
-          // 只认已知内置类型：老模板/脏数据里的 'custom' 等非法值会让新建报
-          // 「未知的内置渠道类型」，此处直接丢弃回落自定义渠道。
-          const knownType = BUILTIN_TYPE_OPTIONS.some((o) => o.value === (entry.builtin_type || ''))
-            ? (entry.builtin_type || '')
-            : ''
-          setInitialBuiltinType(knownType)
-          setCreateModalOpen(true)
+      <ChannelCreateWizard
+        open={wizardOpen}
+        onClose={() => setWizardOpen(false)}
+        onCreated={async (name) => {
+          // 供应商已落库：刷新列表拿到完整 summary，再按编辑态打开它，完成「创建后进编辑弹框」。
+          const list = await loadProviders()
+          const found = list.find((p) => p.id === name)
+          if (found) {
+            setModalProvider(found)
+            setModalInitialTab('basic')
+          }
+          setWizardOpen(false)
         }}
+      />
+
+      <ExternalChannelImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onImported={() => { void loadProviders() }}
       />
 
       <UnifiedProviderModal
@@ -7350,19 +7889,13 @@ export function Channels() {
         presetData={createPreset}
         presetFromCatalog={createPresetOrigin === 'catalog'}
         onClose={() => { setCreateModalOpen(false); setCreatePreset(null); setCreatePresetOrigin(null); setInitialBuiltinType('') }}
-        onBack={() => {
-          // 退回渠道类型选择：关掉新建弹框、保留 preset 以便重新进，
-          // 重新打开选择器（onSelect 时没关它，但用户可能手动关过）。
-          setCreateModalOpen(false)
-          setCatalogOpen(true)
-        }}
         onChanged={() => { void loadProviders() }}
       />
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确定删除渠道「{deleteTarget?.remark || deleteTarget?.id}」吗？</AlertDialogTitle>
+            <AlertDialogTitle>确定删除供应商「{deleteTarget?.remark || deleteTarget?.id}」吗？</AlertDialogTitle>
             <AlertDialogDescription>此操作不可恢复。</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

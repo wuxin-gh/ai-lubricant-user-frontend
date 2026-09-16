@@ -7,14 +7,13 @@ import { useTranslation } from "react-i18next"
 import { ManagerPageActions } from "@/components/manager/manager-header-actions"
 import { toast } from "sonner"
 
-// 管理端项目详情直接复用用户侧 ProjectOverviewPage（信息卡 + info/issues/
-// tasks/editors 四个 tab）。管理员跨用户读取由后端 privileged 角色越权保证，
-// 这里不需要再写一套只读表格。
+// 管理端项目详情直接复用用户侧项目工作区（信息条 + 功能页）。管理员跨用户读取由
+// 后端 privileged 角色越权保证，这里不需要再写一套只读表格。
 //
-// ProjectOverviewPage 内部的 ProjectInfo / tasks-tab / editor-tab 通过
-// useCommonData 读取节点、模型、项目列表等共享数据；这些数据来自用户侧的
-// DataProvider，因此管理端在此子树外层套上同一个 Provider 即可复用。
-import ProjectOverviewPage from "@/pages/console/user/project/overview"
+// ProjectWorkspace / 功能页通过 useCommonData 读取节点、模型、项目列表等共享数据；
+// 这些数据来自用户侧的 DataProvider，因此管理端在此子树外层套上同一个 Provider 即可复用。
+import ProjectWorkspace from "@/pages/console/user/project/overview"
+import ProjectSectionView from "@/pages/console/user/project/overview/sections"
 import { useCallback, useState } from "react"
 
 function ManagerProjectDetailInner() {
@@ -44,14 +43,16 @@ function ManagerProjectDetailInner() {
       <ManagerPageActions
         primary={<ManagerRefreshButton loading={refreshing} onClick={() => void handleRefresh()} />}
         overflow={(
-          <Button variant="ghost" size="sm" onClick={() => navigate("/manager/projects")}>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/ops/projects")}>
             <IconArrowLeft className="size-4" />
             {t("managerProjectDetail.back")}
           </Button>
         )}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
-        <ProjectOverviewPage />
+        <ProjectWorkspace>
+          <ProjectSectionView />
+        </ProjectWorkspace>
       </div>
     </div>
   )

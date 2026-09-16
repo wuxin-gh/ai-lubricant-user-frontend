@@ -462,7 +462,7 @@ export default function McpPage() {
       api={userManagerApi}
       onOpenAgent={(principalId) => {
         void getAgentByMcpUser(principalId).then((r) => {
-          if (r.agent_id != null) window.location.href = `/console/agents?agentId=${r.agent_id}`
+          if (r.agent_id != null) window.location.href = `/agent-mode/manage?agentId=${r.agent_id}`
           else toast.error("该 principal 未绑定 Agent")
         }).catch((e) => toast.error(e instanceof Error ? e.message : "反查 Agent 失败"))
       }}
@@ -662,6 +662,9 @@ export default function McpPage() {
     <div className="flex h-full min-h-0 w-full flex-col">
       <ResourceCenterShell
         defaultTab="mcp"
+        // 二级 Tab 已提为侧栏一级导航项（config/modes.ts 的 resources 模式），
+        // 页面内不再重复画一份 Tab 栏；切换由导航改 ?tab= 驱动。
+        showTabList={false}
         tabs={[
           { value: "mcp", label: "MCP", content: mcpSection },
           {

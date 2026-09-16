@@ -25,6 +25,10 @@ import {
   type UpdateEditorPayload,
 } from "@/api/editorClient"
 import { ProjectPromptSelector } from "@/components/console/editor/project-prompt-selector"
+import { CODING_SECTIONS, codingSectionPath } from "@/config/coding-sections"
+
+/** 编辑器旧入口的落点：任务页（编辑器管理已并入任务/项目工作区）。 */
+const TASKS_SECTION = CODING_SECTIONS.find((s) => s.path === "tasks") ?? CODING_SECTIONS[0]
 
 type ConfigEntry = Record<string, unknown>
 
@@ -35,7 +39,7 @@ function configEntries(value: unknown): ConfigEntry[] {
 }
 
 /**
- * 编辑器详情独立路由页 (/console/editor/:editorId)。
+ * 编辑器详情独立路由页 (/coding/editor/:editorId)。
  * 编辑器与项目一对一，项目 id 从编辑器详情返回体取得，仅用于项目级兼容操作。
  */
 export default function EditorDetailPage() {
@@ -114,8 +118,8 @@ export default function EditorDetailPage() {
   const projectId = editor?.project_id || ""
 
   function backToTable() {
-    if (projectId) navigate(`/console/project/${projectId}?tab=editors`)
-    else navigate("/console/tasks")
+    if (projectId) navigate(codingSectionPath(projectId, TASKS_SECTION))
+    else navigate("/home")
   }
 
   function openConfig() {

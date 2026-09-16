@@ -3,7 +3,7 @@
  * 从 admin-frontend 的 antd 版重写为 shadcn；数据层继续复用 `@/@admin-port/api/*`（纯 axios）。
  * 交互、状态、API 调用、校验与错误路径与原版保持一致。
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { Check, ChevronsUpDown, CircleHelp, Copy, Eye, GripVertical, Pencil, Plus, RefreshCw, Settings2, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -46,9 +46,11 @@ import {
   getModelRoutingWithFallback,
   updateModelGroup,
 } from '@/@admin-port/api/modelRouting'
-import { getProviderAccounts } from '@/@admin-port/api/providers'
-import type { ModelRouteProvider, ModelRoutingResponse, ProviderAccount } from '@/@admin-port/types/admin'
+import { getProviderAccounts, getProviders } from '@/@admin-port/api/providers'
+import { getModelMetadata, updateRealModelRouting, type ModelMetadataEntry, type ModelMetadataResponse, type RealModelScheme } from '@/@admin-port/api/modelMetadata'
+import type { ModelRouteProvider, ModelRoutingResponse, ProviderAccount, ProviderLite } from '@/@admin-port/types/admin'
 import { UnifiedProviderModal } from './Channels'
+import { RealModelRoutingDialog, type RealModelRoutingTarget } from './RealModelRouting'
 
 // ==================== Draft 类型 ====================
 
@@ -191,7 +193,7 @@ function groupDraftFromRaw(name?: string, raw?: Record<string, unknown>): GroupD
     remark: textValue(raw.remark),
     enabled: boolValue(raw.enabled, true),
     aliases: stringList(raw.aliases),
-    // 顶层三字段 = 激活方案的投影，保证卡片与可用渠道口径一致。
+    // 顶层三字段 = 激活方案的投影，保证卡片与可用供应商口径一致。
     models: active.models,
     provider_whitelist: active.provider_whitelist,
     provider_blacklist: active.provider_blacklist,
@@ -245,10 +247,10 @@ function providerFilterSummary(record: Record<string, unknown>): string {
   const blacklist = stringList(record.provider_blacklist)
   if (whitelist.length) return `白名单：${whitelist.join(', ')}`
   if (blacklist.length) return `黑名单：${blacklist.join(', ')}`
-  return '不限制渠道'
+  return '不限制供应商'
 }
 
-// 单个可用渠道视图：渠道 + 命中的成员模型 + 渠道账号
+// 单个可用供应商视图：供应商 + 命中的成员模型 + 供应商账号
 interface AvailableChannel {
   name: string
   remark: string
@@ -257,8 +259,8 @@ interface AvailableChannel {
   matchedModels: string[]
 }
 
-// 计算某自定义模型的可用渠道：与后端 model_group_allows_provider 一致的白/黑名单判定，
-// 叠加"渠道确实承载该组任一成员模型"的交集判定。只读展示，不改变路由行为。
+// 计算某自定义模型的可用供应商：与后端 model_group_allows_provider 一致的白/黑名单判定，
+// 叠加"供应商确实承载该组任一成员模型"的交集判定。只读展示，不改变路由行为。
 function computeAvailableChannels(draft: GroupDraft, providers: ModelRouteProvider[]): AvailableChannel[] {
   const whitelist = new Set(draft.provider_whitelist)
   const blacklist = new Set(draft.provider_blacklist)
@@ -281,7 +283,7 @@ function computeAvailableChannels(draft: GroupDraft, providers: ModelRouteProvid
   return result
 }
 
-// 卡片上模型/渠道过滤标签的最大展示数量，超出折叠为"+N"
+// 卡片上模型/供应商过滤标签的最大展示数量，超出折叠为"+N"
 const CARD_TAG_LIMIT = 5
 
 // ==================== 色调与标签 ====================
@@ -322,14 +324,14 @@ function ColorTag({ tone, className, children }: { tone: TagTone; className?: st
   )
 }
 
-// 卡片上的渠道过滤：白/黑名单以标签展示并截断到前 N 个，其余折叠为"+N"；不限制时给一句说明。
-// 标签文案取渠道备注名（resolveLabel），白名单用绿色、黑名单用橙色区分。
+// 卡片上的供应商过滤：白/黑名单以标签展示并截断到前 N 个，其余折叠为"+N"；不限制时给一句说明。
+// 标签文案取供应商备注名（resolveLabel），白名单用绿色、黑名单用橙色区分。
 function renderFilterTags(record: Record<string, unknown>, resolveLabel: (name: string) => string): ReactNode {
   const whitelist = stringList(record.provider_whitelist)
   const blacklist = stringList(record.provider_blacklist)
   const items = whitelist.length ? whitelist : blacklist
   if (!items.length) {
-    return <span className="text-[13px] text-muted-foreground">不限制渠道</span>
+    return <span className="text-[13px] text-muted-foreground">不限制供应商</span>
   }
   const tone: TagTone = whitelist.length ? 'green' : 'orange'
   const overflow = items.slice(CARD_TAG_LIMIT)
@@ -352,7 +354,7 @@ function renderFilterTags(record: Record<string, unknown>, resolveLabel: (name: 
   )
 }
 
-// 账号状态徽标：与渠道页 getAccountBadge 口径一致（已冻结 > 已禁用 > 认证态）
+// 账号状态徽标：与供应商页 getAccountBadge 口径一致（已冻结 > 已禁用 > 认证态）
 type AccountBadge = { label: string; tone: StatusTone }
 function getAccountBadge(a: ProviderAccount): AccountBadge {
   if (a.cooldown) return { label: '已冻结', tone: 'yellow' }
@@ -366,10 +368,10 @@ function getAccountBadge(a: ProviderAccount): AccountBadge {
   return { label: '待检查', tone: 'muted' }
 }
 
-// 渠道级状态：由账号态聚合。有可用账号（已认证且未冻结未禁用）即为"可用"，
+// 供应商级状态：由账号态聚合。有可用账号（已认证且未冻结未禁用）即为"可用"，
 // 否则若全部冻结/禁用/未认证则相应降级；无账号则"无可用账号"。
 function summarizeChannelStatus(enabled: boolean, accounts: ProviderAccount[] | undefined): AccountBadge {
-  if (!enabled) return { label: '渠道已禁用', tone: 'muted' }
+  if (!enabled) return { label: '供应商已禁用', tone: 'muted' }
   if (accounts === undefined) return { label: '加载中', tone: 'muted' }
   if (!accounts.length) return { label: '无账号', tone: 'muted' }
   const usable = accounts.some((a) => a.switch !== false && !a.cooldown && a.auth === true)
@@ -383,7 +385,7 @@ function summarizeChannelStatus(enabled: boolean, accounts: ProviderAccount[] | 
 
 const gridStyle: CSSProperties = {
   display: 'grid',
-  // 卡片最小宽度取 420px：保证底部四个操作按钮（详情/渠道状态/复制/删除）恒定同行不换行。
+  // 卡片最小宽度取 420px：保证底部四个操作按钮（详情/供应商状态/复制/删除）恒定同行不换行。
   gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
   gap: '14px',
 }
@@ -429,7 +431,7 @@ export interface Option {
   label: string
 }
 
-// 渠道白/黑名单/模型搜索：同时按 value 与 label 过滤（对齐原 providerFilterOption）
+// 供应商白/黑名单/模型搜索：同时按 value 与 label 过滤（对齐原 providerFilterOption）
 function optionMatches(option: Option, keyword: string): boolean {
   const k = keyword.trim().toLowerCase()
   if (!k) return true
@@ -437,7 +439,7 @@ function optionMatches(option: Option, keyword: string): boolean {
 }
 
 // 多选：Popover + Command 手动过滤（替代 antd Select mode="multiple"）
-// 真实模型选路弹框复用同一控件，两处渠道标签选择行为一致。
+// 真实模型选路弹框复用同一控件，两处供应商标签选择行为一致。
 export function MultiSelect({
   value,
   onChange,
@@ -742,7 +744,7 @@ function RouteSchemeEditor({
                     options={modelOptions.map((m) => ({ value: m, label: m }))}
                   />
                 </Field>
-                <Field label="渠道标签白名单" hint="只在所选渠道中调用该方案，留空表示不限制；仅列出承载了已选成员模型的渠道">
+                <Field label="供应商标签白名单" hint="只在所选供应商中调用该方案，留空表示不限制；仅列出承载了已选成员模型的供应商">
                   <MultiSelect
                     value={scheme.provider_whitelist}
                     onChange={(values) => onUpdateScheme(realIdx, { provider_whitelist: values })}
@@ -750,7 +752,7 @@ function RouteSchemeEditor({
                     options={whitelistOptions}
                   />
                 </Field>
-                <Field label="渠道标签黑名单" hint="排除所选渠道，留空表示不限制；仅列出承载了已选成员模型的渠道">
+                <Field label="供应商标签黑名单" hint="排除所选供应商，留空表示不限制；仅列出承载了已选成员模型的供应商">
                   <MultiSelect
                     value={scheme.provider_blacklist}
                     onChange={(values) => onUpdateScheme(realIdx, { provider_blacklist: values })}
@@ -793,7 +795,7 @@ function RouteSchemeEditor({
                     options={modelOptions.map((m) => ({ value: m, label: m }))}
                   />
                 </Field>
-                <Field label="渠道标签白名单" hint="只在所选渠道中调用该方案，留空表示不限制；仅列出承载了已选成员模型的渠道">
+                <Field label="供应商标签白名单" hint="只在所选供应商中调用该方案，留空表示不限制；仅列出承载了已选成员模型的供应商">
                   <MultiSelect
                     value={scheme.provider_whitelist}
                     onChange={(values) => onPatchSchemeEdit({ provider_whitelist: values })}
@@ -801,7 +803,7 @@ function RouteSchemeEditor({
                     options={whitelistOptions}
                   />
                 </Field>
-                <Field label="渠道标签黑名单" hint="排除所选渠道，留空表示不限制；仅列出承载了已选成员模型的渠道">
+                <Field label="供应商标签黑名单" hint="排除所选供应商，留空表示不限制；仅列出承载了已选成员模型的供应商">
                   <MultiSelect
                     value={scheme.provider_blacklist}
                     onChange={(values) => onPatchSchemeEdit({ provider_blacklist: values })}
@@ -931,10 +933,10 @@ export function ModelRouting() {
   return (
     <TooltipProvider>
       <AdminPage
-        title="自定义模型"
-        description="以卡片管理自定义模型；支持别名、渠道过滤与备用模型；保存、启停、删除都只作用于当前项。"
+        title="模型策略"
+        description="自定义模型（别名/多方案）与真实模型供应商策略（白/黑名单、备用方案）合并管理。同表不同 kind：自定义模型走 /admin/model-groups，真实模型策略走 /admin/model-metadata 的 routing 窄写。"
       >
-        <ModelRoutingContent />
+        <ModelRoutingContent registerTopRefresh />
       </AdminPage>
     </TooltipProvider>
   )
@@ -944,13 +946,16 @@ export function ModelRouting() {
  * 自定义模型内容（不含 AdminPage/TooltipProvider 外壳），供模型广场页作为 tab 嵌入。
  * 整页 ModelRouting 只是在本内容外再包一层 AdminPage + TooltipProvider。
  */
-export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRefresh }: { createSignal?: number; refreshSignal?: number; registerTopRefresh?: boolean } = {}) {
+export function ModelRoutingContent({ createSignal: createSignalProp, refreshSignal, registerTopRefresh }: { createSignal?: number; refreshSignal?: number; registerTopRefresh?: boolean } = {}) {
   const [data, setData] = useState<ModelRoutingResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [groupModal, setGroupModal] = useState<GroupModalState | null>(null)
   const [saving, setSaving] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
+  // 内部新增触发器：standalone 页面（registerTopRefresh）不再由父组件传 createSignal，
+  // 顶栏「新增自定义模型」按钮递增这个本地计数器，复用同一 openGroup 效应。
+  const [createSignal, setCreateSignal] = useState(createSignalProp ?? 0)
   // 方案区视图：
   //  current = 直接编辑当前启用方案（默认态，底部弹框保存可用）
   //  manage  = 已有方案列表（可编辑/删除/切换当前方案；切换只改 draft，底部弹框保存可用）
@@ -958,22 +963,39 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
   const [schemeView, setSchemeView] = useState<'current' | 'manage' | 'edit'>('current')
   // edit 态的编辑缓冲：target 为已有方案下标，或 'new' 表示新增（保存前不落 draft）
   const [schemeEdit, setSchemeEdit] = useState<{ target: number | 'new'; scheme: Scheme } | null>(null)
-  // 查看可用渠道弹框：记录被查看的自定义模型名，渠道数据从已加载的 data.providers 现算
+  // 查看可用供应商弹框：记录被查看的自定义模型名，供应商数据从已加载的 data.providers 现算
   const [channelsModal, setChannelsModal] = useState<{ name: string; draft: GroupDraft } | null>(null)
-  // 弹框打开时按命中渠道逐个拉取账号实时状态：{ 渠道名: 账号列表 }；渠道级状态由账号态聚合而来
+  // 弹框打开时按命中供应商逐个拉取账号实时状态：{ 供应商名: 账号列表 }；供应商级状态由账号态聚合而来
   const [channelAccounts, setChannelAccounts] = useState<Record<string, ProviderAccount[]>>({})
   const [channelsLoading, setChannelsLoading] = useState(false)
-  // 就地打开的渠道编辑弹框：只需渠道 id，其余数据由弹框自行按 id 拉取
+  // 就地打开的供应商编辑弹框：只需供应商 id，其余数据由弹框自行按 id 拉取
   const [editorProviderId, setEditorProviderId] = useState<string | null>(null)
+
+  // 真实模型供应商策略：与自定义模型同表（model_groups kind=real），但走
+  // /admin/model-metadata 的 models[]。这里只列「配了策略的」——白/黑名单非空
+  // 或 schemes 非空（含备用）。RealModelRoutingDialog 复用与模型广场页同款。
+  const [realMeta, setRealMeta] = useState<ModelMetadataResponse | null>(null)
+  const [realProviders, setRealProviders] = useState<ProviderLite[]>([])
+  const [realRoutingId, setRealRoutingId] = useState<string | null>(null)
+  const [realSaving, setRealSaving] = useState(false)
+  const [realPickerOpen, setRealPickerOpen] = useState(false)
+  // 「新增模型策略」选择弹框的筛选词：真实模型多时按 model_id / 名称快速定位。
+  const [realPickerSearch, setRealPickerSearch] = useState('')
 
   const loadData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const result = await getModelRoutingWithFallback()
+      const [result, meta, providersData] = await Promise.all([
+        getModelRoutingWithFallback(),
+        getModelMetadata().catch(() => null as ModelMetadataResponse | null),
+        getProviders({ lite: true }).catch(() => [] as ProviderLite[]),
+      ])
       setData(result)
+      if (meta) setRealMeta(meta)
+      setRealProviders(providersData)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '获取自定义模型配置失败')
+      setError(err instanceof Error ? err.message : '获取模型策略配置失败')
       setData(null)
     } finally {
       setLoading(false)
@@ -1012,17 +1034,75 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
     .map(modelName)
     .filter(Boolean) ?? []
   const groupOptions = groupEntries.map(({ name }) => name).filter(Boolean)
-  // 渠道内部名 -> 展示名（备注优先）；卡片与弹框统一按备注名展示渠道
+  // 供应商内部名 -> 展示名（备注优先）；卡片与弹框统一按备注名展示供应商
   const providerLabel = (providerName: string): string => {
     const hit = providers.find((p) => p.name === providerName)
     return hit ? hit.remark || hit.name : providerName
   }
 
+  // 真实模型供应商策略列表：只列「配了策略的」（白/黑名单非空，或 schemes 含显式方案）。
+  // 后端 _normalize_schemes 对无配置行合成一套默认方案，故这里用顶层白/黑名单作为
+  // 「显式配置」判据，schemes.length > 1（多方案）也视为已配置。
+  const realStrategyEntries = useMemo(() => {
+    const rows = realMeta?.models ?? []
+    return rows.filter((m) => {
+      const wl = (m.provider_whitelist ?? []).filter(Boolean)
+      const bl = (m.provider_blacklist ?? []).filter(Boolean)
+      const schemes = m.schemes ?? []
+      return wl.length > 0 || bl.length > 0 || schemes.length > 1
+    })
+  }, [realMeta])
+
+  // 「新增模型策略」选择弹框里筛选后的真实模型列表：匹配 model_id 与名称。
+  const pickerModels = useMemo(() => {
+    const rows = realMeta?.models ?? []
+    const query = realPickerSearch.trim().toLowerCase()
+    if (!query) return rows
+    return rows.filter((m) => {
+      const id = (m.model_id || m.id || '').toLowerCase()
+      const name = (m.name || '').toLowerCase()
+      return id.includes(query) || name.includes(query)
+    })
+  }, [realMeta, realPickerSearch])
+
+  const realProviderLabel = useCallback((providerName: string): string => {
+    const hit = realProviders.find((p) => p.name === providerName)
+    return hit ? hit.remark || hit.name : providerName
+  }, [realProviders])
+
+  // RealModelRoutingDialog 的目标行：从 realMeta.models 按 model_id 取最新。
+  const realRoutingTarget = useMemo<RealModelRoutingTarget | null>(() => {
+    if (!realRoutingId) return null
+    const model = realMeta?.models?.find((m) => (m.model_id || m.id) === realRoutingId)
+    if (!model) return null
+    return {
+      model_id: model.model_id || model.id || '',
+      provider_whitelist: (model.provider_whitelist ?? []).filter(Boolean),
+      provider_blacklist: (model.provider_blacklist ?? []).filter(Boolean),
+      schemes: model.schemes ?? [],
+      active_scheme: model.active_scheme ?? '',
+    }
+  }, [realRoutingId, realMeta])
+
+  // 真实模型策略保存：窄写 PUT /admin/model-metadata/{id}/routing，只改供应商过滤/方案。
+  const saveRealRouting = useCallback(async (body: { schemes: RealModelScheme[]; active_scheme: string }) => {
+    const modelId = realRoutingId
+    if (!modelId) return
+    setRealSaving(true)
+    try {
+      await updateRealModelRouting(modelId, body)
+      setRealRoutingId(null)
+      await loadData()
+    } finally {
+      setRealSaving(false)
+    }
+  }, [loadData, realRoutingId])
+
   const setGroupDraft = (updater: (draft: GroupDraft) => GroupDraft) => {
     setGroupModal((current) => (current ? { ...current, draft: updater(current.draft) } : current))
   }
 
-  // 把激活方案（按 id 定位）的三字段投影回顶层 models/白/黑名单，保证卡片与可用渠道口径一致。
+  // 把激活方案（按 id 定位）的三字段投影回顶层 models/白/黑名单，保证卡片与可用供应商口径一致。
   const projectActive = (draft: GroupDraft): GroupDraft => {
     const active = draft.schemes.find((s) => s.id === draft.activeScheme) ?? draft.schemes[0]
     if (!active) return { ...draft, models: [], provider_whitelist: [], provider_blacklist: [] }
@@ -1168,7 +1248,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
       return
     }
     // 整组 PUT 依赖完整 schemes；打开详情前拉取最新快照，避免卡片缓存过期。
-    // 同时更新 data，确保详情中的渠道下拉列表反映渠道页刚完成的变更。
+    // 同时更新 data，确保详情中的供应商下拉列表反映供应商页刚完成的变更。
     let latest = raw
     try {
       const fresh = await getModelRouting()
@@ -1181,7 +1261,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
     setGroupModal({ mode: 'edit', originalName: name, draft: groupDraftFromRaw(name, latest) })
   }
 
-  // 按命中渠道逐个拉取账号实时状态；供打开弹框与手动刷新复用
+  // 按命中供应商逐个拉取账号实时状态；供打开弹框与手动刷新复用
   const loadChannelAccounts = useCallback(async (draft: GroupDraft) => {
     const matched = computeAvailableChannels(draft, providers)
     setChannelAccounts({})
@@ -1351,7 +1431,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
             )}
           </div>
           <div>
-            <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">渠道过滤</div>
+            <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">供应商过滤</div>
             {renderFilterTags(raw, providerLabel)}
           </div>
           <div>
@@ -1428,7 +1508,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
             <Pencil /> 详情
           </Button>
           <Button variant="ghost" size="sm" className="shrink-0 whitespace-nowrap text-muted-foreground" onClick={() => openChannels(name, raw)}>
-            <Eye /> 渠道状态
+            <Eye /> 供应商状态
           </Button>
           <Button variant="ghost" size="sm" className="shrink-0 whitespace-nowrap text-muted-foreground" onClick={() => void copyGroup(name, raw)}>
             <Copy /> 复制
@@ -1441,7 +1521,63 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
     )
   }
 
-  // ==================== 可用渠道弹框 ====================
+  // 真实模型供应商策略卡片：与自定义模型卡片同网格，标题区分「真实模型」徽标。
+  // 点卡片或编辑按钮打开 RealModelRoutingDialog（与模型元数据页同款）。
+  const renderRealStrategyCard = (model: ModelMetadataEntry) => {
+    const modelId = model.model_id || model.id || ''
+    const whitelist = (model.provider_whitelist ?? []).filter(Boolean)
+    const blacklist = (model.provider_blacklist ?? []).filter(Boolean)
+    const schemes = model.schemes ?? []
+    const backups = schemes.filter((s) => s.is_backup && s.id !== (model.active_scheme ?? '')).length
+    return (
+      <article key={`real::${modelId}`} className="relative overflow-hidden rounded-lg border bg-card p-[18px] shadow-sm">
+        <div className="mb-3 flex justify-between gap-3">
+          <div className="flex flex-col gap-1.5">
+            <h3 className="m-0 text-lg font-semibold text-foreground" title={modelId}>{model.name || modelId}</h3>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <ColorTag tone="blue">真实模型</ColorTag>
+              <ColorTag tone="green">{modelId}</ColorTag>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setRealRoutingId(modelId)}>
+              <Pencil className="size-3.5" /> 编辑策略
+            </Button>
+          </div>
+        </div>
+        <div className="flex flex-col gap-3">
+          <div>
+            <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">供应商过滤</div>
+            {whitelist.length ? (
+              <div className="flex flex-wrap items-center gap-1">
+                <ColorTag tone="green">白名单</ColorTag>
+                {whitelist.slice(0, CARD_TAG_LIMIT).map((p) => <ColorTag key={p} tone="default">{realProviderLabel(p)}</ColorTag>)}
+                {whitelist.length > CARD_TAG_LIMIT ? <ColorTag tone="default">+{whitelist.length - CARD_TAG_LIMIT}</ColorTag> : null}
+              </div>
+            ) : blacklist.length ? (
+              <div className="flex flex-wrap items-center gap-1">
+                <ColorTag tone="orange">黑名单</ColorTag>
+                {blacklist.slice(0, CARD_TAG_LIMIT).map((p) => <ColorTag key={p} tone="default">{realProviderLabel(p)}</ColorTag>)}
+                {blacklist.length > CARD_TAG_LIMIT ? <ColorTag tone="default">+{blacklist.length - CARD_TAG_LIMIT}</ColorTag> : null}
+              </div>
+            ) : (
+              <span className="text-[13px] text-muted-foreground">多方案降级（{schemes.length} 套）</span>
+            )}
+          </div>
+          {backups > 0 ? (
+            <div>
+              <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">备用方案</div>
+              <div className="flex flex-wrap items-center gap-1">
+                <ColorTag tone="orange">备用 {backups}</ColorTag>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </article>
+    )
+  }
+
+  // ==================== 可用供应商弹框 ====================
 
   const renderChannelsModal = () => {
     if (!channelsModal) return null
@@ -1453,19 +1589,19 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
       <Dialog open onOpenChange={(o) => { if (!o) setChannelsModal(null) }}>
         <DialogContent className="flex max-h-[88vh] w-[92vw] max-w-[1600px] sm:max-w-[1600px] flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>{`查看渠道状态 · ${title}`}</DialogTitle>
+            <DialogTitle>{`查看供应商状态 · ${title}`}</DialogTitle>
           </DialogHeader>
           <div className="flex max-h-[72vh] flex-col gap-4 overflow-auto pr-1">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <Alert className="min-w-[320px] flex-1">
                 <AlertDescription>
                   <span>
-                    当前配置下命中 <b>{channels.length}</b> 个渠道、<b>{totalAccounts}</b> 个渠道账号。
+                    当前配置下命中 <b>{channels.length}</b> 个供应商、<b>{totalAccounts}</b> 个供应商账号。
                     {' '}
                     {providerFilterSummary(groups[name] as Record<string, unknown> ?? {})}。
                   </span>
                   <span className="mt-1 block text-muted-foreground">
-                    按渠道白/黑名单叠加「渠道确实承载该自定义模型任一成员模型」的交集计算；账号与渠道状态为拉取时的实时快照，可点刷新更新。
+                    按供应商白/黑名单叠加「供应商确实承载该自定义模型任一成员模型」的交集计算；账号与供应商状态为拉取时的实时快照，可点刷新更新。
                   </span>
                 </AlertDescription>
               </Alert>
@@ -1492,7 +1628,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
                           </Badge>
                         </div>
                         <Button variant="link" size="sm" className="h-auto p-0" onClick={() => void openChannelEditor(channel.name)}>
-                          <Pencil /> 编辑渠道
+                          <Pencil /> 编辑供应商
                         </Button>
                       </div>
                       <div className="mb-2.5">
@@ -1504,7 +1640,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
                         </div>
                       </div>
                       <div>
-                        <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">渠道账号（{channel.accounts.length}）</div>
+                        <div className="mb-1.5 text-[11px] font-extrabold text-muted-foreground">供应商账号（{channel.accounts.length}）</div>
                         {accounts === undefined ? (
                           <span className="flex items-center gap-1.5 text-[13px] text-muted-foreground"><Spinner className="size-3" /> 状态加载中…</span>
                         ) : channel.accounts.length ? (
@@ -1538,7 +1674,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
             ) : (
               <Empty>
                 <EmptyHeader>
-                  <EmptyDescription>当前没有承载该自定义模型成员模型且符合渠道过滤的渠道</EmptyDescription>
+                  <EmptyDescription>当前没有承载该自定义模型成员模型且符合供应商过滤的供应商</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}
@@ -1556,8 +1692,8 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
   const renderGroupModal = () => {
     if (!groupModal) return null
     const draft = groupModal.draft
-    // 白/黑名单选择渠道标签；标签选项标注当前承载所选成员模型的渠道数量。
-    // 已选标签始终保留，避免渠道标签调整后无法从历史草稿中取消。
+    // 白/黑名单选择供应商标签；标签选项标注当前承载所选成员模型的供应商数量。
+    // 已选标签始终保留，避免供应商标签调整后无法从历史草稿中取消。
     const providerOptionsFor = (models: string[], selected: string[]) => {
       const selectedModels = new Set(models)
       const counts = new Map<string, number>()
@@ -1568,7 +1704,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
       selected.forEach((tag) => { if (!counts.has(tag)) counts.set(tag, 0) })
       return Array.from(counts.entries())
         .sort(([a], [b]) => a.localeCompare(b, 'zh-CN'))
-        .map(([tag, count]) => ({ value: tag, label: `${tag}（${count} 个渠道）` }))
+        .map(([tag, count]) => ({ value: tag, label: `${tag}（${count} 个供应商）` }))
     }
     return (
       <ModalShell
@@ -1621,7 +1757,7 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
             />
           </Field>
         </div>
-        {/* 方案区抽成 RouteSchemeEditor：custom 显示选模型/渠道过滤；real 不走这里（由元数据弹窗管理）。 */}
+        {/* 方案区抽成 RouteSchemeEditor：custom 显示选模型/供应商过滤；real 不走这里（由元数据弹窗管理）。 */}
         <RouteSchemeEditor
           draft={draft}
           schemeView={schemeView}
@@ -1649,18 +1785,28 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
   return (
     <>
       {registerTopRefresh !== false ? (
-        <ManagerPageActions primary={<ManagerRefreshButton loading={loading} onClick={() => void loadData()} />} />
+        <ManagerPageActions primary={
+          <>
+            <ManagerRefreshButton loading={loading} onClick={() => void loadData()} />
+            <Button size="sm" onClick={() => setCreateSignal((value) => value + 1)}>
+              <Plus className="size-3.5" /> 新增自定义模型
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setRealPickerOpen(true)}>
+              <Plus className="size-3.5" /> 新增模型策略
+            </Button>
+          </>
+        } />
       ) : null}
       {loading && !data ? (
-        <SectionCard title="加载中" description="正在获取自定义模型数据...">
+        <SectionCard title="加载中" description="正在获取模型策略数据...">
           <Empty>
             <EmptyHeader>
-              <EmptyDescription>正在加载自定义模型数据...</EmptyDescription>
+              <EmptyDescription>正在加载模型策略数据...</EmptyDescription>
             </EmptyHeader>
           </Empty>
         </SectionCard>
       ) : error && !data ? (
-        <SectionCard title="加载失败" description="无法获取自定义模型数据">
+        <SectionCard title="加载失败" description="无法获取模型策略数据">
           <Alert variant="destructive">
             <AlertDescription className="flex items-center justify-between gap-3">
               <span>{error}</span>
@@ -1672,18 +1818,76 @@ export function ModelRoutingContent({ createSignal, refreshSignal, registerTopRe
         <SectionCard title="暂无数据">
           <Empty>
             <EmptyHeader>
-              <EmptyDescription>暂无自定义模型数据</EmptyDescription>
+              <EmptyDescription>暂无模型策略数据</EmptyDescription>
             </EmptyHeader>
           </Empty>
         </SectionCard>
       ) : (
         <div>
-          {groupEntries.length ? <div style={gridStyle}>{groupEntries.map(({ name, group }) => renderGroupCard(name, group))}</div> : <div className="py-6 text-muted-foreground">暂无自定义模型，点击“新增自定义模型”创建。</div>}
+          {/* 自定义模型 + 真实模型策略 合并为一个列表（同一网格）。真实模型卡片
+              标「真实模型」徽标区分；点编辑打开 RealModelRoutingDialog。 */}
+          {(groupEntries.length > 0 || realStrategyEntries.length > 0) ? (
+            <div style={gridStyle}>
+              {groupEntries.map(({ name, group }) => renderGroupCard(name, group))}
+              {realStrategyEntries.map((model) => renderRealStrategyCard(model))}
+            </div>
+          ) : (
+            <div className="py-6 text-muted-foreground">暂无模型策略，点击「新增自定义模型」或「新增模型策略」创建。</div>
+          )}
         </div>
       )}
 
       {renderGroupModal()}
       {renderChannelsModal()}
+
+      <RealModelRoutingDialog
+        open={realRoutingId !== null}
+        target={realRoutingTarget}
+        providers={realProviders}
+        saving={realSaving}
+        onClose={() => setRealRoutingId(null)}
+        onSave={saveRealRouting}
+      />
+
+      {/* 新增模型策略：选择一个真实模型，打开其供应商策略弹框。 */}
+      <Dialog open={realPickerOpen} onOpenChange={(next) => { setRealPickerOpen(next); if (!next) setRealPickerSearch('') }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader><DialogTitle>新增模型策略</DialogTitle></DialogHeader>
+          <div className="text-sm text-muted-foreground">选择一个真实模型，为其配置供应商过滤与备用方案。</div>
+          {(realMeta?.models ?? []).length > 0 ? (
+            <Input
+              value={realPickerSearch}
+              onChange={(event) => setRealPickerSearch(event.target.value)}
+              placeholder="筛选模型（model_id / 名称）..."
+              className="h-9"
+            />
+          ) : null}
+          <div className="flex max-h-80 flex-col gap-1 overflow-y-auto">
+            {(realMeta?.models ?? []).length === 0 ? (
+              <span className="py-4 text-center text-sm text-muted-foreground">暂无真实模型，先在「模型元数据」页新增元数据。</span>
+            ) : pickerModels.length === 0 ? (
+              <span className="py-4 text-center text-sm text-muted-foreground">无匹配模型</span>
+            ) : pickerModels.map((model) => {
+              const modelId = model.model_id || model.id || ''
+              const configured = realStrategyEntries.some((m) => (m.model_id || m.id) === modelId)
+              return (
+                <button
+                  key={modelId}
+                  type="button"
+                  className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-accent"
+                  onClick={() => { setRealPickerOpen(false); setRealPickerSearch(''); setRealRoutingId(modelId) }}
+                >
+                  <span className="min-w-0 truncate">
+                    <span className="font-mono font-bold">{modelId}</span>
+                    {model.name ? <span className="ml-2 text-muted-foreground">{model.name}</span> : null}
+                  </span>
+                  {configured ? <Badge variant="secondary">已配置</Badge> : null}
+                </button>
+              )
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <UnifiedProviderModal
         open={editorProviderId !== null}

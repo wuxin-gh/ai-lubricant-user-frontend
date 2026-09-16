@@ -31,7 +31,7 @@ export const SELECTION_STRATEGY_OPTIONS: Array<{ value: string; label: string }>
   { value: "sequential", label: "顺序（按优先级依次尝试）" },
   { value: "random_member", label: "成员随机（按自定义模型成员随机）" },
   { value: "model_random", label: "模型随机" },
-  { value: "random_all", label: "全局随机（所有可用渠道随机）" },
+  { value: "random_all", label: "全局随机（所有可用供应商随机）" },
 ]
 
 export const DEFAULT_SELECTION_STRATEGY = "intelligent"
@@ -252,7 +252,7 @@ export function TaskApiKeyPanel(props: TaskApiKeyPanelProps) {
               {SELECTION_STRATEGY_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
             </SelectContent>
           </Select>
-          <span className="text-xs text-muted-foreground">决定命中多个可用渠道时如何挑选</span>
+          <span className="text-xs text-muted-foreground">决定命中多个可用供应商时如何挑选</span>
         </div>
       )}
     </div>

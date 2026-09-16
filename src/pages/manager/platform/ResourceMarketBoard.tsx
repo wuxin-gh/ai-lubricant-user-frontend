@@ -930,8 +930,13 @@ export function ResourceMarketBoard({ userMode = false }: { userMode?: boolean }
         <Empty><Spinner /> 加载中...</Empty>
       ) : marketDisabled ? (
         <Empty>
-          <div>市场未启用</div>
-          <div className="text-xs text-muted-foreground">在服务端 env.ini 的 [marketplace] 配置 GitHub 仓库后即可使用</div>
+          <div>{userMode ? "市场暂不可用" : "市场未启用"}</div>
+          <div className="text-xs text-muted-foreground">
+            {userMode
+              // 用户侧不暴露服务端配置细节——那是管理员的事，用户只需知道下一步做什么。
+              ? "资源市场还没开放。你可以先看「我的资源」，或稍后再来。"
+              : "在服务端 env.ini 的 [marketplace] 配置 GitHub 仓库后即可使用"}
+          </div>
         </Empty>
       ) : showEmpty ? (
         <Empty>没有符合筛选的资源</Empty>

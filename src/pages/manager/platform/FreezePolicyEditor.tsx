@@ -1,5 +1,5 @@
 /**
- * 共享冻结策略编辑器，供渠道编辑弹窗与全局配置「默认冻结策略」Tab 共用。
+ * 共享冻结策略编辑器，供供应商编辑弹窗与全局配置「默认冻结策略」Tab 共用。
  * 从 Channels.tsx 原内联编辑器抽取，内部样式自包含（CSS 变量来自平台页面根）。
  */
 import { useCallback, useState } from "react"
@@ -33,8 +33,8 @@ export function safeBoolean(value: unknown): boolean {
 export const FREEZE_OBJECT_OPTIONS = [
   { value: "account", label: "账号", short: "账号" },
   { value: "account_model", label: "账号模型", short: "账号模型" },
-  { value: "channel", label: "渠道", short: "渠道" },
-  { value: "channel_model", label: "渠道模型", short: "渠道模型" },
+  { value: "channel", label: "供应商", short: "供应商" },
+  { value: "channel_model", label: "供应商模型", short: "供应商模型" },
 ] as const
 
 export const FREEZE_PERIOD_OPTIONS = [
@@ -505,7 +505,7 @@ export function FreezePolicyEditor({ value, onChange, className = "" }: FreezePo
                     </div>
                   )}
                   <div style={{ gridColumn: "1 / -1", fontSize: "12px", color: "var(--text2)", lineHeight: 1.6, background: "var(--bg3)", padding: "6px 10px", borderRadius: "6px" }}>
-                    冻结对象：账号=冻结单个账号；账号模型=冻结该账号的对应模型；渠道=冻结渠道下所有账号；渠道模型=冻结渠道下所有账号的该模型。冻结周期：禁用=关闭账号 switch 或渠道 enabled，不进入定时检测；永久冻结=仅账号，置 is_frozen，可在定时检测成功后解冻；分钟/小时/天/秒=填具体数值；今天/本周/本月=冻结到当天/本周日/月末结束（含跨边界缓冲）。
+                    冻结对象：账号=冻结单个账号；账号模型=冻结该账号的对应模型；供应商=冻结供应商下所有账号；供应商模型=冻结供应商下所有账号的该模型。冻结周期：禁用=关闭账号 switch 或供应商 enabled，不进入定时检测；永久冻结=仅账号，置 is_frozen，可在定时检测成功后解冻；分钟/小时/天/秒=填具体数值；今天/本周/本月=冻结到当天/本周日/月末结束（含跨边界缓冲）。
                   </div>
                 </div>
               )}

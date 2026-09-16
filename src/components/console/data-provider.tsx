@@ -238,7 +238,13 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [])
 
+  // 用户侧数据（nodes/models/projects/...）都要 C 端 session。应急管理员只有
+  // admin token、没有 session，拉这些接口会一路 401 并弹一排 toast。合并成单壳
+  // 后这类身份也会渲染到本 Provider，故按 session 存在与否决定是否拉取。
+  const sessionReady = auth.status === "authenticated"
+
   useEffect(() => {
+    if (!sessionReady) return
     void fetchNodes().catch((error) => toast.error(error instanceof Error ? error.message : "加载节点失败"));
     fetchModels();
     fetchIdentities();
@@ -247,6 +253,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
     void fetchUnlinkedTasks();
     void fetchHistoricalTasks();
   }, [
+    sessionReady,
     fetchHistoricalTasks,
     fetchIdentities,
     fetchMembers,
@@ -259,6 +266,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // 顶栏「刷新」用：并行重拉全部公共数据。各 fetch 内部已有各自的错误 toast，
   // 这里只等它们结束（allSettled —— 一路失败不阻断其它数据刷新）。
   const reloadAll = useCallback(async () => {
+    if (!sessionReady) return
     await Promise.allSettled([
       fetchUserInfo(),
       fetchNodes(),
@@ -270,6 +278,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
       fetchHistoricalTasks(),
     ]);
   }, [
+    sessionReady,
     fetchUserInfo,
     fetchNodes,
     fetchModels,

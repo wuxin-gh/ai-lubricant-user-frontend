@@ -164,7 +164,7 @@ export default function ManageProjectsDialog({ open, onOpenChange }: ManageProje
                                 {rows.map((project) => (
                                   <div key={project.id} className="flex items-center gap-2 rounded-md border bg-background px-3 py-2">
                                     <GitBranch className="size-4 shrink-0 text-muted-foreground" />
-                                    <Link to={`/console/project/${project.id}`} onClick={() => onOpenChange(false)} className="min-w-0 flex-1 truncate text-sm hover:text-primary">
+                                    <Link to={`/coding/project/${project.id}`} onClick={() => onOpenChange(false)} className="min-w-0 flex-1 truncate text-sm hover:text-primary">
                                       {project.name || project.full_name || "未命名项目"}
                                     </Link>
                                     <StackBadges stack={project.stack} max={2} className="shrink-0" />
@@ -185,7 +185,7 @@ export default function ManageProjectsDialog({ open, onOpenChange }: ManageProje
                 {projectsByIdentity.has("__unbound__") && (
                   <div className="rounded-lg border border-dashed p-3">
                     <div className="mb-2 text-sm font-medium">未绑定 Git 身份的项目</div>
-                    {projectsByIdentity.get("__unbound__")?.map((project) => <Link key={project.id} to={`/console/project/${project.id}`} onClick={() => onOpenChange(false)} className="block truncate py-1 text-sm text-muted-foreground hover:text-primary">{project.name || project.full_name || "未命名项目"}</Link>)}
+                    {projectsByIdentity.get("__unbound__")?.map((project) => <Link key={project.id} to={`/coding/project/${project.id}`} onClick={() => onOpenChange(false)} className="block truncate py-1 text-sm text-muted-foreground hover:text-primary">{project.name || project.full_name || "未命名项目"}</Link>)}
                   </div>
                 )}
               </div>

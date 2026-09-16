@@ -65,6 +65,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
 import { getTaskDisplayName } from "@/utils/common"
+import { CODING_SECTIONS, codingSectionPath } from "@/config/coding-sections"
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "等待中",
@@ -119,6 +120,9 @@ function formatLimit(value: unknown): string {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value)
 }
+
+/** 任务页的返回落点：所属项目的「任务」功能页。 */
+const TASKS_SECTION = CODING_SECTIONS.find((s) => s.path === "tasks") ?? CODING_SECTIONS[0]
 
 /**
  * 任务详情工作区。排版与交互对齐编辑器会话详情页：顶部一排身份徽章 + 工具按钮
@@ -296,9 +300,13 @@ export default function TaskDetailPage() {
   async function confirmDelete() {
     setDeleting(true)
     try {
+      // 先记下所属项目：删除后 task 就没了，拿不到 project_id。
+      const projectId = task?.project_id
       await deleteUserTask(taskId)
       toast.success("任务已删除，请求日志按审计要求保留")
-      navigate("/console/tasks")
+      // 回到任务所属项目的「任务」页，而不是跳出控制台到首页——用户是在项目里
+      // 干活的，删完应该留在原上下文继续。没绑项目（空项目任务）才回首页。
+      navigate(projectId ? codingSectionPath(projectId, TASKS_SECTION) : "/home")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除任务失败")
     } finally {
@@ -363,6 +371,13 @@ export default function TaskDetailPage() {
 
   const nodeHealth = useMemo(() => editorNodeHealth(task?.node_id, nodes), [nodes, task?.node_id])
 
+  // 任务页的返回落点：所属项目的「任务」功能页；没绑项目（空项目任务）才回首页。
+  // 别直接跳 /home——用户是在项目里干活的，跳出去等于把他踢出上下文。
+  const backToList = () => {
+    const projectId = task?.project_id
+    navigate(projectId ? codingSectionPath(projectId, TASKS_SECTION) : "/home")
+  }
+
   if (loading && !task) return <div className="flex h-full items-center justify-center"><Spinner /></div>
   if (notFound || !task) {
     return (
@@ -370,7 +385,8 @@ export default function TaskDetailPage() {
         <Card>
           <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
             <p className="text-sm text-muted-foreground">任务不存在或已删除</p>
-            <Button variant="outline" size="sm" onClick={() => navigate("/console/tasks")}><ArrowLeft className="size-4" />返回任务列表</Button>
+            {/* 任务已没了，project_id 拿不到，只能回项目选择页（那里能重挑项目）。 */}
+            <Button variant="outline" size="sm" onClick={() => navigate("/coding")}><ArrowLeft className="size-4" />返回项目</Button>
           </CardContent>
         </Card>
       </div>
@@ -433,7 +449,7 @@ export default function TaskDetailPage() {
       <div className="shrink-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => navigate("/console/tasks")}><ArrowLeft className="size-4" />返回列表</Button>
+            <Button variant="ghost" size="sm" onClick={backToList}><ArrowLeft className="size-4" />返回列表</Button>
             <h2 className="truncate font-medium" title={task.id}>{getTaskDisplayName(task)}</h2>
             <Badge variant="secondary">{task.provider}</Badge>
             <Badge variant={dispatchFailed || task.runtime_stage?.ok === false ? "destructive" : statusVariant}>任务：{taskStateLabel(task)}</Badge>

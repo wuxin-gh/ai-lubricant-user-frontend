@@ -1377,7 +1377,7 @@ export default function CanonicalCreateTaskDialog({
       }
       void reloadProjects()
       void reloadUnlinkedTasks()
-      navigate(`/console/task/${task.id}`)
+      navigate(`/coding/task/${task.id}`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "创建任务失败")
     } finally {

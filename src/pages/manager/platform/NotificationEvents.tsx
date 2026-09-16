@@ -48,7 +48,7 @@ import {
 
 const CATEGORY_LABELS: Record<string, string> = {
   account: '账号',
-  channel: '渠道',
+  channel: '供应商',
   api_key: '密钥',
   model: '模型',
   node: '节点',
@@ -68,18 +68,18 @@ type ParamField = {
   hint: string
 }
 
-// 事件参数按事件的一级分类给出可筛的维度：账号类事件盯账号，渠道类盯渠道，等等。
+// 事件参数按事件的一级分类给出可筛的维度：账号类事件盯账号，供应商类盯供应商，等等。
 // 后端 _filter_matches 用「复数键 vs 单数参数」匹配，所以键名固定这几个；且它对
 // 「事件没带这个维度」判定为不匹配，所以只列事件真会带上的 param —— 节点类事件只
 // 带 version/previous_version，给它挂 node_names 会把所有节点通知静默过滤掉。
 const PARAM_FIELDS: Record<string, ParamField[]> = {
   account: [
-    { key: 'provider_names', label: '限定渠道', source: 'provider', hint: '不选=所有渠道' },
-    { key: 'account_usernames', label: '限定账号', source: 'account', hint: '先选渠道再选账号，不选=该范围内所有账号' },
+    { key: 'provider_names', label: '限定供应商', source: 'provider', hint: '不选=所有供应商' },
+    { key: 'account_usernames', label: '限定账号', source: 'account', hint: '先选供应商再选账号，不选=该范围内所有账号' },
   ],
-  channel: [{ key: 'provider_names', label: '限定渠道', source: 'provider', hint: '不选=所有渠道' }],
+  channel: [{ key: 'provider_names', label: '限定供应商', source: 'provider', hint: '不选=所有供应商' }],
   api_key: [{ key: 'api_key_ids', label: '限定密钥', source: 'api_key', hint: '不选=所有密钥' }],
-  model: [{ key: 'provider_names', label: '限定渠道', source: 'provider', hint: '不选=所有渠道' }],
+  model: [{ key: 'provider_names', label: '限定供应商', source: 'provider', hint: '不选=所有供应商' }],
   node: [],
   security: [],
   task: [],
@@ -350,8 +350,8 @@ export default function NotificationEvents({ scope = 'platform' }: { scope?: Not
   const [saving, setSaving] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
-  // 参数筛选框的候选项。渠道/密钥进弹窗时拉一次；账号按已选渠道拉（账号接口是
-  // 按渠道分页的，没有全局账号列表），所以跟着 provider_names 变。
+  // 参数筛选框的候选项。供应商/密钥进弹窗时拉一次；账号按已选供应商拉（账号接口是
+  // 按供应商分页的，没有全局账号列表），所以跟着 provider_names 变。
   const [providerOptions, setProviderOptions] = useState<ComboOption[]>([])
   const [apiKeyOptions, setApiKeyOptions] = useState<ComboOption[]>([])
   const [accountOptions, setAccountOptions] = useState<ComboOption[]>([])
@@ -751,7 +751,7 @@ export default function NotificationEvents({ scope = 'platform' }: { scope?: Not
                           onChange={(next) => updateParam(field.key, next)}
                           options={options}
                           disabled={accountNeedsProvider || (field.source === 'account' && loadingAccounts)}
-                          placeholder={accountNeedsProvider ? '请先选择渠道' : field.source === 'account' && loadingAccounts ? '正在加载账号…' : '搜索并选择，可多选'}
+                          placeholder={accountNeedsProvider ? '请先选择供应商' : field.source === 'account' && loadingAccounts ? '正在加载账号…' : '搜索并选择，可多选'}
                           contentZIndex={1101}
                           className="min-h-10 bg-background"
                         />

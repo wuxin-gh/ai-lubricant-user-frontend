@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { Bell, LogOut, RefreshCw, ShieldCheck } from "lucide-react"
+import { Bell, LogOut, RefreshCw } from "lucide-react"
 import { IconInfoCircle, IconLockCode, IconPencil, IconPhotoEdit } from "@tabler/icons-react"
 import { toast } from "sonner"
 
@@ -36,6 +36,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useCommonData } from "@/components/console/data-provider"
 import { useAppRuntime } from "@/components/app-runtime-provider"
+import { clearToken } from "@/@admin-port/api/client"
+import { useAuthStore } from "@/@admin-port/store/authStore"
 import { apiRequest } from "@/utils/requestUtils"
 import { cn } from "@/lib/utils"
 import { IS_OFFLINE_EDITION } from "@/utils/edition"
@@ -53,6 +55,7 @@ export default function NavUser({ className }: { className?: string }) {
   const navigate = useNavigate()
   const { user, reloadUser } = useCommonData()
   const { serverConfig, auth } = useAppRuntime()
+  const clearAuth = useAuthStore((state) => state.clearAuth)
   const [unreadCount, setUnreadCount] = useState(0)
   const [nameOpen, setNameOpen] = useState(false)
   const [newName, setNewName] = useState("")
@@ -73,10 +76,8 @@ export default function NavUser({ className }: { className?: string }) {
   const namePending = auth.loading && !user?.name && !user?.email
   const requiresCurrentPassword = !!user?.has_password
 
-  // 管理后台入口：role==admin（普通管理员）或存在应急管理员 token（紧急超管，
-  // 无 C 端 session/role）均放行。点击进 ai-lubricant 管理端。
+  // 管理后台入口已从本组件移除（应急管理员身份仍用于头像兜底渲染）。
   const isEmergencyAdmin = !!localStorage.getItem("admin_access_token")
-  const showAdminEntry = user?.role === "admin" || isEmergencyAdmin
 
   // 离线版版本信息收进头像菜单（原侧栏 footer 版本块移除）。
   const currentVersion = serverConfig?.current_version || t("consoleShell.sidebar.unknownVersion")
@@ -157,8 +158,15 @@ export default function NavUser({ className }: { className?: string }) {
 
   function handleLogout() {
     apiRequest("v1UsersLogoutCreate", {}, [], (resp) => {
-      if (resp.code === 0) navigate("/")
-      else toast.error(resp.message || "退出登录失败")
+      if (resp.code === 0) {
+        // 应急管理员（单密码登录）没有 C 端 session，只清了 session 会一直保持
+        // 登录态——合并成单壳后这类身份也走本组件退出，故两处凭据都要清。
+        clearToken()
+        clearAuth()
+        navigate("/")
+      } else {
+        toast.error(resp.message || "退出登录失败")
+      }
     })
   }
 
@@ -246,7 +254,7 @@ export default function NavUser({ className }: { className?: string }) {
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem asChild>
-                <Link to="/console/notifications">
+                <Link to="/ops/notifications">
                   <Bell className="size-4" />
                   通知中心
                   {unreadCount > 0 && (
@@ -256,14 +264,6 @@ export default function NavUser({ className }: { className?: string }) {
                   )}
                 </Link>
               </DropdownMenuItem>
-              {showAdminEntry && (
-                <DropdownMenuItem asChild>
-                  <Link to="/manager/overview">
-                    <ShieldCheck className="size-4" />
-                    {t("consoleShell.sidebar.adminConsole", "管理后台")}
-                  </Link>
-                </DropdownMenuItem>
-              )}
               <DropdownMenuItem onClick={() => window.location.reload()}>
                 <RefreshCw className="size-4" />
                 {t("consoleShell.actions.refreshPage", "刷新页面")}
@@ -288,20 +288,6 @@ export default function NavUser({ className }: { className?: string }) {
               )}
             </DropdownMenuContent>
           </DropdownMenu>
-          {/* 跳转后端的独立 icon：仅 admin / 应急管理员可见。折叠态隐藏，折叠时走头像下拉里的入口。 */}
-          {showAdminEntry && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 shrink-0 group-data-[collapsible=icon]:hidden"
-              title={t("consoleShell.sidebar.adminConsole", "管理后台")}
-              asChild
-            >
-              <Link to="/manager/overview">
-                <ShieldCheck className="size-4" />
-              </Link>
-            </Button>
-          )}
         </SidebarMenuItem>
       </SidebarMenu>
 

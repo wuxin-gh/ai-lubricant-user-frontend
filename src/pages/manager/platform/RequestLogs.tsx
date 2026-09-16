@@ -121,7 +121,7 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 // 检测/测试日志的 api_key_name 由定时检测(is_probe)/手动测试(is_test)链路写入，
 // 不在 keys 列表里，固定补进 API Key 下拉头部便于直接查询。
 // 来源：admin.py 探测链路 api_key_name = is_probe ? 'admin-check' : 'admin-test'。
-// 渠道「定时检测」关闭「保留检测日志」后，该渠道的 admin-check 记录不再出现。
+// 供应商「定时检测」关闭「保留检测日志」后，该供应商的 admin-check 记录不再出现。
 const SYSTEM_KEY_OPTIONS = [
   { value: 'admin-check', label: '检测日志', hint: '定时检测', Icon: Activity },
   { value: 'admin-test', label: '测试日志', hint: '手动测试', Icon: FlaskConical },
@@ -1208,7 +1208,7 @@ function SecurityEventsView({ events }: { events: RequestLogSecurityEvent[] }) {
 }
 
 function ChannelRetryAttemptsView({ attempts }: { attempts: RequestLogDetail['channel_retry_attempts'] }) {
-  if (!attempts?.length) return <Muted>无渠道请求重试</Muted>
+  if (!attempts?.length) return <Muted>无供应商请求重试</Muted>
   return (
     <div className="flex flex-col gap-2">
       {attempts.map((attempt) => {
@@ -1217,7 +1217,7 @@ function ChannelRetryAttemptsView({ attempts }: { attempts: RequestLogDetail['ch
           <Card key={attempt.attempt_no} size="sm" className="p-3 shadow-none">
             <div className="flex flex-wrap items-center gap-2">
               <ColorTag color={attempt.attempt_no > 1 ? 'warning' : 'default'}>
-                {attempt.attempt_no === 1 ? '首次渠道请求' : `渠道请求重试 ${attempt.attempt_no - 1}`}
+                {attempt.attempt_no === 1 ? '首次供应商请求' : `供应商请求重试 ${attempt.attempt_no - 1}`}
               </ColorTag>
               <ColorTag color={ok ? 'success' : 'error'}>{ok ? '成功' : '失败'}</ColorTag>
               {attempt.upstream_status != null && <ColorTag>HTTP {attempt.upstream_status}</ColorTag>}
@@ -1267,7 +1267,7 @@ function AttemptsView({
                 <ColorTag color="processing">Attempt {attempt.attempt_no ?? index + 1}</ColorTag>
                 {(attempt.routing_detail?.inner_retry_index || 0) > 0 ? (
                   <ColorTag color="warning">
-                    渠道内重试 {attempt.routing_detail!.inner_retry_index!}/{Math.max(1, (attempt.routing_detail?.inner_retry_limit || 1) - 1)}
+                    供应商内重试 {attempt.routing_detail!.inner_retry_index!}/{Math.max(1, (attempt.routing_detail?.inner_retry_limit || 1) - 1)}
                   </ColorTag>
                 ) : (
                   <ColorTag>候选 {(attempt.routing_detail?.outer_retry_index || 0) + 1}</ColorTag>
@@ -1459,7 +1459,7 @@ function DetailModal({
         },
         {
           key: 'provider',
-          label: '渠道',
+          label: '供应商',
           children: <ColorTag color="processing">{detail.provider_remark || detail.provider_name || '-'}</ColorTag>,
         },
         { key: 'account', label: '账号', children: <ColorTag>{detail.account_username || '-'}</ColorTag> },
@@ -1515,7 +1515,7 @@ function DetailModal({
         },
         {
           key: 'router_path',
-          label: '渠道请求路径',
+          label: '供应商请求路径',
           children: <code className="rounded bg-muted px-1">{detail.router_request_path || '-'}</code>,
         },
         {
@@ -1530,7 +1530,7 @@ function DetailModal({
           children: (
             <span className="flex flex-wrap items-center gap-1">
               <span>
-                渠道 {formatSeconds(detail.duration_ms)} / TTFT{' '}
+                供应商 {formatSeconds(detail.duration_ms)} / TTFT{' '}
                 {formatSeconds(detail.first_token_ms)}
               </span>
               <ColorTag color="processing">
@@ -1578,7 +1578,7 @@ function DetailModal({
               <ColorTag>策略配置 {formatSeconds(detail.routing_detail?.strategy_config_ms)}</ColorTag>
               <ColorTag>组成员 {formatSeconds(detail.routing_detail?.candidate_group_members_ms)}</ColorTag>
               <ColorTag>元数据 {formatSeconds(detail.routing_detail?.candidate_metadata_ms)}</ColorTag>
-              <ColorTag>渠道过滤 {formatSeconds(detail.routing_detail?.provider_filter_ms)}</ColorTag>
+              <ColorTag>供应商过滤 {formatSeconds(detail.routing_detail?.provider_filter_ms)}</ColorTag>
               <ColorTag>模型 TPM 内存 {formatSeconds(detail.routing_detail?.candidate_tpm_check_ms)}</ColorTag>
               <ColorTag>能力检查 {formatSeconds(detail.routing_detail?.candidate_operation_check_ms)}</ColorTag>
               <ColorTag>流量因子 {formatSeconds(detail.routing_detail?.candidate_volume_factor_ms)}</ColorTag>
@@ -1661,31 +1661,31 @@ function DetailModal({
         },
         {
           key: 'router_req',
-          label: '渠道请求体',
+          label: '供应商请求体',
           extra: <CopyButton text={jsonToCopyText(routerRequestBody)} />,
           children: <JsonView data={routerRequestBody} />,
         },
         {
           key: 'router_req_headers',
-          label: '渠道请求头',
+          label: '供应商请求头',
           extra: <CopyButton text={jsonToCopyText(routerRequestHeaders)} />,
           children: <JsonView data={routerRequestHeaders} />,
         },
         {
           key: 'router_resp',
-          label: '渠道响应体',
+          label: '供应商响应体',
           extra: <CopyButton text={rawToCopyText(routerResponseBody)} />,
           children: <RawValueView value={routerResponseBody} />,
         },
         {
           key: 'resp_headers',
-          label: '渠道响应头',
+          label: '供应商响应头',
           extra: <CopyButton text={jsonToCopyText(responseHeaders)} />,
           children: <JsonView data={responseHeaders} />,
         },
         {
           key: 'channel_retry_attempts',
-          label: `渠道请求明细${detail.channel_retry_attempts?.length ? ` (${detail.channel_retry_attempts.length})` : ''}`,
+          label: `供应商请求明细${detail.channel_retry_attempts?.length ? ` (${detail.channel_retry_attempts.length})` : ''}`,
           extra: null,
           children: <ChannelRetryAttemptsView attempts={detail.channel_retry_attempts} />,
         },
@@ -2076,7 +2076,7 @@ export function RequestLogs() {
             <TimeRangePicker range={range} onChange={setRange} />
           </FilterField>
 
-          <FilterField label="渠道">
+          <FilterField label="供应商">
             <SearchSelect
               value={providerFilter}
               onChange={(v) => { setProviderFilter(v); setModelFilter('') }}
@@ -2216,7 +2216,7 @@ export function RequestLogs() {
                 <TableHead className="w-[76px] text-center">ID</TableHead>
                 <TableHead className="w-[90px] text-center">创建时间</TableHead>
                 <TableHead className="w-[110px] text-center">客户端 / 会话ID</TableHead>
-                <TableHead className="w-[122px] text-center">渠道 / 账号</TableHead>
+                <TableHead className="w-[122px] text-center">供应商 / 账号</TableHead>
                 <TableHead className="w-[92px] text-center">API Key</TableHead>
                 <TableHead className="w-[180px] text-center">模型</TableHead>
                 <TableHead className="w-[125px] text-center">用时 / 首字</TableHead>
@@ -2236,8 +2236,8 @@ export function RequestLogs() {
                 </TableRow>
               ) : (
                 rows.map((record) => {
-                  // 后端按 provider_name 补了 provider_remark（渠道备注/显示名）；
-                  // 渠道已删除时 remark 为空，回落到 provider_name（即渠道 id）。
+                  // 后端按 provider_name 补了 provider_remark（供应商备注/显示名）；
+                  // 供应商已删除时 remark 为空，回落到 provider_name（即供应商 id）。
                   const providerDisplay = record.provider_remark || record.provider_name || '-'
                   const requestedModel = record.requested_model || record.model || '-'
                   const actualModel = record.actual_model || record.model || ''
@@ -2289,7 +2289,7 @@ export function RequestLogs() {
                         <div
                           className="flex w-full min-w-0 cursor-pointer flex-col items-center gap-0.5"
                           onClick={() => {
-                            // 日志里的 provider_name 就是渠道 id（后端 id 即 name），直接用，无需反查列表。
+                            // 日志里的 provider_name 就是供应商 id（后端 id 即 name），直接用，无需反查列表。
                             if (record.provider_name) setEditingProviderId(record.provider_name)
                           }}
                         >
@@ -2467,7 +2467,7 @@ export function RequestLogs() {
         <DetailModal logId={detailId} onClose={() => setDetailId(null)} onNavigate={setDetailId} />
       )}
 
-      {/* 渠道编辑弹窗：任何页面只传渠道 id，弹窗自己加载和执行增删改。 */}
+      {/* 供应商编辑弹窗：任何页面只传供应商 id，弹窗自己加载和执行增删改。 */}
       {editingProviderId && (
         <UnifiedProviderModal
           open

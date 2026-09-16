@@ -107,8 +107,8 @@ export default function EditorSessionDetailPage() {
     const projectId = editor.project_id || ""
     const project = projects.find((item) => item.id === projectId)
     setDynamicBreadcrumbs([
-      { label: project?.name || "项目", ...(projectId ? { href: `/console/project/${projectId}` } : {}) },
-      { label: editorDisplayName(editor), href: `/console/editor/${editor.id}` },
+      { label: project?.name || "项目", ...(projectId ? { href: `/coding/project/${projectId}` } : {}) },
+      { label: editorDisplayName(editor), href: `/coding/editor/${editor.id}` },
       { label: session.task_name || "未命名任务" },
     ])
     return () => setDynamicBreadcrumbs(null)
@@ -208,7 +208,7 @@ export default function EditorSessionDetailPage() {
               <Ban className="size-3.5 text-destructive" /> 停用 Key
             </Button>
             <NodeInfoPopover node={node} editor={editor} health={nodeHealth} />
-            <Button variant="ghost" size="sm" asChild title="关联任务列表"><Link to={`/console/editor/${editorId}`}><List className="size-3.5" /> 关联任务列表</Link></Button>
+            <Button variant="ghost" size="sm" asChild title="关联任务列表"><Link to={`/coding/editor/${editorId}`}><List className="size-3.5" /> 关联任务列表</Link></Button>
             <Button variant="ghost" size="sm" disabled={refreshing} onClick={() => void refreshAll()} title="刷新">
               <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} /> 刷新
             </Button>

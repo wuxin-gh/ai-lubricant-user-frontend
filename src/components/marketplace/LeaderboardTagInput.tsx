@@ -1,7 +1,7 @@
 /**
  * 榜单条目共用的标签输入框：chip 在框内，回车添加，Backspace 删最后一个。
  *
- * 形态对齐渠道页的 ``ProviderTagInput``（Channels.tsx）——那边是管理端标签输入的既有惯例，
+ * 形态对齐供应商页的 ``ProviderTagInput``（Channels.tsx）——那边是管理端标签输入的既有惯例，
  * 区别只是这里用 Tailwind/shadcn 而非内联 style，视觉与 Input 组件一致。
  *
  * value 做防御收敛（``toStringArray``）：JSONB 字段在未重启的旧后端实例上会以 JSON

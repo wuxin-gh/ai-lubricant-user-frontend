@@ -86,7 +86,7 @@ export default function LoginPage({
       }, [], (resp) => {
         if (resp.code === 0) {
           localStorage.setItem(USER_STORAGE_KEY, JSON.stringify({ email: userEmail.trim(), password: userPassword.trim() }))
-          navigate('/console/')
+          navigate('/home')
         } else {
           toast.error(resp.message || t("login.toast.loginFailed"))
         }

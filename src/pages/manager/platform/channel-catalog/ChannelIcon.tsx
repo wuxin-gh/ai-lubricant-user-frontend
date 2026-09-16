@@ -50,7 +50,7 @@ export function isImageUrl(value: string | null | undefined): boolean {
   return /^https?:\/\//i.test(v) || /^data:image\//i.test(v)
 }
 
-/** 是否配置了可渲染的渠道图标：已知 lucide 图标键，或图片 URL。
+/** 是否配置了可渲染的供应商图标：已知 lucide 图标键，或图片 URL。
  *  空字符串或未知名值视为未配置，列表页据此决定是否渲染图标位。 */
 export function isChannelIconConfigured(value: string | null | undefined): boolean {
   const v = (value || "").trim()

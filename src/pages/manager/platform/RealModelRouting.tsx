@@ -1,13 +1,13 @@
 /**
- * 真实模型渠道策略（模型广场「真实模型」tab 的卡片入口）。
+ * 真实模型供应商策略（模型广场「真实模型」tab 的卡片入口）。
  *
  * 真相源是 model_groups 的 kind='real' 行：顶层 provider_whitelist/provider_blacklist
  * 恒为激活方案的投影，多套方案存 schemes/active_scheme。写入走窄写端点
  * PUT /admin/model-metadata/{id}/routing —— 只改这几列，不触碰元数据。
  *
- * 运行时语义：Config.get_real_model_provider_filter 取激活方案的渠道标签过滤；
+ * 运行时语义：Config.get_real_model_provider_filter 取激活方案的供应商标签过滤；
  * ModelClientPool._real_model_filter_nodes 把「激活方案 + 显式标记 is_backup 的方案」
- * 按数组顺序串成降级链，激活档位无可用渠道时逐档兜底。未标记 is_backup 的方案只能
+ * 按数组顺序串成降级链，激活档位无可用供应商时逐档兜底。未标记 is_backup 的方案只能
  * 手动切换，不参与自动降级。方案身份是 id，name 只是展示标签。
  */
 import { useEffect, useState } from 'react'
@@ -60,7 +60,7 @@ function schemesFromRaw(raw: RealModelScheme[] | undefined, modelId: string): Re
     result.push({
       id,
       name: (typeof item.name === 'string' ? item.name : '').trim(),
-      // 真实模型的候选模型恒为自身：方案只提供渠道档位。空 models 会被后端校验拒绝，这里补齐。
+      // 真实模型的候选模型恒为自身：方案只提供供应商档位。空 models 会被后端校验拒绝，这里补齐。
       models: stringList(item.models).length ? stringList(item.models) : [modelId],
       provider_whitelist: stringList(item.provider_whitelist),
       provider_blacklist: stringList(item.provider_blacklist),
@@ -105,14 +105,14 @@ function cleanScheme(scheme: RealModelScheme, modelId: string): RealModelScheme 
   }
 }
 
-// 承载该真实模型的渠道（provider.models 含 model_id）。渠道策略只能在这些渠道里挑，
+// 承载该真实模型的供应商（provider.models 含 model_id）。供应商策略只能在这些供应商里挑，
 // 与运行时候选来源（ModelClientPool.iter_model_candidates 按 model_id 取路由）同口径。
 function channelsCarrying(providers: ProviderLite[], modelId: string): ProviderLite[] {
   return providers.filter((provider) => stringList(provider.models).includes(modelId))
 }
 
-// 渠道标签选项：只列承载该模型的渠道所带标签，并标注命中渠道数。
-// 已选标签始终保留（计数 0），避免渠道标签调整后无法从旧配置里取消。
+// 供应商标签选项：只列承载该模型的供应商所带标签，并标注命中供应商数。
+// 已选标签始终保留（计数 0），避免供应商标签调整后无法从旧配置里取消。
 function tagOptionsFor(carriers: ProviderLite[], selected: string[]): Option[] {
   const counts = new Map<string, number>()
   carriers.forEach((provider) => {
@@ -121,14 +121,14 @@ function tagOptionsFor(carriers: ProviderLite[], selected: string[]): Option[] {
   selected.forEach((tag) => { if (!counts.has(tag)) counts.set(tag, 0) })
   return Array.from(counts.entries())
     .sort(([a], [b]) => a.localeCompare(b, 'zh-CN'))
-    .map(([tag, count]) => ({ value: tag, label: `${tag}（${count} 个渠道）` }))
+    .map(([tag, count]) => ({ value: tag, label: `${tag}（${count} 个供应商）` }))
 }
 
 type SchemeView = 'current' | 'manage' | 'edit'
 
 /**
- * 真实模型渠道策略弹框：仅展示在「真实模型」tab 的卡片编辑按钮旁。打开后默认进「当前方案」
- * 视图（直接编辑激活方案的渠道标签过滤）；点「管理方案」切到方案列表，可新增/编辑/复制/
+ * 真实模型供应商策略弹框：仅展示在「真实模型」tab 的卡片编辑按钮旁。打开后默认进「当前方案」
+ * 视图（直接编辑激活方案的供应商标签过滤）；点「管理方案」切到方案列表，可新增/编辑/复制/
  * 删除/切换/重排/勾选备用。多方案降级语义与自定义模型一致：仅显式标记 is_backup 的
  * 非激活方案按数组顺序进降级链。改动先落本地 draft，点底部「保存」才调
  * PUT /admin/model-metadata/{id}/routing 窄写。
@@ -171,8 +171,8 @@ export function RealModelRoutingDialog({
     setError(null)
   }, [open, modelId])
 
-  // 渠道策略的目标渠道范围：方案的渠道过滤仅在承载该模型的渠道里命中；
-  // 不承载该模型的渠道即使带了匹配标签也不会被选到。
+  // 供应商策略的目标供应商范围：方案的供应商过滤仅在承载该模型的供应商里命中；
+  // 不承载该模型的供应商即使带了匹配标签也不会被选到。
   const carriers = target ? channelsCarrying(providers, target.model_id) : []
 
   const updateActive = (patch: Partial<RealModelScheme>) => {
@@ -288,7 +288,7 @@ export function RealModelRoutingDialog({
     try {
       await onSave({ schemes: cleaned, active_scheme: active.id })
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存渠道策略失败')
+      setError(err instanceof Error ? err.message : '保存供应商策略失败')
     }
   }
 
@@ -306,7 +306,7 @@ export function RealModelRoutingDialog({
         onInteractOutside={(event) => event.preventDefault()}
       >
         <DialogHeader>
-          <DialogTitle>{`渠道策略 · ${target.model_id}`}</DialogTitle>
+          <DialogTitle>{`供应商策略 · ${target.model_id}`}</DialogTitle>
         </DialogHeader>
         {error ? (
           <Alert variant="destructive">
@@ -369,7 +369,7 @@ export function RealModelRoutingDialog({
           <Button variant="outline" onClick={onClose} disabled={saving}>取消</Button>
           <Button onClick={() => void handleSave()} disabled={saving || view === 'edit'}>
             {saving ? <Spinner /> : null}
-            保存渠道策略
+            保存供应商策略
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -377,10 +377,10 @@ export function RealModelRoutingDialog({
   )
 }
 
-const WHITELIST_HINT = '只在带这些标签的渠道上调用该模型，留空表示不限制；仅列出承载了该模型的渠道所带标签'
-const BLACKLIST_HINT = '排除带这些标签的渠道，留空表示不限制；黑白名单同时命中时以黑名单为准'
+const WHITELIST_HINT = '只在带这些标签的供应商上调用该模型，留空表示不限制；仅列出承载了该模型的供应商所带标签'
+const BLACKLIST_HINT = '排除带这些标签的供应商，留空表示不限制；黑白名单同时命中时以黑名单为准'
 
-// 当前方案视图：直接改激活方案的渠道过滤，底部「保存渠道策略」即落库。
+// 当前方案视图：直接改激活方案的供应商过滤，底部「保存供应商策略」即落库。
 function CurrentSchemeView({
   scheme,
   tagOptions,
@@ -397,7 +397,7 @@ function CurrentSchemeView({
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between gap-2">
-        <FieldLabel label="当前方案" hint="当前生效的渠道档位。可直接修改，点弹框底部「保存渠道策略」即写入。多套方案的新增、切换、备用降级点右侧「管理方案」。" />
+        <FieldLabel label="当前方案" hint="当前生效的供应商档位。可直接修改，点弹框底部「保存供应商策略」即写入。多套方案的新增、切换、备用降级点右侧「管理方案」。" />
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="border-green-600/40 text-green-700 dark:border-green-400/40 dark:text-green-400">
             生效中 · {scheme.name || '未命名'}
@@ -411,7 +411,7 @@ function CurrentSchemeView({
         <Field label="方案名" hint="仅作展示标签，可留空、可与其他方案重名；方案身份由系统分配的 id 唯一标识，改名不影响生效指向">
           <Input value={scheme.name} disabled={disabled} onChange={(event) => onUpdate({ name: event.target.value })} placeholder="如：高配 / 省配" />
         </Field>
-        <Field label="渠道标签白名单" hint={WHITELIST_HINT}>
+        <Field label="供应商标签白名单" hint={WHITELIST_HINT}>
           <MultiSelect
             value={scheme.provider_whitelist}
             onChange={(values) => onUpdate({ provider_whitelist: values })}
@@ -419,7 +419,7 @@ function CurrentSchemeView({
             options={tagOptions}
           />
         </Field>
-        <Field label="渠道标签黑名单" hint={BLACKLIST_HINT}>
+        <Field label="供应商标签黑名单" hint={BLACKLIST_HINT}>
           <MultiSelect
             value={scheme.provider_blacklist}
             onChange={(values) => onUpdate({ provider_blacklist: values })}
@@ -454,7 +454,7 @@ function EditSchemeView({
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between gap-2">
-        <FieldLabel label={isNew ? '新增方案' : '编辑方案'} hint="改动先暂存，点「保存」写回方案列表（此时仍未落库，需再点弹框底部「保存渠道策略」才真正生效）；点「退出」丢弃本次改动。" />
+        <FieldLabel label={isNew ? '新增方案' : '编辑方案'} hint="改动先暂存，点「保存」写回方案列表（此时仍未落库，需再点弹框底部「保存供应商策略」才真正生效）；点「退出」丢弃本次改动。" />
         <div className="flex items-center gap-1">
           <Button type="button" size="sm" onClick={onCommit} disabled={disabled}>保存</Button>
           <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={disabled}>
@@ -466,7 +466,7 @@ function EditSchemeView({
         <Field label="方案名" hint="仅作展示标签，允许为空、允许重复；方案身份由内部 id 唯一标识，改名不影响生效指向">
           <Input value={scheme.name} disabled={disabled} onChange={(event) => onPatch({ name: event.target.value })} placeholder="如：高配 / 省配" />
         </Field>
-        <Field label="渠道标签白名单" hint={WHITELIST_HINT}>
+        <Field label="供应商标签白名单" hint={WHITELIST_HINT}>
           <MultiSelect
             value={scheme.provider_whitelist}
             onChange={(values) => onPatch({ provider_whitelist: values })}
@@ -474,7 +474,7 @@ function EditSchemeView({
             options={tagOptions}
           />
         </Field>
-        <Field label="渠道标签黑名单" hint={BLACKLIST_HINT}>
+        <Field label="供应商标签黑名单" hint={BLACKLIST_HINT}>
           <MultiSelect
             value={scheme.provider_blacklist}
             onChange={(values) => onPatch({ provider_blacklist: values })}
@@ -539,7 +539,7 @@ function ManageSchemesView({
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center justify-between gap-2">
-        <FieldLabel label="已有方案" hint="生效方案是主档位；勾选了「作为备用方案」的方案按列表顺序组成降级链，生效档位没有可用渠道时从「备用 1」开始逐档兜底。未勾选备用的方案只能手动切换。切换/重排只改暂存配置，点弹框底部「保存渠道策略」才真正生效。" />
+        <FieldLabel label="已有方案" hint="生效方案是主档位；勾选了「作为备用方案」的方案按列表顺序组成降级链，生效档位没有可用供应商时从「备用 1」开始逐档兜底。未勾选备用的方案只能手动切换。切换/重排只改暂存配置，点弹框底部「保存供应商策略」才真正生效。" />
         <div className="flex items-center gap-1">
           <Button type="button" variant="ghost" size="sm" onClick={onAdd} disabled={disabled}>
             <Plus className="size-3.5" /> 新增方案
@@ -600,7 +600,7 @@ function ManageSchemesView({
                 ) : scheme.provider_blacklist.length ? (
                   <span className="text-xs text-muted-foreground">黑 {scheme.provider_blacklist.join('、')}</span>
                 ) : (
-                  <span className="text-xs text-muted-foreground">不限制渠道</span>
+                  <span className="text-xs text-muted-foreground">不限制供应商</span>
                 )}
               </div>
               <div className="flex items-center gap-1">

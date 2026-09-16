@@ -177,9 +177,9 @@ function ChartTooltip({
 }
 
 /**
- * 统一图表组件 - 支持板块1汇总、板块2渠道、板块3 API Key。
+ * 统一图表组件 - 支持板块1汇总、板块2供应商、板块3 API Key。
  * - metric: 要绘制的指标类型
- * - scope: 数据来源（汇总、单渠道、单 API Key）
+ * - scope: 数据来源（汇总、单供应商、单 API Key）
  * - series: 后端 dashboard_stats 返回的 series 对象
  * - filters: 时间范围和颗粒
  * - chartType: 柱状图或折线图

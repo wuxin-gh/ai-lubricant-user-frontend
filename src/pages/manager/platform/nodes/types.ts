@@ -45,6 +45,7 @@ export const EDITOR_LABEL: Record<string, string> = {
   gemini: "Gemini",
   opencode: "OpenCode",
   cursor: "Cursor",
+  dsh: "DeepSeek Harness",
   openai: "OpenAI",
   anthropic: "Anthropic",
 }
@@ -244,7 +245,7 @@ export function machineSpecsLine(caps: NodeCaps | undefined | null): string {
 }
 
 /** 本系统支持安装/升级/版本上报的编辑器 CLI（与 Go agent.SupportedEditors 对齐）。 */
-export const SUPPORTED_EDITORS = ["claude", "codex", "gemini", "opencode", "cursor"] as const
+export const SUPPORTED_EDITORS = ["claude", "codex", "gemini", "opencode", "cursor", "dsh"] as const
 
 /**
  * 已安装的编辑器/Provider 列表。

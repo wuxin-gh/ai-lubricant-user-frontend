@@ -251,7 +251,7 @@ export type ExportableChannel = {
   published: boolean
 }
 
-/** 当前平台可发布为模板的渠道清单（只读基础配置，不碰账号），供多选导入弹框。 */
+/** 当前平台可发布为模板的供应商清单（只读基础配置，不碰账号），供多选导入弹框。 */
 export function fetchExportableChannels(): Promise<{ items: ExportableChannel[] }> {
   return request("/admin/channels/exportable")
 }

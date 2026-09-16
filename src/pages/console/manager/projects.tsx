@@ -144,7 +144,7 @@ export default function TeamManagerProjects() {
             <TableRow
               key={project.id}
               className={project.id ? "cursor-pointer" : undefined}
-              onClick={project.id ? () => navigate(`/manager/projects/${project.id}`) : undefined}
+              onClick={project.id ? () => navigate(`/ops/projects/${project.id}`) : undefined}
             >
               <TableCell className="px-6">
                 <div className="max-w-[480px] space-y-1">

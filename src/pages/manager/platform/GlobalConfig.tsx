@@ -60,14 +60,14 @@ import {
 } from "./ConfigSettingsModal"
 import { FreezePolicyEditor, safeBoolean } from "./FreezePolicyEditor"
 
-// GitHub 相关配置已整体迁到「资源中心 → 配置」：市场仓库、节点程序版本、渠道目录
+// GitHub 相关配置已整体迁到「资源中心 → 配置」：市场仓库、节点程序版本、供应商目录
 // 同步共用同一个市场仓库，配置只留一份，不再在全局配置里单开 GitHub Tab。
 type TabKey = "run-mode" | "node-global" | "channels" | "retention" | "default-freeze" | "output-interception" | "test-types" | "header-templates" | "model-rule-templates" | "models"
 
 const TAB_LABELS: Record<TabKey, string> = {
   "run-mode": "运行模式",
   "node-global": "节点网络",
-  channels: "渠道运行",
+  channels: "供应商运行",
   retention: "日志保留",
   "default-freeze": "默认冻结策略模版",
   "output-interception": "异常输出拦截",
@@ -401,7 +401,7 @@ function OutputInterceptionTable({
       <div className="flex items-start justify-between gap-4 rounded-lg border bg-card p-4">
         <div>
           <div className="flex items-center gap-1.5 font-medium">启用异常输出拦截<HelpTip>整体关闭后保留规则配置，但所有规则均不参与响应匹配。</HelpTip></div>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">命中规则的响应不会返回给客户端，而是标记当前候选失败并切换账号或渠道。</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">命中规则的响应不会返回给客户端，而是标记当前候选失败并切换账号或供应商。</p>
         </div>
         <Switch checked={current.enabled} onCheckedChange={(checked) => onChange({ ...current, enabled: checked })} />
       </div>
@@ -462,7 +462,7 @@ function ChannelsTab({ active }: { active: boolean }) {
       setConfig(await getChannelTabConfig())
       setLoaded(true)
     } catch (error) {
-      setError(errorMessage(error, "加载渠道运行配置失败"))
+      setError(errorMessage(error, "加载供应商运行配置失败"))
     } finally {
       setLoading(false)
     }
@@ -489,17 +489,17 @@ function ChannelsTab({ active }: { active: boolean }) {
     setError(null)
     try {
       await updateChannelTabConfig({ scheduled: config.scheduled, scheduled_test: config.scheduled_test, retry: config.retry, stream: config.stream, rate_limit: config.rate_limit })
-      toast.success("渠道运行配置已保存")
+      toast.success("供应商运行配置已保存")
       await load()
     } catch (error) {
-      setError(errorMessage(error, "保存渠道运行配置失败"))
+      setError(errorMessage(error, "保存供应商运行配置失败"))
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <TabFrame description="配置渠道请求的定时任务、全局重试、账号冷却和流式响应质量判定。" loading={loading} saving={saving} error={error} onReload={load} onSave={() => void save()}>
+    <TabFrame description="配置供应商请求的定时任务、全局重试、账号冷却和流式响应质量判定。" loading={loading} saving={saving} error={error} onReload={load} onSave={() => void save()}>
       {config ? <div className="flex flex-col gap-5">
         <Alert><AlertDescription>这些参数直接影响请求调度。测试请求模板、Header 模板和异常输出规则已分别拆到右侧独立页面。</AlertDescription></Alert>
         <SectionHeading title="运行参数" description="定时任务、失败重试、账号冷却和流式响应质量判定。" help="调整前请确认重试次数和冷却范围，避免放大上游请求或过早冻结账号。" />
@@ -589,7 +589,7 @@ function DefaultFreezePolicyTab({ active }: { active: boolean }) {
     state.setError(null)
     try {
       await updateChannelTabConfig({ default_freeze_policy: { enabled: fp.enabled !== false, rules } })
-      toast.success("新增渠道默认冻结策略已保存")
+      toast.success("新增供应商默认冻结策略已保存")
       await state.load()
     } catch (error) {
       state.setError(errorMessage(error, "保存默认冻结策略失败"))
@@ -599,9 +599,9 @@ function DefaultFreezePolicyTab({ active }: { active: boolean }) {
   }
 
   return (
-    <TabFrame description="配置新创建渠道的初始冻结策略快照。新建渠道时会把这里配置的规则作为该渠道的冻结策略落库；之后修改这里不影响任何已建渠道。" loading={state.loading} saving={state.saving} error={state.error} onReload={state.load} onSave={() => void save()}>
+    <TabFrame description="配置新创建供应商的初始冻结策略快照。新建供应商时会把这里配置的规则作为该供应商的冻结策略落库；之后修改这里不影响任何已建供应商。" loading={state.loading} saving={state.saving} error={state.error} onReload={state.load} onSave={() => void save()}>
       {state.value ? <div className="flex flex-col gap-4">
-        <Alert><AlertDescription>这是「新增渠道」的默认冻结策略。保存后仅对后续新建的渠道生效：创建渠道时快照此配置写入该渠道，已建渠道的冻结策略保持不变。要改已有渠道，请到渠道弹窗的「冻结策略」Tab 单独调整。</AlertDescription></Alert>
+        <Alert><AlertDescription>这是「新增供应商」的默认冻结策略。保存后仅对后续新建的供应商生效：创建供应商时快照此配置写入该供应商，已建供应商的冻结策略保持不变。要改已有供应商，请到供应商弹窗的「冻结策略」Tab 单独调整。</AlertDescription></Alert>
         <FreezePolicyEditor value={{ enabled: safeBoolean(fp.enabled), rules }} onChange={setPolicy} />
       </div> : null}
     </TabFrame>
@@ -691,8 +691,8 @@ function HeaderTemplatesTab({ active }: { active: boolean }) {
 }
 
 /**
- * 全局模型规则模版：渠道的「过滤及改写规则」可以插入一条引用条目指向这里的模版。
- * 引用是活引用——改这里的模版，所有引用它的渠道下次同步立即生效。
+ * 全局模型规则模版：供应商的「过滤及改写规则」可以插入一条引用条目指向这里的模版。
+ * 引用是活引用——改这里的模版，所有引用它的供应商下次同步立即生效。
  * 模版内只能放内联规则（allowTemplateRefs=false），不允许模版再嵌模版。
  */
 function ModelRuleTemplatesTab({ active }: { active: boolean }) {
@@ -741,7 +741,7 @@ function ModelRuleTemplatesTab({ active }: { active: boolean }) {
 
   return (
     <TabFrame
-      description="模版供渠道的「过滤及改写规则」引用。改模版会立即影响所有引用它的渠道，规则本身只作用于新获取到的模型。"
+      description="模版供供应商的「过滤及改写规则」引用。改模版会立即影响所有引用它的供应商，规则本身只作用于新获取到的模型。"
       loading={state.loading}
       saving={state.saving}
       error={state.error}
@@ -775,10 +775,10 @@ function ModelRuleTemplatesTab({ active }: { active: boolean }) {
             {current ? (
               <div className="flex flex-col gap-5">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="模版 ID" hint="渠道保存的是这个 ID；改 ID 会让已有引用失效。">
+                  <Field label="模版 ID" hint="供应商保存的是这个 ID；改 ID 会让已有引用失效。">
                     <Input value={current.id} placeholder="例如 tpl-common" onChange={(event) => update(selected, { id: event.target.value })} />
                   </Field>
-                  <Field label="模版名称" hint="渠道引用下拉里展示的名称。">
+                  <Field label="模版名称" hint="供应商引用下拉里展示的名称。">
                     <Input value={current.name} placeholder="例如 通用改名" onChange={(event) => update(selected, { name: event.target.value })} />
                   </Field>
                 </div>
@@ -833,7 +833,7 @@ function OutputInterceptionTab({ active }: { active: boolean }) {
   }
 
   return (
-    <TabFrame description="识别上游返回的无效占位内容。命中后不会把该响应交给客户端，而是切换候选账号或渠道继续重试。" loading={state.loading} saving={state.saving} error={state.error} onReload={state.load} onSave={() => void save()}>
+    <TabFrame description="识别上游返回的无效占位内容。命中后不会把该响应交给客户端，而是切换候选账号或供应商继续重试。" loading={state.loading} saving={state.saving} error={state.error} onReload={state.load} onSave={() => void save()}>
       {state.value ? <div className="flex flex-col gap-4">
         <Alert><AlertDescription>规则按响应完整文本匹配，支持跨流式分片。正则适合格式变化的内容，字面文本适合精确的固定占位符。配置保存后会通过 Pub/Sub 同步到其他实例。</AlertDescription></Alert>
         <OutputInterceptionTable value={rules} onChange={setRules} />
@@ -955,7 +955,7 @@ function ModelsTab({ active }: { active: boolean }) {
         </section> : null}
 
         <section className="rounded-lg border bg-card p-5">
-          <div className="flex items-start justify-between gap-3"><div className="flex-1"><h3 className="font-semibold">上下文超限检测</h3><p className="mt-1 text-xs text-muted-foreground">开启时按统计策略估算输入并对超过模型上下文的请求直接返回 context_too_large；关闭后不再拦截，渠道 token 预占与日志预测值不受影响。</p></div><Switch checked={config.context_detection_enabled} onCheckedChange={(value) => state.setValue((current) => current ? { ...current, context_detection_enabled: value } : current)} /></div>
+          <div className="flex items-start justify-between gap-3"><div className="flex-1"><h3 className="font-semibold">上下文超限检测</h3><p className="mt-1 text-xs text-muted-foreground">开启时按统计策略估算输入并对超过模型上下文的请求直接返回 context_too_large；关闭后不再拦截，供应商 token 预占与日志预测值不受影响。</p></div><Switch checked={config.context_detection_enabled} onCheckedChange={(value) => state.setValue((current) => current ? { ...current, context_detection_enabled: value } : current)} /></div>
         </section>
 
         <section className="rounded-lg border bg-card p-5">

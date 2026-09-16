@@ -406,15 +406,21 @@ export default function TeamManagerMembers() {
   }
 
   return (
-    <div className="flex w-full flex-1 flex-col gap-6">
-      <Tabs defaultValue="users" className="flex flex-1 flex-col gap-4">
+    // 高度交给外层 .platform-scope 的滚动：它是 block + overflow-y-auto，不是
+    // flex 容器，所以这里的 flex-1 拿不到确定高度，会把内层 flex-1 的卡片一路
+    // 压成 0（卡片 overflow-hidden 时最小尺寸为 0，只剩 48px 表头，正文被裁掉）。
+    // 卡片按内容自然撑高、整页在壳里滚动，与项目/日志等列表页同口径。
+    <div className="flex w-full flex-col gap-6">
+      <Tabs defaultValue="users" className="flex flex-col gap-4">
         <TabsList>
           <TabsTrigger value="users">{t("managerShell.nav.members")}</TabsTrigger>
           <TabsTrigger value="groups">分组</TabsTrigger>
           <TabsTrigger value="login">{t("loginMethods.title", "登录方式")}</TabsTrigger>
         </TabsList>
-        <TabsContent value="users" className="flex flex-col gap-6">
-      <Card className="shadow-none flex-1">
+        {/* flex-none：TabsContent 自带 flex-1 + basis-0，在无确定高度的父级里会
+            塌成 0；这里按内容撑高。 */}
+        <TabsContent value="users" className="flex flex-none flex-col gap-6">
+      <Card className="shadow-none">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <IconUserCircle />
@@ -519,7 +525,7 @@ export default function TeamManagerMembers() {
         </CardContent>
       </Card>
         </TabsContent>
-        <TabsContent value="groups" className="flex flex-col gap-6">
+        <TabsContent value="groups" className="flex flex-none flex-col gap-6">
 
       {/* 分组（团队分组）：给模型/镜像授权时按分组下发。 */}
       <Card className="shadow-none">
@@ -609,7 +615,7 @@ export default function TeamManagerMembers() {
         </CardContent>
       </Card>
         </TabsContent>
-        <TabsContent value="login">
+        <TabsContent value="login" className="flex-none">
           <TeamManagerOIDC />
         </TabsContent>
       </Tabs>

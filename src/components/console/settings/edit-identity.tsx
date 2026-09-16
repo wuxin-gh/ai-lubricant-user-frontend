@@ -22,7 +22,7 @@ import { toast } from "sonner"
 import type { DomainGitIdentity } from "@/api/Api"
 import { ConstsGitPlatform } from "@/api/Api"
 import Icon from "@/components/common/Icon"
-import { CircleQuestionMark } from 'lucide-react'
+import GitTokenHelp from "@/components/console/settings/git-token-help"
 import { useTranslation } from "react-i18next"
 
 interface EditIdentityProps {
@@ -43,31 +43,14 @@ export default function EditIdentity({
   const { t } = useTranslation()
   const [accessToken, setAccessToken] = useState("")
   const [baseUrl, setBaseUrl] = useState("")
-  const [email, setEmail] = useState("")
-  const [username, setUsername] = useState("")
   const [remark, setRemark] = useState("")
   const [platform, setPlatform] = useState<ConstsGitPlatform | "">("")
 
   const isInstallationApp = identity?.is_installation_app === true
 
-  // Validate email format.
-  const isValidEmail = (email: string): boolean => {
-    const emailRegex = /^[a-zA-Z0-9+_.-]+@[0-9a-zA-Z.-]+$/
-    return emailRegex.test(email)
-  }
-
-  // Validate username format while allowing Unicode characters.
-  const isValidUsername = (username: string): boolean => {
-    const forbiddenChars = "!@#$%^&*[]()<>'\""
-    return !Array.from(forbiddenChars).some((char) => username.includes(char))
-  }
-
-
   useEffect(() => {
     if (identity) {
-      setUsername(identity.username || "")
       setBaseUrl(identity.base_url || "")
-      setEmail(identity.email || "")
       setRemark(identity.remark || "")
       setPlatform(identity.platform || "")
       setAccessToken(identity.access_token || "")
@@ -84,48 +67,31 @@ export default function EditIdentity({
       toast.error(t("consoleSettings.identities.toast.baseUrlRequired"))
       return
     }
-    if (!email.trim()) {
-      toast.error(t("consoleSettings.identities.toast.emailRequired"))
-      return
-    }
-    if (!isValidEmail(email.trim())) {
-      toast.error(t("consoleSettings.identities.toast.invalidEmail"))
-      return
-    }
-    if (!username.trim()) {
-      toast.error(t("consoleSettings.identities.toast.usernameRequired"))
-      return
-    }
-    if (!isValidUsername(username.trim())) {
-      toast.error(t("consoleSettings.identities.toast.invalidUsername"))
-      return
-    }
     if (!platform) {
       toast.error(t("consoleSettings.identities.toast.platformRequired"))
       return
     }
 
+    // username / email are deliberately absent: the username is a display label
+    // the server derives from the host (git_service._fill_identity_username) and
+    // re-derives whenever the token changes, so it is not user-editable; nothing
+    // consumes an email. Omitting them also leaves any stored value untouched.
     const updateData: {
       access_token?: string
       base_url: string
-      email: string
-      username: string
       platform: ConstsGitPlatform
       remark?: string
     } = {
       base_url: baseUrl.trim(),
-      email: email.trim(),
-      username: username.trim(),
       platform: platform as ConstsGitPlatform,
       remark: remark.trim(),
     }
 
-    // Update the token only when the user enters a new value.
+    // The server never returns the plaintext access token (only the masked form),
+    // so an empty field means "keep the stored token" — omit it from the payload
+    // and update_identity leaves it untouched. Send a new value only when typed.
     if (accessToken.trim()) {
       updateData.access_token = accessToken.trim()
-    } else if (identity.access_token) {
-      // Preserve the existing token when no new value is provided.
-      updateData.access_token = identity.access_token
     }
 
     apiRequest('v1UsersGitIdentitiesUpdate', updateData, [identity.id], (resp) => {
@@ -133,8 +99,6 @@ export default function EditIdentity({
         toast.success(t("consoleSettings.identities.toast.updateSuccess"))
         setAccessToken("")
         setBaseUrl("")
-        setEmail("")
-        setUsername("")
         setRemark("")
         setPlatform("")
         onOpenChange(false)
@@ -148,8 +112,6 @@ export default function EditIdentity({
   const handleCancel = () => {
     setAccessToken("")
     setBaseUrl("")
-    setEmail("")
-    setUsername("")
     setRemark("")
     setPlatform("")
     onOpenChange(false)
@@ -217,50 +179,17 @@ export default function EditIdentity({
             <Field>
               <div className="flex items-center justify-between gap-2">
                 <FieldLabel>Access Token</FieldLabel>
-                <Button
-                  type="button"
-                  variant="link"
-                  size="sm"
-                  asChild
-                  className="h-auto p-0 text-foreground"
-                >
-                  <a href="https://monkeycode.docs.baizhi.cloud/node/019a95ee-6277-7412-842a-587f25330ae6" target="_blank" rel="noopener noreferrer">
-                    <CircleQuestionMark />{t("consoleSettings.identities.help.howToGet")}
-                  </a>
-                </Button>
+                <GitTokenHelp platform={platform} />
               </div>
               <FieldContent>
                 <Input
-                  placeholder={t("consoleSettings.identities.placeholders.accessToken")}
+                  placeholder={t("consoleSettings.identities.placeholders.keepToken")}
                   value={accessToken}
                   onChange={(e) => setAccessToken(e.target.value)}
                 />
               </FieldContent>
             </Field>
           )}
-          <div className="flex gap-4">
-            <Field className="flex-1">
-              <FieldLabel>Username</FieldLabel>
-              <FieldContent>
-                <Input
-                  placeholder={t("consoleSettings.identities.placeholders.username")}
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                />
-              </FieldContent>
-            </Field>
-            <Field className="flex-1">
-              <FieldLabel>Email</FieldLabel>
-              <FieldContent>
-                <Input
-                  type="email"
-                  placeholder={t("consoleSettings.identities.placeholders.email")}
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </FieldContent>
-            </Field>
-          </div>
           <Field>
             <FieldLabel>{t("consoleSettings.identities.labels.remark")}</FieldLabel>
             <FieldContent>

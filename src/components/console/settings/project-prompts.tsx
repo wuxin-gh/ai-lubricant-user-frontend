@@ -25,7 +25,7 @@ import {
   type ProjectPrompt,
 } from "@/api/editorClient"
 
-const ALL_PROVIDERS = ["claude", "codex", "opencode"] as const
+const ALL_PROVIDERS = ["claude", "codex", "opencode", "dsh"] as const
 
 /**
  * 设置弹框内的「项目提示词」分区：只管理当前用户的私有提示词。

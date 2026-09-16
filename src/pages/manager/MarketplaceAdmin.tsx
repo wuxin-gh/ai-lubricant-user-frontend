@@ -92,7 +92,7 @@ export default function MarketplaceAdmin() {
   // status 三态：undefined=探测中，null=不可管理/探测失败，对象=可管理。
   // 管理页要求 writable（服务端配了 github_token）；只配仓库地址时市场可看但不可管。
   const [status, setStatus] = useState<MarketplaceStatus | null | undefined>(undefined)
-  // 内容模块（MCP/插件/Skill/提示词）的 CRUD 已收口到资源中心，这里只管渠道模板/
+  // 内容模块（MCP/插件/Skill/提示词）的 CRUD 已收口到资源中心，这里只管供应商模板/
   // 节点版本/移动端版本/外部榜单。默认落在榜单——它是这页的主工作区。
   const [module, setModule] = useState<ModuleTab>("leaderboard")
   // 外部榜单父级 tab 内部的二级视图：「榜单」列表 vs「配置」面板。
@@ -110,7 +110,7 @@ export default function MarketplaceAdmin() {
   const [editItem, setEditItem] = useState<MarketplaceManifest | null>(null)
   const [editMode, setEditMode] = useState<EditMode>("mcp-remote")
 
-  // 渠道模板与节点版本用专用编辑器，不走通用 EditDialog。
+  // 供应商模板与节点版本用专用编辑器，不走通用 EditDialog。
   const [channelEditOpen, setChannelEditOpen] = useState(false)
   const [channelEditItem, setChannelEditItem] = useState<MarketplaceManifest | null>(null)
   const [nodeEditOpen, setNodeEditOpen] = useState(false)
@@ -127,9 +127,9 @@ export default function MarketplaceAdmin() {
 
   const [assistantOpen, setAssistantOpen] = useState(false)
 
-  // 「从当前平台导入」多选弹框：拉当前渠道清单、勾选、只发布选中项到 GitHub。
+  // 「从当前平台导入」多选弹框：拉当前供应商清单、勾选、只发布选中项到 GitHub。
   const [importChannelsOpen, setImportChannelsOpen] = useState(false)
-  // 渠道模板批量硬删除仅在 channels Tab 开启。
+  // 供应商模板批量硬删除仅在 channels Tab 开启。
   const [channelBatchMode, setChannelBatchMode] = useState(false)
   const [selectedChannelIds, setSelectedChannelIds] = useState<Set<string>>(new Set())
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
@@ -319,11 +319,11 @@ export default function MarketplaceAdmin() {
     try {
       const res = await upsertMarketplaceItem("channels", manifest)
       applyPublish(res?.publish)
-      toast.success(res?.publish?.pending ? "渠道模板已保存，正在发布到仓库" : "渠道模板已保存")
+      toast.success(res?.publish?.pending ? "供应商模板已保存，正在发布到仓库" : "供应商模板已保存")
       setChannelEditOpen(false)
       void load()
     } catch (err: any) {
-      toast.error("渠道模板校验失败，请检查完整配置", { description: err?.message || String(err) })
+      toast.error("供应商模板校验失败，请检查完整配置", { description: err?.message || String(err) })
     }
   }
 
@@ -423,7 +423,7 @@ export default function MarketplaceAdmin() {
           description: [...result.failed.map((item) => `${item.id}：${item.error}`), ...result.warnings].join(" | "),
         })
       } else {
-        toast.success(`已删除 ${result.deleted.length} 个渠道模板`)
+        toast.success(`已删除 ${result.deleted.length} 个供应商模板`)
         setChannelBatchMode(false)
       }
       setBatchDeleteOpen(false)
@@ -470,7 +470,7 @@ export default function MarketplaceAdmin() {
 
   if (status === null) {
     return (
-      <AdminPage title="市场管理" description="管理渠道模板 / 节点版本 / 外部榜单资源（内容资源在资源中心统一管理）">
+      <AdminPage title="市场管理" description="管理供应商模板 / 节点版本 / 外部榜单资源（内容资源在资源中心统一管理）">
         <Empty>
           <div className="text-base font-medium">市场管理未启用</div>
           <div className="text-sm text-muted-foreground">
@@ -490,7 +490,7 @@ export default function MarketplaceAdmin() {
       title="市场管理"
       description={
         <span>
-          管理渠道模板 / 节点版本 / 移动端版本 / 设备控制 App / 外部榜单（MCP / 插件 / Skill / 提示词内容资源在资源中心统一管理）。当前仓库：
+          管理供应商模板 / 节点版本 / 移动端版本 / 设备控制 App / 外部榜单（MCP / 插件 / Skill / 提示词内容资源在资源中心统一管理）。当前仓库：
           {status.repo_url ? (
             <a href={status.repo_url} target="_blank" rel="noopener noreferrer" className="font-mono underline">
               {status.owner}/{status.repo}
@@ -506,7 +506,7 @@ export default function MarketplaceAdmin() {
         <Tabs value={module} onValueChange={(v) => { setModule(v as ModuleTab); setChannelBatchMode(false); setSelectedChannelIds(new Set()) }}>
           <div className="flex items-center justify-between">
             <TabsList>
-              <TabsTrigger value="channels">渠道模板 ({moduleCounts.channels ?? 0})</TabsTrigger>
+              <TabsTrigger value="channels">供应商模板 ({moduleCounts.channels ?? 0})</TabsTrigger>
               <TabsTrigger value="node-versions">节点版本 ({moduleCounts["node-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="mobile-versions">移动端 ({moduleCounts["mobile-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="device-control-versions">设备控制 App ({moduleCounts["device-control-versions"] ?? 0})</TabsTrigger>
@@ -716,7 +716,7 @@ export default function MarketplaceAdmin() {
       {batchDeleteOpen && (
         <Dialog open={batchDeleteOpen} onOpenChange={(next) => { if (!batchDeleting) setBatchDeleteOpen(next) }}>
           <DialogContent className="max-w-lg">
-            <DialogHeader><DialogTitle>永久删除渠道模板</DialogTitle></DialogHeader>
+            <DialogHeader><DialogTitle>永久删除供应商模板</DialogTitle></DialogHeader>
             <div className="space-y-3">
               <p className="text-sm text-destructive">将永久删除以下 {selectedChannelIds.size} 个模板及其 GitHub manifest，无法通过“恢复”找回：</p>
               <div className="max-h-64 overflow-y-auto rounded-md border p-2 text-sm">
@@ -743,8 +743,8 @@ export default function MarketplaceAdmin() {
 }
 
 /**
- * 「从当前平台导入」多选弹框：拉当前平台可导出渠道、勾选、只发布选中项到市场仓库。
- * 默认勾选「未在市场发布过」的渠道；已发布的默认不勾选，避免误覆盖。
+ * 「从当前平台导入」多选弹框：拉当前平台可导出供应商、勾选、只发布选中项到市场仓库。
+ * 默认勾选「未在市场发布过」的供应商；已发布的默认不勾选，避免误覆盖。
  */
 function ImportCurrentChannelsDialog({
   open,
@@ -773,7 +773,7 @@ function ImportCurrentChannelsDialog({
       // 保留用户明确选择，只剔除已不存在的项；首次进入保持空选择，默认不全选。
       setSelected((prev) => new Set(items.filter((item) => prev.has(item.provider)).map((item) => item.provider)))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "加载渠道清单失败")
+      toast.error(err instanceof Error ? err.message : "加载供应商清单失败")
     } finally {
       setLoading(false)
     }
@@ -854,7 +854,7 @@ function ImportCurrentChannelsDialog({
   const progress = job?.total ? Math.round((job.completed / job.total) * 100) : 0
   const phaseLabels: Record<string, string> = {
     queued: "等待执行", importing: "正在导入", finalizing_index: "正在更新目录索引",
-    finalizing_marker: "正在更新市场标记", refreshing_catalog: "正在刷新渠道模板缓存",
+    finalizing_marker: "正在更新市场标记", refreshing_catalog: "正在刷新供应商模板缓存",
     done: "已完成", failed: "失败",
   }
 
@@ -862,8 +862,8 @@ function ImportCurrentChannelsDialog({
     <Dialog open={open} onOpenChange={(next) => { if (!running) onOpenChange(next) }}>
       <DialogContent className="flex h-[92vh] w-[98vw] sm:max-w-6xl flex-col overflow-hidden">
         <DialogHeader>
-          <DialogTitle>从当前平台导入渠道模板</DialogTitle>
-          <p className="text-xs text-muted-foreground">只导出渠道基础配置，不含账号、密钥、Token、Cookie。所有导入项必须由你明确勾选。</p>
+          <DialogTitle>从当前平台导入供应商模板</DialogTitle>
+          <p className="text-xs text-muted-foreground">只导出供应商基础配置，不含账号、密钥、Token、Cookie。所有导入项必须由你明确勾选。</p>
         </DialogHeader>
 
         {job ? (
@@ -889,7 +889,7 @@ function ImportCurrentChannelsDialog({
           </div>
         ) : confirming ? (
           <div className="flex min-h-0 flex-1 flex-col gap-3">
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">请确认本次共导入 {selectedChannels.length} 个渠道模板{overwriteCount ? `，其中覆盖 ${overwriteCount} 个已发布模板` : ""}。</div>
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">请确认本次共导入 {selectedChannels.length} 个供应商模板{overwriteCount ? `，其中覆盖 ${overwriteCount} 个已发布模板` : ""}。</div>
             <div className="min-h-0 flex-1 overflow-y-auto rounded-md border">
               {selectedChannels.map((item) => <div key={item.provider} className="flex items-center justify-between border-b px-4 py-3 last:border-b-0"><div><div className="font-medium">{item.display_name}</div><div className="text-xs text-muted-foreground">{item.provider}</div></div>{item.published ? <Badge variant="destructive">覆盖</Badge> : <Badge variant="outline">新增</Badge>}</div>)}
             </div>
@@ -897,13 +897,13 @@ function ImportCurrentChannelsDialog({
         ) : (
           <div className="flex min-h-0 flex-1 flex-col gap-3">
             <div className="flex flex-wrap items-center gap-3 rounded-lg border p-3">
-              <Input placeholder="搜索渠道名称/类型/地址" value={query} onChange={(e) => setQuery(e.target.value)} className="max-w-sm" />
+              <Input placeholder="搜索供应商名称/类型/地址" value={query} onChange={(e) => setQuery(e.target.value)} className="max-w-sm" />
               <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>重新加载</Button>
               <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} disabled={!selected.size}>清空选择</Button>
               <span className="ml-auto text-xs text-muted-foreground">当前视图 {filtered.length} 项 · 已选 {selected.size} 项</span>
             </div>
             <div className="flex items-center gap-2 px-1 text-sm"><Checkbox checked={visibleSelected > 0 && !allVisibleSelected ? "indeterminate" : allVisibleSelected} onCheckedChange={toggleAllVisible} /><span>全选当前可选项（{visibleSelected}/{selectable.length}）</span></div>
-            {loading ? <div className="flex justify-center py-10"><Spinner /></div> : filtered.length === 0 ? <Empty><div className="text-sm">没有匹配的渠道</div></Empty> : (
+            {loading ? <div className="flex justify-center py-10"><Spinner /></div> : filtered.length === 0 ? <Empty><div className="text-sm">没有匹配的供应商</div></Empty> : (
               <div className="min-h-0 flex-1 overflow-y-auto rounded-md border">
                 {filtered.map((item) => {
                   const checked = selected.has(item.provider)
