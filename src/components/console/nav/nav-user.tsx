@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { Bell, LogOut, RefreshCw } from "lucide-react"
+import { Bell, Languages, LogOut, RefreshCw } from "lucide-react"
 import { IconInfoCircle, IconLockCode, IconPencil, IconPhotoEdit } from "@tabler/icons-react"
 import { toast } from "sonner"
 
@@ -31,7 +31,12 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useCommonData } from "@/components/console/data-provider"
@@ -42,6 +47,7 @@ import { apiRequest } from "@/utils/requestUtils"
 import { cn } from "@/lib/utils"
 import { IS_OFFLINE_EDITION } from "@/utils/edition"
 import { useTranslation } from "react-i18next"
+import { applyLanguage, isAppLanguage } from "@/i18n/language"
 import { UserAvatar } from "@/components/common/user-avatar"
 import { AboutDialog } from "@/components/common/about-dialog"
 
@@ -51,7 +57,7 @@ import { AboutDialog } from "@/components/common/about-dialog"
  * 通知中心入口放在头像菜单中，跳转到独立的 /console/notifications 页面；未读数显示红点。
  */
 export default function NavUser({ className }: { className?: string }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const { user, reloadUser } = useCommonData()
   const { serverConfig, auth } = useAppRuntime()
@@ -170,6 +176,15 @@ export default function NavUser({ className }: { className?: string }) {
     })
   }
 
+  // 语言切换：写 cookie + dayjs/html lang，再 changeLanguage 触发 react-i18next 重渲染。
+  // 已 i18n 的壳与用户侧页面立即切换；平台管理页（Channels/ModelMetadata 等）仍是
+  // 中文硬编码，不在本次覆盖范围内。
+  async function handleLanguageChange(next: string) {
+    if (!isAppLanguage(next)) return
+    applyLanguage(next)
+    await i18n.changeLanguage(next)
+  }
+
   async function handleAvatarChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     event.target.value = ""
@@ -268,6 +283,18 @@ export default function NavUser({ className }: { className?: string }) {
                 <RefreshCw className="size-4" />
                 {t("consoleShell.actions.refreshPage", "刷新页面")}
               </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className="gap-2">
+                  <Languages className="size-4" />
+                  {t("consoleShell.user.language", "语言 / Language")}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  <DropdownMenuRadioGroup value={i18n.language} onValueChange={handleLanguageChange}>
+                    <DropdownMenuRadioItem value="cn">中文</DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="en">English</DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
               <DropdownMenuItem onClick={() => setAboutOpen(true)}>
                 <IconInfoCircle className="size-4" />
                 {t("common.about.menu")}

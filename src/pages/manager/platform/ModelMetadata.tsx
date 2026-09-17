@@ -49,11 +49,12 @@ import {
 } from '@/@admin-port/api/modelMetadata'
 import { getProviders, getProviderUpstreamModels } from '@/@admin-port/api/providers'
 import type { ProviderLite, ProviderUpstreamModelItem } from '@/@admin-port/types/admin'
+import { ChannelIcon, isChannelIconConfigured } from './channel-catalog/ChannelIcon'
 import { UnifiedProviderModal } from './Channels'
 import { RealModelRoutingDialog, type RealModelRoutingTarget } from './RealModelRouting'
 
 type ViewMode = 'card' | 'table'
-type StatusFilter = 'all' | 'missing' | 'no-route' | 'runtime'
+type StatusFilter = 'all' | 'missing' | 'configured' | 'no-route' | 'runtime'
 type ImportSource = 'catalog:llm-metadata' | 'catalog:openrouter' | 'catalog:modelsdev' | `channel:${string}`
 type ModalState =
   | { kind: 'metadata'; mode: 'add' | 'edit'; model: UnifiedModel | null; lockModelId?: boolean }
@@ -147,9 +148,12 @@ interface GlobalConfigFormState {
 const PAGE_SIZES = [12, 24, 48, 96]
 
 // 真实模型 + 未配置模型合并展示：状态过滤兼顾运行态、供应商维度与缺元数据。
+// 「已配置」是独立维度：_hasMeta 为真即算已配置（含可用与无供应商两种运行态），
+// 与「未配置」互补；「无供应商」「runtime」仍是运行态维度的细分。
 const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'missing', label: '未配置' },
+  { key: 'configured', label: '已配置' },
   { key: 'no-route', label: '无供应商' },
   { key: 'runtime', label: 'runtime' },
 ]
@@ -620,6 +624,7 @@ export function ModelMetadata() {
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<StatusFilter>('all')
   const [selectedProviders, setSelectedProviders] = useState<string[]>([])
+  const [selectedOwners, setSelectedOwners] = useState<string[]>([])
   const [minTokens, setMinTokens] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('card')
@@ -666,6 +671,24 @@ export function ModelMetadata() {
 
   const unified = useMemo(() => mergeModels(data?.models ?? [], data?.runtime_models ?? []), [data])
   const providers = useMemo(() => Array.from(new Set(unified.flatMap((model) => model._providers))).sort(), [unified])
+  // 模型提供商（owned_by）维度：按 owner 聚合，附一个该 owner 下任意模型的 icon_url 作图标。
+  // 同一 owner 的模型 icon_url 可能不一致，取第一个非空值；全空则该 owner 不显示图标。
+  const ownerOptions = useMemo(() => {
+    const byOwner = new Map<string, { owner: string; iconUrl: string; count: number }>()
+    for (const model of unified) {
+      const owner = model.owned_by.trim()
+      if (!owner) continue
+      const current = byOwner.get(owner)
+      const iconUrl = model.icon_url.trim()
+      if (current) {
+        current.count += 1
+        if (!current.iconUrl && iconUrl) current.iconUrl = iconUrl
+      } else {
+        byOwner.set(owner, { owner, iconUrl, count: 1 })
+      }
+    }
+    return Array.from(byOwner.values()).sort((a, b) => a.owner.localeCompare(b.owner))
+  }, [unified])
   const tokenBounds = useMemo(() => {
     const values = unified.map((model) => tokenNumber(model.max_tokens)).filter((value): value is number => value !== null && value > 0)
     if (values.length === 0) return { min: 0, max: 200000 }
@@ -691,23 +714,25 @@ export function ModelMetadata() {
       const providerLabels = model._providers.map(providerLabel).join(' ')
       const searchText = [model.model_id, model.name, model.owned_by, model._providers.join(' '), providerLabels, routesText].join(' ').toLowerCase()
       if (query && !searchText.includes(query)) return false
-      // 真实模型 + 未配置模型合并：状态过滤覆盖缺元数据、无供应商、运行态。
+      // 真实模型 + 未配置模型合并：状态过滤覆盖缺元数据、已配置、无供应商、运行态。
       if (status === 'missing' && model._hasMeta) return false
+      if (status === 'configured' && !model._hasMeta) return false
       if (status === 'no-route' && model._runtime) return false
       if (status === 'runtime' && !model._runtime) return false
       if (selectedProviders.length > 0 && !model._providers.some((provider) => selectedProviders.includes(provider))) return false
+      if (selectedOwners.length > 0 && !selectedOwners.includes(model.owned_by.trim())) return false
       const outputTokens = model.max_tokens ?? 0
       if (min !== null && Number.isFinite(min) && outputTokens < min) return false
       if (max !== null && Number.isFinite(max) && outputTokens > max) return false
       return true
     })
-  }, [maxTokens, minTokens, providerLabel, search, selectedProviders, status, unified])
+  }, [maxTokens, minTokens, providerLabel, search, selectedOwners, selectedProviders, status, unified])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, totalPages)
   const pageItems = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
 
-  useEffect(() => { setPage(1) }, [search, status, selectedProviders, minTokens, maxTokens, pageSize])
+  useEffect(() => { setPage(1) }, [search, status, selectedProviders, selectedOwners, minTokens, maxTokens, pageSize])
 
   const stats = useMemo(() => ({
     modelCount: data?.summary.runtime_model_count ?? unified.length,
@@ -801,6 +826,10 @@ export function ModelMetadata() {
 
   const toggleProvider = useCallback((provider: string) => {
     setSelectedProviders((current) => current.includes(provider) ? current.filter((item) => item !== provider) : [...current, provider])
+  }, [])
+
+  const toggleOwner = useCallback((owner: string) => {
+    setSelectedOwners((current) => current.includes(owner) ? current.filter((item) => item !== owner) : [...current, owner])
   }, [])
 
   const openDefaultModal = useCallback(() => {
@@ -1241,14 +1270,41 @@ export function ModelMetadata() {
       {error && <Alert variant="destructive"><AlertTitle>加载/操作错误</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
       <div className="grid min-h-0 flex-1 items-stretch gap-4" style={{ gridTemplateColumns: 'minmax(280px, 320px) minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
         <SectionCard title="筛选" description="按状态、供应商和输出 token 范围筛选" style={{ height: '100%', display: 'flex', flexDirection: 'column' }} bodyStyle={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div className="flex min-h-0 flex-1 flex-col gap-[18px]">
+          <div className="flex min-h-0 flex-1 flex-col gap-[18px] overflow-y-auto pr-1">
             <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 model_id / name / 供应商 / upstream" />
             <div className="flex flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">状态</div><div className="flex flex-wrap gap-1.5">{STATUS_FILTERS.map((item) => <Chip key={item.key} active={status === item.key} onClick={() => setStatus(item.key)}>{item.label}</Chip>)}</div></div>
             <div className="flex flex-col gap-3 border-t pt-[18px]">
               <div className="flex items-center justify-between gap-2.5"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">max_tokens 范围</div><span className="font-mono text-[11px] text-muted-foreground">{formatCount(parseTokenFilter(minTokens) ?? tokenBounds.min)} - {formatCount(parseTokenFilter(maxTokens) ?? tokenBounds.max)}</span></div>
               <Slider min={sliderMin} max={sliderMax} step={sliderStep} disabled={sliderDisabled} value={[Math.min(sliderLow, sliderHigh), Math.max(sliderLow, sliderHigh)]} onValueChange={([low, high]) => { setMinTokens(String(low)); setMaxTokens(String(high)) }} />
             </div>
-            <div className="flex min-h-0 flex-1 flex-col gap-2.5 border-t pt-[18px]"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">供应商</div><div className="flex min-h-0 flex-1 flex-wrap content-start gap-1.5 overflow-y-auto">{providers.length === 0 ? <span className="text-xs text-muted-foreground">暂无供应商</span> : providers.map((provider) => <Chip key={provider} active={selectedProviders.includes(provider)} onClick={() => toggleProvider(provider)}>{providerLabel(provider)}</Chip>)}</div></div>
+            <div className="flex flex-col gap-2.5 border-t pt-[18px]">
+              <div className="flex items-center justify-between gap-2.5"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">模型提供商</div><span className="text-[11px] text-muted-foreground">{selectedOwners.length > 0 ? `已选 ${selectedOwners.length}` : `${ownerOptions.length} 个`}</span></div>
+              <div className="flex max-h-[168px] flex-wrap content-start gap-1.5 overflow-y-auto pr-1">
+                {ownerOptions.length === 0 ? <span className="text-xs text-muted-foreground">暂无提供商</span> : ownerOptions.map((item) => {
+                  const active = selectedOwners.includes(item.owner)
+                  const showIcon = isChannelIconConfigured(item.iconUrl)
+                  return (
+                    <button
+                      key={item.owner}
+                      type="button"
+                      onClick={() => toggleOwner(item.owner)}
+                      title={`${item.owner}（${item.count} 个模型）`}
+                      className={cn(
+                        'inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors',
+                        active ? 'border-primary bg-primary text-primary-foreground' : 'border-border text-muted-foreground hover:bg-muted',
+                      )}
+                    >
+                      {showIcon ? <ChannelIcon name={item.iconUrl} className="size-3.5 shrink-0" /> : null}
+                      <span className="truncate">{item.owner}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2.5 border-t pt-[18px]">
+              <div className="flex items-center justify-between gap-2.5"><div className="text-[11px] font-bold uppercase tracking-[0.4px] text-muted-foreground">供应商</div><span className="text-[11px] text-muted-foreground">{selectedProviders.length > 0 ? `已选 ${selectedProviders.length}` : `${providers.length} 个`}</span></div>
+              <div className="flex max-h-[168px] flex-wrap content-start gap-1.5 overflow-y-auto pr-1">{providers.length === 0 ? <span className="text-xs text-muted-foreground">暂无供应商</span> : providers.map((provider) => <Chip key={provider} active={selectedProviders.includes(provider)} onClick={() => toggleProvider(provider)}>{providerLabel(provider)}</Chip>)}</div>
+            </div>
           </div>
         </SectionCard>
         <div className="flex h-full min-w-0 flex-col gap-4">

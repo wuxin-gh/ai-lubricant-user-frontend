@@ -116,9 +116,11 @@ async function reviewFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-/** 节点升级/编辑器安装升级是节点上跑官方命令的长 RPC（数分钟），与管理端
- * axios 客户端的 620s 超时同口径——fetch 默认无超时，靠 AbortController 兜住。 */
-async function reviewFetchLong<T>(path: string, init?: RequestInit, timeoutMs = 620_000): Promise<T> {
+/** 节点升级/编辑器安装升级是节点上跑官方命令的长 RPC（节点下载归档可达数分钟），
+ *  与管理端 axios 客户端同口径。必须严格大于数据面 NODE_LONG_RPC_TIMEOUT（1020s），
+ *  否则前端先 abort、用户看到「请求超时」而服务端其实还在正常等节点。
+ *  fetch 默认无超时，靠 AbortController 兜住。 */
+async function reviewFetchLong<T>(path: string, init?: RequestInit, timeoutMs = 1_100_000): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {

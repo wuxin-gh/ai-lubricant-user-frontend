@@ -1,4 +1,4 @@
-import request from "./client";
+import request, { NODE_LONG_OPERATION_TIMEOUT_MS } from "./client";
 
 // ==================== 节点类型 ====================
 
@@ -298,7 +298,7 @@ export async function installNodeEditor(
   const response = await request.post<ManageEditorResult>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/editors/${encodeURIComponent(editor)}/install`,
     undefined,
-    { timeout: 620000 },
+    { timeout: NODE_LONG_OPERATION_TIMEOUT_MS },
   )
   return response.data
 }
@@ -331,7 +331,7 @@ export async function installNodeHostTool(
   const response = await request.post<InstallHostToolResult>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/host-tools/${encodeURIComponent(tool)}/install`,
     undefined,
-    { timeout: 620000 },
+    { timeout: NODE_LONG_OPERATION_TIMEOUT_MS },
   )
   return response.data
 }
@@ -448,7 +448,7 @@ export async function upgradeNodeEditor(
   const response = await request.post<ManageEditorResult>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/editors/${encodeURIComponent(editor)}/upgrade`,
     undefined,
-    { timeout: 620000 },
+    { timeout: NODE_LONG_OPERATION_TIMEOUT_MS },
   )
   return response.data
 }
@@ -592,7 +592,7 @@ export async function upgradeNode(
   const response = await request.post<UpgradeNodeResult>(
     `/api/v1/admin/nodes/${encodeURIComponent(nodeId)}/upgrade`,
     { proxy_config_id: options.proxyConfigId || "" },
-    { timeout: 620000 },
+    { timeout: NODE_LONG_OPERATION_TIMEOUT_MS },
   )
   return response.data
 }

@@ -3,7 +3,7 @@
  * 数据层沿用 `@/@admin-port/api/proxyPool`（纯 axios），仅重写 view 层。
  */
 import { useEffect, useMemo, useState } from "react"
-import { Plus, Eye, EyeOff } from "lucide-react"
+import { Plus } from "lucide-react"
 import {
   AdminPage,
   SectionCard,
@@ -44,6 +44,7 @@ import {
 import type { ProxyEntry, ProxyInput, ProxyMode } from "@/@admin-port/api/proxyPool"
 import { listNodes } from "@/@admin-port/api/nodes"
 import type { NodeInfo } from "@/@admin-port/api/nodes"
+import { parseProxyUrl } from "@/utils/proxy-url"
 
 interface ProxyFormValues {
   name: string
@@ -85,7 +86,6 @@ export function ProxyPool() {
   const [form, setForm] = useState<ProxyFormValues>(EMPTY_FORM)
   const [nameError, setNameError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
-  const [showPassword, setShowPassword] = useState(false)
 
   // 删除确认框状态
   const [confirmRow, setConfirmRow] = useState<ProxyRow | null>(null)
@@ -130,7 +130,6 @@ export function ProxyPool() {
     setModalError(null)
     setNameError(null)
     setUrlError(null)
-    setShowPassword(false)
     setForm(EMPTY_FORM)
     void loadNodes()
     setModalOpen(true)
@@ -141,7 +140,6 @@ export function ProxyPool() {
     setModalError(null)
     setNameError(null)
     setUrlError(null)
-    setShowPassword(false)
     setForm({
       name: proxy.name,
       mode: proxy.mode || "network",
@@ -190,13 +188,19 @@ export function ProxyPool() {
     // url_prefix 前缀基址即请求目标、direct 不走代理、node 走节点转发：均不使用 URL 认证，提交时清空。
     const isPrefix = form.mode === "url_prefix"
     const noAuth = isPrefix || isDirect || isNode
+    // 网络代理只留一个地址框，凭据可能就粘在里面（scheme://user:pass@host:port）。
+    // 拆出来提交：后端存的仍是 地址/用户名/密码 三个字段，运行时再拼回去。
+    // 地址里没凭据时回退到 state——编辑既有条目、用户没碰地址框的场景靠这条保住原凭据。
+    // 仅 network 模式做拆分：url_prefix 的基址不走认证，其 path 里若有 @ 不应被当凭据摘掉。
+    const parsed = form.mode === "network" ? parseProxyUrl(form.url) : null
+    const useParsed = !!parsed?.hasCredentials
     const payload: ProxyInput = {
       ...(editingProxy ? { id: editingProxy.id } : {}),
       name: form.name.trim(),
       mode: form.mode,
-      url: isDirect || isNode ? "" : form.url.trim(),
-      username: noAuth ? "" : (form.username || "").trim(),
-      password: noAuth ? "" : (form.password || ""),
+      url: isDirect || isNode ? "" : parsed ? parsed.url : form.url.trim(),
+      username: noAuth ? "" : useParsed ? parsed!.username : (form.username || "").trim(),
+      password: noAuth ? "" : useParsed ? parsed!.password : (form.password || ""),
       ...(isNode ? { node_id: (form.nodeId || "").trim() } : {}),
     }
 
@@ -251,6 +255,12 @@ export function ProxyPool() {
       setDeleteLoadingId(null)
     }
   }
+
+  // 地址框里粘的凭据（若有）。仅 network 模式参与，url_prefix 的基址不走认证。
+  const parsedUrl = useMemo(
+    () => (form.mode === "network" ? parseProxyUrl(form.url) : { url: form.url, username: "", password: "", hasCredentials: false }),
+    [form.mode, form.url],
+  )
 
   const rows: ProxyRow[] = useMemo(
     () =>
@@ -476,20 +486,32 @@ export function ProxyPool() {
 
             {form.mode !== "direct" && form.mode !== "node" ? (
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="proxy-url">{form.mode === "url_prefix" ? "前缀地址" : "URL"}</Label>
+                <Label htmlFor="proxy-url">
+                  {form.mode === "url_prefix" ? "前缀地址" : "代理地址"}
+                </Label>
                 <Input
                   id="proxy-url"
                   disabled={saving}
                   placeholder={
                     form.mode === "url_prefix"
                       ? "https://proxy.example.com"
-                      : "http://127.0.0.1:7890"
+                      : "http://127.0.0.1:7890（可整行粘贴 http://用户名:密码@主机:端口）"
                   }
                   value={form.url}
                   aria-invalid={!!urlError}
                   onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
                 />
                 {urlError ? <span className="text-xs text-destructive">{urlError}</span> : null}
+                {/* 网络代理的凭据直接粘在地址里即可：这里当场回显拆到了什么，避免用户
+                    以为没生效。编辑既有条目时地址框是裸地址，凭据来自 state，同样要显示。 */}
+                {form.mode === "network" ? (
+                  <CredentialHint
+                    parsed={parsedUrl}
+                    fallbackUsername={form.username}
+                    fallbackPassword={form.password}
+                    onClear={() => setForm((f) => ({ ...f, url: parsedUrl.url, username: "", password: "" }))}
+                  />
+                ) : null}
               </div>
             ) : null}
 
@@ -520,44 +542,10 @@ export function ProxyPool() {
             ) : null}
 
             {form.mode === "network" ? (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="proxy-username">用户名</Label>
-                  <Input
-                    id="proxy-username"
-                    disabled={saving}
-                    autoComplete="off"
-                    placeholder="代理认证用户名（可选）"
-                    value={form.username ?? ""}
-                    onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="proxy-password">密码</Label>
-                  <div className="relative">
-                    <Input
-                      id="proxy-password"
-                      type={showPassword ? "text" : "password"}
-                      disabled={saving}
-                      autoComplete="new-password"
-                      placeholder="代理认证密码（可选）"
-                      className="pr-9"
-                      value={form.password ?? ""}
-                      onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                    />
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                      onClick={() => setShowPassword((v) => !v)}
-                      aria-label={showPassword ? "隐藏密码" : "显示密码"}
-                    >
-                      {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                    </button>
-                  </div>
-                </div>
-              </>
+              <p className="mb-0 text-xs text-muted-foreground">
+                认证信息直接写在代理地址里即可（如 http://用户名:密码@主机:端口），系统会自动拆分保存；
+                用户名/密码会在运行时自动拼回代理 URL。账号只能从代理池绑定代理。
+              </p>
             ) : null}
 
             {form.mode === "url_prefix" ? (
@@ -577,10 +565,6 @@ export function ProxyPool() {
                 节点转发：绑定此条目的账号出站请求下发给所选执行节点，由节点用自己的
                 网络发出，请求从节点 IP 出网。节点只做纯 I/O 转发（含 TLS），不处理业务。
                 覆盖模型请求与登录 / OAuth / token 刷新等全部出站流量。
-              </p>
-            ) : !isEdit ? (
-              <p className="mb-0 text-xs text-muted-foreground">
-                用户名/密码会在运行时自动拼入代理 URL；账号只能从代理池绑定代理。
               </p>
             ) : null}
 
@@ -629,6 +613,45 @@ export function ProxyPool() {
         </AlertDialogContent>
       </AlertDialog>
     </AdminPage>
+  )
+}
+
+
+/**
+ * 「已识别认证」提示行：告诉用户地址里粘的凭据被拆到了什么。
+ *
+ * 地址里没有凭据时回退显示 state 里的凭据（编辑既有条目、地址框仍是裸地址的场景）——
+ * 否则用户会以为打开编辑框后认证丢了。密码只报「已设置」，不回显也不报长度。
+ */
+function CredentialHint({
+  parsed,
+  fallbackUsername,
+  fallbackPassword,
+  onClear,
+}: {
+  parsed: { url: string; username: string; password: string; hasCredentials: boolean }
+  fallbackUsername?: string
+  fallbackPassword?: string
+  onClear: () => void
+}) {
+  const username = parsed.hasCredentials ? parsed.username : (fallbackUsername || "")
+  const hasPassword = parsed.hasCredentials ? !!parsed.password : !!fallbackPassword
+  if (!username && !hasPassword) return null
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <span className="text-green-600 dark:text-green-400">已识别认证：</span>
+      {username ? <span>用户名 {username}</span> : null}
+      {hasPassword ? <span>密码已设置</span> : null}
+      <button
+        type="button"
+        className="text-primary hover:underline"
+        onClick={onClear}
+        aria-label="清除代理认证"
+      >
+        清除
+      </button>
+    </div>
   )
 }
 

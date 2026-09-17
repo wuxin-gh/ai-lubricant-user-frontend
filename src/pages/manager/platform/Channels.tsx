@@ -1165,6 +1165,12 @@ function UpstreamModelPicker({
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索上游模型 / 模型 ID" style={{ ...inputStyle, flex: '0 1 220px' }} />
         <button onClick={() => setVisibleSelection(true)} disabled={visibleKeys.length === 0} style={btnGhost}>全选</button>
         <button onClick={() => setVisibleSelection(false)} disabled={visibleKeys.length === 0} style={btnGhost}>全取消</button>
+        {/* 确认/取消紧挨「全取消」：勾选动作与提交动作连成一组，右侧留给统计与预览开关。 */}
+        <button
+          onClick={() => onConfirm(rows.filter((row, index) => selected.has(modelDraftKey(row, index))))}
+          style={btnPrimary}
+        >确认</button>
+        <button onClick={onCancel} style={btnGhost}>取消</button>
         {hasRewriteRules && (
           <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--text2)', cursor: 'pointer' }} title="仅预览自动更新后的样子；开关不影响定时更新是否按规则生效">
             <input type="checkbox" checked={previewApplyRewrite} onChange={(e) => setPreviewApplyRewrite(e.target.checked)} />
@@ -1172,11 +1178,6 @@ function UpstreamModelPicker({
           </label>
         )}
         <span style={{ fontSize: '13px', color: 'var(--text2)', marginLeft: 'auto' }}>已选 {selected.size} / {rows.length}，当前筛选 {visibleSelectedCount} / {visibleKeys.length}</span>
-        <button
-          onClick={() => onConfirm(rows.filter((row, index) => selected.has(modelDraftKey(row, index))))}
-          style={btnPrimary}
-        >确认</button>
-        <button onClick={onCancel} style={btnGhost}>取消</button>
       </div>
       <ProviderModelTable
         entries={visibleEntries}
@@ -1214,6 +1215,7 @@ function Modal({
   maxWidth = 640,
   fixedHeight,
   contentOverflow,
+  closeOnBackdrop = true,
 }: {
   open: boolean
   title: string
@@ -1225,12 +1227,13 @@ function Modal({
   maxWidth?: number
   fixedHeight?: string | number
   contentOverflow?: React.CSSProperties['overflowY']
+  closeOnBackdrop?: boolean
 }) {
   if (!open) return null
 
   return (
     <div
-      onClick={onClose}
+      onClick={closeOnBackdrop ? onClose : undefined}
       style={{
         position: 'fixed',
         inset: 0,
@@ -3148,6 +3151,8 @@ function AccountTestTab({ providerId, protocol: providerProtocol, active }: { pr
       if (s && !values.includes(s)) values.push(s)
     }
     // 1) 供应商自身配置的协议：主协议 + chat_protocols/supported_protocols 行，置首。
+    // 注意：这里保持原值不下发归一（后端 _select_test_endpoint_config 按原值精确匹配
+    // 协议行），前端「对话协议」的 chat 主键只作用于协议行编辑，不作用于测试协议下拉。
     push(providerProtocol)
     const supported = (rawConfig as Record<string, unknown> | null)?.supported_protocols
     if (Array.isArray(supported)) supported.forEach(push)
@@ -3921,7 +3926,7 @@ function normalizeChatProtocolRows(rows: unknown): ChatProtocolConfig[] {
   return rows.map((row: any) => ({
     id: safeString(row?.id),
     enabled: row?.enabled !== false,
-    protocol: safeString(row?.protocol) || 'openai',
+    protocol: normalizeProtocolValue(row?.protocol),
     path: safeString(row?.path),
     upstream_stream: normalizeUpstreamStream(row?.upstream_stream),
     client_preset: safeString(row?.client_preset) || 'none',
@@ -4316,7 +4321,7 @@ export function UnifiedProviderModal({
       ? preset.chat_protocols.map((row) => ({
           id: safeString(row.id),
           enabled: row.enabled !== false,
-          protocol: safeString(row.protocol) || 'openai',
+          protocol: normalizeProtocolValue(row.protocol),
           path: safeString(row.path),
           upstream_stream: normalizeUpstreamStream(row.upstream_stream),
           client_preset: safeString(row.client_preset) || 'none',
@@ -4326,7 +4331,7 @@ export function UnifiedProviderModal({
           models: Array.isArray(row.models) ? row.models.map(String) : [],
         }))
       : []
-    const proto = safeString(presetProtocols.find((row) => row.enabled !== false)?.protocol || preset?.protocol).trim() || 'openai'
+    const proto = normalizeProtocolValue(presetProtocols.find((row) => row.enabled !== false)?.protocol || preset?.protocol)
     const defs = getProtocolDefaultPaths(proto)
     const builtinLabel = BUILTIN_TYPE_OPTIONS.find((o) => o.value === createBuiltinType)?.label || createBuiltinType
     const base: ProviderBaseConfig = {
@@ -4450,7 +4455,7 @@ export function UnifiedProviderModal({
     try {
       const base = await getProviderDetail(resolvedId)
       // 路径不应为空：后端落库可能为空，前端按协议默认值预填，保证编辑态可见、保存即落库
-      const defs = getProtocolDefaultPaths(safeString(base.protocol) || 'openai')
+      const defs = getProtocolDefaultPaths(normalizeProtocolValue(base.protocol))
       setDetail({
         ...base,
         tags: normalizeProviderTags(base.tags),
@@ -4466,7 +4471,7 @@ export function UnifiedProviderModal({
       setChatProtocols(protocols.map((p) => ({
         id: safeString(p.id),
         enabled: p.enabled !== false,
-        protocol: safeString(p.protocol) || 'openai',
+        protocol: normalizeProtocolValue(p.protocol),
         path: safeString(p.path),
         upstream_stream: normalizeUpstreamStream(p.upstream_stream),
         client_preset: safeString(p.client_preset) || 'none',
@@ -4683,7 +4688,7 @@ export function UnifiedProviderModal({
     const row: ChatProtocolConfig = {
       id: safeString(p.id),
       enabled: p.enabled !== false,
-      protocol: safeString(p.protocol) || 'openai',
+      protocol: normalizeProtocolValue(p.protocol),
       path: safeString(p.path),
       upstream_stream: normalizeUpstreamStream(p.upstream_stream),
       client_preset: safeString(p.client_preset) || 'none',
@@ -5279,6 +5284,8 @@ export function UnifiedProviderModal({
       maxWidth={1180}
       fixedHeight="88vh"
       contentOverflow="hidden"
+      // 供应商表单内容多，点遮罩误关会丢未保存的改动；关闭只走「取消」/「×」/「保存」。
+      closeOnBackdrop={false}
       footer={
         <>
           {error && !loading && <div style={{ padding: '10px 14px', marginBottom: '12px', background: 'rgba(251, 113, 133, 0.1)', border: '1px solid var(--red)', borderRadius: 'var(--admin-radius)', fontSize: '14px', color: 'var(--red)' }}>{error}</div>}
@@ -5521,21 +5528,7 @@ export function UnifiedProviderModal({
                     <input value={remarkText} onChange={(e) => setRemarkText(e.target.value)} placeholder="给供应商起个名字" style={inputStyle} />
                   </div>
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                      <label style={labelStyle}>跳转地址</label>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            aria-label="跳转地址说明"
-                            style={{ display: 'inline-flex', alignItems: 'center', padding: 0, border: 0, background: 'transparent', color: 'var(--text2)', cursor: 'help' }}
-                          >
-                            <CircleQuestionMark size={14} />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>配置后供应商卡片标题和弹窗标题显示跳转入口；留空保存时自动用供应商地址补齐。</TooltipContent>
-                      </Tooltip>
-                    </div>
+                    <label style={labelStyle}>跳转地址</label>
                     <input value={safeString(detail.website_url)} onChange={(e) => setDetail((prev) => prev ? { ...prev, website_url: e.target.value } : prev)} placeholder="https://官网或控制台" style={inputStyle} />
                   </div>
                 </div>
@@ -5554,7 +5547,7 @@ export function UnifiedProviderModal({
                             <CircleQuestionMark size={14} />
                           </button>
                         </TooltipTrigger>
-                        <TooltipContent>用于模型方案按供应商标签进行过滤</TooltipContent>
+                        <TooltipContent style={{ zIndex: 1100 }}>用于模型方案按供应商标签进行过滤</TooltipContent>
                       </Tooltip>
                     </div>
                     <ProviderTagInput
@@ -5875,7 +5868,7 @@ export function UnifiedProviderModal({
                         <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text)' }}>对话协议</span>
                         <button
                           onClick={() => {
-                            setChatProtocols((prev) => [...prev, buildChatProtocolRow('openai')])
+                            setChatProtocols((prev) => [...prev, buildChatProtocolRow()])
                             setExpandedChatProtocols((s) => new Set([...s, chatProtocols.length]))
                           }}
                           style={{ ...btnGhost, padding: '4px 10px', fontSize: '12px' }}
@@ -5887,9 +5880,9 @@ export function UnifiedProviderModal({
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         {chatProtocols.map((cp, index) => {
                           const expanded = expandedChatProtocols.has(index)
-                          const protocolPathNote = PROTOCOL_PATH_NOTES[safeString(cp.protocol).toLowerCase() || 'openai']
+                          const protocolPathNote = PROTOCOL_PATH_NOTES[normalizeProtocolValue(cp.protocol)]
                           const pathSummary = cp.path || protocolPathNote?.placeholder || '未设路径'
-                          const summary = `${cp.protocol || 'openai'} · ${pathSummary} · ${upstreamStreamLabel(cp.upstream_stream)}${cp.client_preset && cp.client_preset !== 'none' ? ` · ${cp.client_preset}` : ''}`
+                          const summary = `${normalizeProtocolValue(cp.protocol)} · ${pathSummary} · ${upstreamStreamLabel(cp.upstream_stream)}${cp.client_preset && cp.client_preset !== 'none' ? ` · ${cp.client_preset}` : ''}`
                           return (
                             <div key={index} style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '10px', background: 'var(--bg3)', borderRadius: 'var(--admin-radius)', border: '1px solid var(--admin-border)' }}>
                               <div
@@ -5922,8 +5915,8 @@ export function UnifiedProviderModal({
                                   <div>
                                     <label style={labelStyle}>协议</label>
                                     <ComboSearchSelect
-                                      value={cp.protocol || 'openai'}
-                                      onChange={(v) => changeChatProtocol(index, v ?? 'openai')}
+                                      value={normalizeProtocolValue(cp.protocol)}
+                                      onChange={(v) => changeChatProtocol(index, v ?? PROTOCOL_CHAT_KEY)}
                                       options={PROTOCOL_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))}
                                       contentZIndex={1101}
                                     />
@@ -5979,7 +5972,7 @@ export function UnifiedProviderModal({
                                       contentZIndex={1101}
                                     />
                                   </div>
-                                  {(cp.protocol || 'openai') === 'anthropic' && (
+                                  {normalizeProtocolValue(cp.protocol) === 'anthropic' && (
                                     <div>
                                       <label style={labelStyle}>system 类型</label>
                                       <ComboSearchSelect
@@ -5990,7 +5983,7 @@ export function UnifiedProviderModal({
                                       />
                                     </div>
                                   )}
-                                  {(cp.protocol || 'openai') === 'openai' && (
+                                  {normalizeProtocolValue(cp.protocol) === PROTOCOL_CHAT_KEY && (
                                     <div>
                                       <label style={labelStyle}>
                                         携带思考内容
@@ -6436,8 +6429,22 @@ export function UnifiedProviderModal({
   )
 }
 
+// 对话协议枚举值：OpenAI 兼容协议在前端用 'chat' 表示（不再用 'openai'）。
+// 后端视为同义（providers/custom.py: `endpoint in ("openai","chat")`、
+// server/admin.py: `proto in ("openai","chat")`），故落库 'chat' 与历史 'openai' 行为一致；
+// 读取历史 'openai' 行时统一归一成 'chat' 显示。
+const PROTOCOL_CHAT_KEY = 'chat'
+const PROTOCOL_OPENAI_ALIAS = 'openai'
+
+// 归一协议值：空 / 'openai' → 'chat'；其余原样小写。读历史数据与写新行都走它。
+function normalizeProtocolValue(protocol: unknown): string {
+  const v = safeString(protocol).trim().toLowerCase()
+  if (!v || v === PROTOCOL_OPENAI_ALIAS || v === PROTOCOL_CHAT_KEY) return PROTOCOL_CHAT_KEY
+  return v
+}
+
 const PROTOCOL_OPTIONS = [
-  { value: 'openai', label: 'OpenAI' },
+  { value: 'chat', label: 'Chat' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'responses', label: 'Responses' },
   { value: 'gemini', label: 'Gemini' },
@@ -6458,6 +6465,8 @@ const PROTOCOL_PATH_NOTES: Record<string, { placeholder: string; note: string }>
 }
 
 const PROTOCOL_DEFAULT_PATHS: Record<string, { chat_path: string; models_path: string; image_path: string; video_path: string }> = {
+  // 'chat' 是前端主键；'openai' 保留作别名，兜住未归一的旧值直读。
+  chat: { chat_path: '/v1/chat/completions', models_path: '/v1/models', image_path: '/v1/images/generations', video_path: '/v1/videos/generations' },
   openai: { chat_path: '/v1/chat/completions', models_path: '/v1/models', image_path: '/v1/images/generations', video_path: '/v1/videos/generations' },
   anthropic: { chat_path: '/v1/messages', models_path: '/v1/models', image_path: '/v1/images/generations', video_path: '/v1/videos/generations' },
   responses: { chat_path: '/v1/responses', models_path: '/v1/models', image_path: '/v1/images/generations', video_path: '/v1/videos/generations' },
@@ -6465,13 +6474,13 @@ const PROTOCOL_DEFAULT_PATHS: Record<string, { chat_path: string; models_path: s
 }
 
 function getProtocolDefaultPaths(protocol: string | null | undefined) {
-  return PROTOCOL_DEFAULT_PATHS[safeString(protocol).toLowerCase()] || PROTOCOL_DEFAULT_PATHS.openai
+  return PROTOCOL_DEFAULT_PATHS[safeString(protocol).toLowerCase()] || PROTOCOL_DEFAULT_PATHS[PROTOCOL_CHAT_KEY]
 }
 
 // 协议行创建时可预填默认路径。用户后续切换“协议”时，只在 path 仍是默认值
 // （空 or 旧协议默认路径）时才追随新协议默认值；手动改过的自定义 path 保留不动。
-function buildChatProtocolRow(protocol = 'openai', path?: string): ChatProtocolConfig {
-  const nextProtocol = safeString(protocol).toLowerCase() || 'openai'
+function buildChatProtocolRow(protocol = PROTOCOL_CHAT_KEY, path?: string): ChatProtocolConfig {
+  const nextProtocol = normalizeProtocolValue(protocol)
   const defs = getProtocolDefaultPaths(nextProtocol)
   const requested = safeString(path).trim()
   return {
@@ -6509,7 +6518,7 @@ function primaryChatProtocol(rows: ChatProtocolConfig[]): ChatProtocolConfig | u
 }
 
 function updateChatProtocolProtocol(row: ChatProtocolConfig, protocol: string): ChatProtocolConfig {
-  const nextProtocol = safeString(protocol).toLowerCase() || 'openai'
+  const nextProtocol = normalizeProtocolValue(protocol)
   const nextPath = isProtocolDefaultChatPath(row.path)
     ? getProtocolDefaultPaths(nextProtocol).chat_path
     : safeString(row.path)
@@ -6755,11 +6764,11 @@ export function ChannelCreateWizard({
     })
   }
 
-  /** 协议行：模板/目录预设自带；通用供应商目录也自带一条 openai 行。空则兜底一条 openai。 */
+  /** 协议行：模板/目录预设自带；通用供应商目录也自带一条 chat 行。空则兜底一条 chat。 */
   const presetChatProtocols: ChatProtocolConfig[] = useMemo(() => {
     const rows = entry?.preset?.chat_protocols
     if (Array.isArray(rows) && rows.length > 0) return normalizeChatProtocolRows(rows)
-    return [buildChatProtocolRow('openai')]
+    return [buildChatProtocolRow()]
   }, [entry])
 
   /** 组装建供应商的 POST 载荷：普通供应商带账号+模型，代码供应商带源码、不带账号。 */
@@ -6919,6 +6928,8 @@ export function ChannelCreateWizard({
       fixedHeight="88vh"
       contentOverflow="hidden"
       footer={footer}
+      // 多步向导同样有未保存的表单/已落库的半成品，点遮罩误关会丢步骤；关闭只走按钮。
+      closeOnBackdrop={false}
     >
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '16px' }}>
         {/* 步骤条：只读指示，点击回退交给「上一步」，避免跳步留下半填状态。 */}
@@ -7447,7 +7458,7 @@ export function Channels() {
         ).map((row) => ({
           id: safeString(row.id),
           enabled: row.enabled !== false,
-          protocol: safeString(row.protocol) || 'openai',
+          protocol: normalizeProtocolValue(row.protocol),
           path: safeString(row.path),
           upstream_stream: normalizeUpstreamStream(row.upstream_stream),
           client_preset: safeString(row.client_preset) || 'none',
@@ -7547,8 +7558,13 @@ export function Channels() {
   const matchesProtocolFilter = (p: ProviderSummary, filter: ProviderProtocolFilter) => {
     if (filter === 'all') return true
     const protocol = (p.protocol || '').toLowerCase()
-    if (filter === 'other') return protocol.length > 0 && !KNOWN_PROTOCOL_FILTERS.includes(protocol)
-    return protocol === filter
+    // openai 与 chat 在前端是同一协议（见 normalizeProtocolValue），筛选时互通：
+    // 落库 'chat' 的供应商仍归到 'openai' 过滤项下，不被误判为 'other'。
+    const norm = protocol === PROTOCOL_OPENAI_ALIAS ? PROTOCOL_CHAT_KEY : protocol
+    const known = KNOWN_PROTOCOL_FILTERS.map((f) => (f === PROTOCOL_OPENAI_ALIAS ? PROTOCOL_CHAT_KEY : f))
+    if (filter === 'other') return norm.length > 0 && !known.includes(norm)
+    const filterNorm = filter === PROTOCOL_OPENAI_ALIAS ? PROTOCOL_CHAT_KEY : filter
+    return norm === filterNorm
   }
 
   const matchesAutoUpdateFilter = (p: ProviderSummary, filter: ProviderAutoUpdateFilter) => {

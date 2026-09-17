@@ -1,7 +1,7 @@
 import { type DomainStackProfile } from "@/api/Api"
 import { invalidateMarketCache } from "@/api/marketplaceRaw"
 
-export type MarketplaceModule = "mcp" | "plugins" | "skills" | "channels" | "prompts" | "node-versions" | "mobile-versions" | "device-control-versions"
+export type MarketplaceModule = "mcp" | "plugins" | "skills" | "channels" | "prompts" | "node-versions" | "mobile-versions" | "device-control-versions" | "server-versions"
 
 export type MarketplaceItem = {
   id: string
@@ -860,4 +860,74 @@ export async function downloadLeaderboardItem(
   const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
   const filename = m ? decodeURIComponent(m[1].trim()) : `item-${itemId}`
   return { blob: await response.blob(), filename }
+}
+
+// ── 服务端自身版本（登记 + 一键升级）──────────────────────────────────────────
+//
+// 与节点/移动端/设备控制三条线的本质差异：服务端没有二进制资产要托管，
+// 一版 = 一个 git tag。登记时从 GitHub 拉 tag 列表选一个 + 写备注；升级时
+// 部署机 clone 该 tag 到 releases/ 并翻 current 指针重启（见 script/server_updater.sh）。
+
+/** 服务端版本 manifest（顶层平铺，与服务端 validator 的 server-versions 分支一致）。 */
+export type ServerVersionManifest = MarketplaceManifest & {
+  kind?: "server_app_version"
+  schema?: string
+  /** 升级时部署机 checkout 的 git 标签（如 v260912）；必填，是升级动作的实际输入。 */
+  release_tag?: string
+  /** 发行仓库地址；留空则用部署机 .env 的 SERVER_UPGRADE_REPO_URL。 */
+  repo_url?: string
+  version_notes?: string
+}
+
+/** 升级各阶段的 phase（web 写 requested，执行器写其余）。 */
+export type ServerUpgradePhase =
+  | "idle"
+  | "requested"
+  | "pulling"
+  | "installing"
+  | "restarting"
+  | "verifying"
+  | "done"
+  | "failed"
+
+/** GET /admin/server-release —— 升级卡片所需全部状态。 */
+export type ServerReleaseStatus = {
+  /** 当前运行版本（去 v 前缀）。 */
+  current: string
+  /** 已登记的最新版本（去 v 前缀）；空串=尚未登记任何版本。 */
+  latest: string
+  stale: boolean
+  needs_upgrade: boolean
+  /** 已登记版本的 git 标签（带 v 形态），升级时下发。 */
+  release_tag: string
+  version_notes: string
+  repo_url: string
+  updated_at: string
+  phase: ServerUpgradePhase
+  /** 进行中/最近一次升级的目标 tag。 */
+  target: string
+  error: string
+  started_at: string
+}
+
+/** GET /admin/server-release —— 服务端升级状态（永远 200，不抛）。 */
+export async function getServerReleaseStatus(): Promise<ServerReleaseStatus> {
+  return request("/admin/server-release")
+}
+
+/** GET /admin/server-release/tags —— 拉发行仓库的 git tag 列表（登记对话框下拉用）。 */
+export async function getServerReleaseTags(proxyConfigId?: string): Promise<{ tags: string[]; error: string }> {
+  const qs = proxyConfigId ? `?proxy_config_id=${encodeURIComponent(proxyConfigId)}` : ""
+  return request(`/admin/server-release/tags${qs}`)
+}
+
+/** POST /admin/server-release/upgrade —— 确认升级到指定已登记版本。 */
+export async function upgradeServerRelease(
+  targetTag: string,
+  proxyConfigId?: string,
+): Promise<{ accepted: boolean }> {
+  return request("/admin/server-release/upgrade", {
+    method: "POST",
+    body: JSON.stringify({ target_tag: targetTag, proxy_config_id: proxyConfigId || "" }),
+  })
 }

@@ -1084,6 +1084,7 @@ const en = {
     },
     user: {
       unknown: "Unknown user",
+      language: "Language",
     },
     community: {
       title: "Developer community",

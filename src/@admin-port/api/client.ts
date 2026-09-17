@@ -27,12 +27,26 @@ export function clearToken(): void {
 }
 
 /**
+ * 节点长操作（编辑器安装/升级、宿主工具安装、节点升级）的超时。
+ *
+ * 必须严格大于数据面 `NODE_LONG_RPC_TIMEOUT`（1020s），否则前端先 abort，
+ * 用户看到「请求超时」而服务端其实还在正常等待节点下载归档。整条链路的预算
+ * 必须逐层放大：
+ *   节点下载归档 600s
+ *     < 控制面 runtime ack 900s（+ self-upgrade 60s，统一升级两步串行 = 960s）
+ *     < 数据面 1020s
+ *     < 前端 1100s
+ */
+export const NODE_LONG_OPERATION_TIMEOUT_MS = 1_100_000;
+
+/**
  * 创建 Axios 实例
  */
 const request: AxiosInstance = axios.create({
   baseURL: "", // 开发环境通过 Vite proxy 转发
   // 默认 120s：覆盖普通管理请求，也兜住漏显式 timeout 的长操作调用（编辑器安装/宿主工具
-  // 安装可达数分钟，每个调用点已显式传 620000，但默认 15000ms 太短，一旦漏覆盖即误杀）。
+  // 安装可达数分钟，每个调用点已显式传 NODE_LONG_OPERATION_TIMEOUT_MS，但默认 15000ms 太短，
+  // 一旦漏覆盖即误杀）。
   timeout: 120000,
   // withCredentials：带上 C 端 session cookie（ai_lubricant_session），
   // 后端 _require_admin 主路径认「session + role==admin」；localStorage 里

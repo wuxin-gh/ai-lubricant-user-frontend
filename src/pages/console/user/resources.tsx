@@ -46,6 +46,7 @@ import {
   type IosDiscoveredDevice,
   type IosSigningProfile,
   type IosWdaJobSnapshot,
+  ToolHttpError,
 } from "@/api/builtinToolsClient"
 import { UserPageActions } from "@/components/console/user-header-actions"
 import { Button } from "@/components/ui/button"
@@ -506,6 +507,7 @@ export function UserToolsPage() {
         device={detailDevice}
         open={!!detailDevice}
         onOpenChange={(open) => !open && setDetailDeviceId(null)}
+        onRefreshDevice={reloadDevices}
         onToggle={(enabled) => detailDevice && void updateDevice(detailDevice, { enabled })}
         onRename={async (name) => {
           if (detailDevice) await updateDevice(detailDevice, { name })
@@ -782,12 +784,21 @@ function DeviceResourceList({ devices, onOpen, onDelete, onInitialize }: {
         const iosPreparing = ios && wdaState === "preparing"
         const iosReady = ios && wdaState === "ready"
         const iosFailed = ios && (wdaState === "failed" || wdaState === "expired")
+        // 初始化进度来自设备（节点 inventory），不是易失的 job 快照——所以刷新
+        // 页面/重启服务端后百分比依然在。
+        const wdaProgress = typeof iosData?.wda_progress === "number" ? iosData.wda_progress : 0
+        const wdaStage = typeof iosData?.wda_stage === "string" ? iosData.wda_stage : ""
         const stateBadge = !enabled
           ? { variant: "secondary" as const, label: "已解除配对" }
           : iosPending
             ? { variant: "outline" as const, label: "待初始化" }
             : iosPreparing
-              ? { variant: "secondary" as const, label: "初始化中" }
+              // 有百分比就带上（"初始化中 42%"），没有就退回纯文字。
+              ? {
+                  variant: "secondary" as const,
+                  label: wdaProgress > 0 ? `初始化中 ${wdaProgress}%` : "初始化中",
+                  title: wdaStage || undefined,
+                }
               : iosFailed
                 ? { variant: "destructive" as const, label: wdaState === "expired" ? "已过期" : "初始化失败" }
                 : iosReady
@@ -806,7 +817,9 @@ function DeviceResourceList({ devices, onOpen, onDelete, onInitialize }: {
             badges={
               <>
                 <Badge variant="outline">{ios ? "iOS" : "Android"}</Badge>
-                <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
+                <Badge variant={stateBadge.variant} title={"title" in stateBadge ? stateBadge.title : undefined}>
+                  {stateBadge.label}
+                </Badge>
                 {!ios && accEnabled === false && (
                   <Badge variant="destructive">无障碍未开</Badge>
                 )}
@@ -1061,6 +1074,7 @@ function DeviceDetailDialog({
   device,
   open,
   onOpenChange,
+  onRefreshDevice,
   onToggle,
   onRename,
   onRequestRevoke,
@@ -1069,6 +1083,9 @@ function DeviceDetailDialog({
   device: DeviceResource | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** 重新拉取设备列表。iOS 面板在初始化期间靠它刷新状态——状态来自设备
+   *  （节点 inventory，持久），不是易失的 job 快照，所以刷新/重启都不丢。 */
+  onRefreshDevice: () => Promise<void> | void
   onToggle: (enabled: boolean) => void
   onRename: (name: string) => Promise<void>
   onRequestRevoke: (device: DeviceResource) => void
@@ -1206,7 +1223,7 @@ function DeviceDetailDialog({
           )}
 
           {ios && Boolean(device.ios) && (
-            <IosWdaPanel device={device} onChanged={() => onOpenChange(false)} />
+            <IosWdaPanel device={device} onChanged={() => void onRefreshDevice()} />
           )}
 
           <div className="flex flex-col gap-2 rounded-lg border border-destructive/25 bg-destructive/5 p-3">
@@ -1255,6 +1272,9 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
   // 顶层 ios 键（服务端 store 把 data JSONB 展平到顶层，响应里没有 "data" 层）。
   const iosData = device.ios
   const wdaState = String(iosData?.wda_state || "missing")
+  // 进度来自设备（节点 inventory），不是 job 快照——刷新/重启都不丢。
+  const wdaProgress = typeof iosData?.wda_progress === "number" ? iosData.wda_progress : 0
+  const wdaStage = typeof iosData?.wda_stage === "string" ? iosData.wda_stage : ""
   const profileExpiresAt = iosData?.profile_expires_at as string | undefined
   // 自动续签：prepare_wda 成功后服务端写入 auto_renew=true + last_renew_job_id。
   // 扫描器到期前自动派发 renew job；这里读 last_renew_job_id 轮询，运行中显示徽章。
@@ -1299,32 +1319,72 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
     }
   }
 
-  // Poll job status when job is running
+  // 初始化期间轮询**设备**而不是 job 快照。
+  //
+  // 这是「初始化后台化」的核心：wda_state / wda_progress 由设备自报、经节点
+  // inventory 持久化，所以刷新页面、关弹框、服务端重启都不会丢——而 job 快照
+  // 只活在服务端一条连接的内存里，一重启就 404（此前正是卡死的原因）。
+  //
+  // 只要设备处于 preparing 就继续轮询；到 ready/failed 自动停。用户在任意时刻
+  // 关掉弹框或刷新页面都不影响 job：重新打开时按设备状态接着显示。
+  //
+  // onChanged 是父组件的内联箭头（每次渲染新身份），直接放进依赖会让定时器
+  // 在每轮刷新后被拆掉重建。用 ref 持有最新引用，依赖里只留真正该触发重建的项。
+  const onChangedRef = useRef(onChanged)
+  useEffect(() => {
+    onChangedRef.current = onChanged
+  }, [onChanged])
+
+  useEffect(() => {
+    if (!open || wdaState !== "preparing") return
+    let stop = false
+    const poll = async () => {
+      if (stop) return
+      try {
+        await onChangedRef.current()
+      } catch {
+        // 拉取失败（网络抖动/节点离线）不打断轮询：设备状态是持久的，
+        // 下一轮自然会拿到。
+      }
+    }
+    const timer = setInterval(() => void poll(), 2500)
+    return () => {
+      stop = true
+      clearInterval(timer)
+    }
+  }, [open, wdaState])
+
+  // 初始化完成后提示一次（从 preparing 转到终态的那一刻）。
+  const prevWdaStateRef = useRef(wdaState)
+  useEffect(() => {
+    const prev = prevWdaStateRef.current
+    prevWdaStateRef.current = wdaState
+    if (prev !== "preparing") return
+    if (wdaState === "ready") toast.success("runner 准备完成")
+    else if (wdaState === "failed") toast.error("runner 初始化失败，详见下方错误")
+  }, [wdaState])
+
+  // job 快照降级为**可选**详情：只在 preparing 时拉一次，用于显示阶段日志。
+  // 拿不到（404 = 服务端重启过）就静默忽略——主状态来自设备，不依赖它。
   useEffect(() => {
     if (!currentJobId || !jobRunning) return
     let stop = false
     const poll = async () => {
       try {
         const snapshot = await getIosWdaJobStatus(device.id, currentJobId)
-        if (!stop) {
-          setJobSnapshot(snapshot)
-          if (snapshot.status === "completed" || snapshot.status === "failed") {
-            setJobRunning(false)
-            if (snapshot.status === "completed") {
-              toast.success("runner 准备完成")
-              onChanged()
-            } else {
-              toast.error(`runner job 失败: ${snapshot.message}`)
-            }
-          }
-        }
+        if (!stop) setJobSnapshot(snapshot)
       } catch (e) {
-        if (!stop) {
-          console.error("轮询 job 状态失败", e)
+        if (stop) return
+        // 快照已失效：清掉详情即可，不打断主流程（设备状态仍在轮询）。
+        if (e instanceof ToolHttpError && e.status === 404) {
+          setJobSnapshot(null)
+          setCurrentJobId(null)
+          return
         }
+        console.error("轮询 job 详情失败", e)
       }
     }
-    const timer = setInterval(() => void poll(), 2000)
+    const timer = setInterval(() => void poll(), 3000)
     void poll()
     return () => {
       stop = true
@@ -1384,7 +1444,10 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
       })
       setCurrentJobId(job_id)
       setJobSnapshot(null)
-      toast.success(`已发起 ${action === "prepare" ? "准备" : action === "renew" ? "续期" : "重装"} job`)
+      // job 已在节点后台跑：立刻拉一次设备，让界面切到「初始化中 N%」。
+      // 之后由 wda_state==preparing 的轮询接续——弹框可以随时关掉。
+      await onChanged()
+      toast.success(`已发起 ${action === "prepare" ? "准备" : action === "renew" ? "续期" : "重装"}，可在后台进行`)
     } catch (e) {
       setJobRunning(false)
       toast.error(e instanceof Error ? e.message : "发起 job 失败")
@@ -1464,22 +1527,29 @@ function IosWdaPanel({ device, onChanged }: { device: DeviceResource; onChanged:
         </div>
       )}
 
-      {jobRunning && jobSnapshot ? (
+      {wdaState === "preparing" ? (
+        // 进度以**设备**为准（wda_progress/wda_stage，来自节点 inventory），
+        // job 快照只用来补充阶段消息。服务端重启后快照没了，进度条照样在——
+        // 这是「初始化后台化」的关键：关弹框/刷新/重启都不影响。
         <div className="flex flex-col gap-2 rounded border bg-muted/20 p-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium">{jobSnapshot.stage}</span>
-            <span className="text-xs text-muted-foreground">{jobSnapshot.percent}%</span>
+            <span className="text-xs font-medium">{wdaStage || jobSnapshot?.stage || "初始化中"}</span>
+            <span className="text-xs text-muted-foreground">{wdaProgress}%</span>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
             <div
               className="h-full bg-primary transition-all duration-300"
-              style={{ width: `${jobSnapshot.percent}%` }}
+              style={{ width: `${wdaProgress}%` }}
             />
           </div>
-          <div className="text-xs text-muted-foreground">{jobSnapshot.message}</div>
-          <Button variant="outline" size="sm" onClick={() => void cancelJob()}>
-            取消
-          </Button>
+          <div className="text-xs text-muted-foreground">
+            {jobSnapshot?.message || "任务在节点后台运行，可随时关闭此窗口，进度不会中断。"}
+          </div>
+          {currentJobId && (
+            <Button variant="outline" size="sm" onClick={() => void cancelJob()}>
+              取消
+            </Button>
+          )}
         </div>
       ) : (
         <>

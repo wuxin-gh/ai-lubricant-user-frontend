@@ -1084,6 +1084,7 @@ const cn = {
     },
     user: {
       unknown: "未知用户",
+      language: "语言 / Language",
     },
     community: {
       title: "技术交流群",

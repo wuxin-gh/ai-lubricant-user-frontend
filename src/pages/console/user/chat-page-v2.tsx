@@ -72,8 +72,11 @@ import {
   type ChatMediaItem,
   type ConversationAttachment,
   type AvailableModel,
-  type RuntimeKeyItem,
 } from "@/api/agentClient"
+import { getApiKeys } from "@/@admin-port/api/apiKeys"
+import type { ApiKey } from "@/@admin-port/types/admin"
+import { useIsAdmin } from "@/hooks/use-is-admin"
+import { ApiKeyTreeSelect, type ApiKeyTreeItem } from "@/components/console/chat/api-key-tree-select"
 import MessageComposer from "@/components/console/chat/message-composer"
 import { ReasoningEffortMenu } from "@/components/console/chat/reasoning-effort"
 import { TurnNavigator } from "@/components/console/chat/turn-navigator"
@@ -103,6 +106,36 @@ const TTS_FORMATS = ["mp3", "opus", "aac", "flac", "wav", "pcm"]
 const MODALITY_MAP: Record<ChatMode, string> = { chat: "text", image: "image", video: "video", tts: "audio" }
 
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+// 超级管理员的 Key 列表来自管理端接口，明文 key 仅供「复制」用途，这里作展示脱敏。
+function maskApiKey(raw: string | undefined | null): string {
+  const s = String(raw ?? "")
+  if (!s) return ""
+  if (s.length <= 10) return "••••"
+  return `${s.slice(0, 6)}••••${s.slice(-4)}`
+}
+
+// 「第一个 Key」按树形展示顺序取（父组先于扁平项；组内取父，无父组取第一个），
+// 与下拉里用户看到的首项一致；无可用项返回 null。
+function firstKeyId(keys: ApiKeyTreeItem[]): number | null {
+  if (keys.length === 0) return null
+  const byId = new Map(keys.map((k) => [k.id, k]))
+  const parents: ApiKeyTreeItem[] = []
+  const orphans: ApiKeyTreeItem[] = []
+  const hasChildren = new Set<number>()
+  for (const k of keys) {
+    if (k.parent_id && byId.has(k.parent_id)) hasChildren.add(k.parent_id)
+    else if (k.parent_id) orphans.push(k)
+    else parents.push(k)
+  }
+  const byName = (a: ApiKeyTreeItem, b: ApiKeyTreeItem) => a.name.localeCompare(b.name, "zh-Hans-CN")
+  parents.sort(byName)
+  orphans.sort(byName)
+  const groups = parents.filter((p) => hasChildren.has(p.id))
+  if (groups.length > 0) return groups[0].id
+  const flat = [...parents.filter((p) => !hasChildren.has(p.id)), ...orphans]
+  return flat[0]?.id ?? null
+}
 
 // blob: URL 是会话内临时对象，落库无意义；只存可回放的 url/b64
 function toPersistableMedia(items?: ChatMediaItem[] | null): ChatMediaItem[] | null {
@@ -139,9 +172,13 @@ export default function ChatPage() {
   const [settingsDraftConvId, setSettingsDraftConvId] = useState<string | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
 
-  const [runtimeKeys, setRuntimeKeys] = useState<RuntimeKeyItem[]>([])
+  const [runtimeKeys, setRuntimeKeys] = useState<ApiKeyTreeItem[]>([])
   const [models, setModels] = useState<AvailableModel[]>([])
   const [composerResetKey, setComposerResetKey] = useState(0)
+  // 超级管理员（role==admin）可用全平台 Key；普通用户只能用自己分组的 Key。
+  // 数据源与后端 _resolve_caller_api_key 的放行口径一致，避免列出无权使用的
+  // Key 导致发送 403。
+  const isSuperAdmin = useIsAdmin()
 
   const abortRef = useRef<(() => void) | null>(null)
   const creatingConversationRef = useRef<Promise<string> | null>(null)
@@ -152,18 +189,43 @@ export default function ChatPage() {
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
-  // 初始加载：runtime keys + 对话列表
+  // 初始加载：可用 Key 列表 + 默认选中第一个（新聊天默认用第一个密钥）。
+  // 超级管理员走管理端全局 Key 接口（含父子层级）；普通用户走用户态接口
+  // （自有 runtime key + 分组授权系统 key，天然扁平）。
   useEffect(() => {
-    listUsableKeys()
-      .then((keys) => {
-        const enabled = keys.filter((k) => !k.disabled)
+    let cancelled = false
+    const load = isSuperAdmin
+      ? getApiKeys().then((cfg) =>
+          (cfg.keys ?? []).map((k: ApiKey) => ({
+            id: k.id,
+            name: k.name || `Key #${k.id}`,
+            key_masked: maskApiKey(k.key),
+            disabled: k.disabled === true,
+            parent_id: k.parent_id ?? null,
+          })),
+        )
+      : listUsableKeys().then((keys) =>
+          keys.map((k) => ({
+            id: k.id,
+            name: k.name || `Key #${k.id}`,
+            key_masked: k.key_masked,
+            disabled: k.disabled === true,
+          })),
+        )
+    load
+      .then((items) => {
+        if (cancelled) return
+        const enabled = items.filter((k) => !k.disabled)
         setRuntimeKeys(enabled)
         if (enabled.length > 0) {
-          setSettings((s) => (s.apiKeyId ? s : { ...s, apiKeyId: enabled[0].id }))
+          setSettings((s) => (s.apiKeyId ? s : { ...s, apiKeyId: firstKeyId(enabled) }))
         }
       })
-      .catch(() => setRuntimeKeys([]))
-  }, [])
+      .catch(() => {
+        if (!cancelled) setRuntimeKeys([])
+      })
+    return () => { cancelled = true }
+  }, [isSuperAdmin])
 
   // 当前编辑态的 key 变化后拉取可用模型
   const editorApiKeyId = settingsOpen ? settingsDraft.apiKeyId : settings.apiKeyId
@@ -322,7 +384,12 @@ export default function ChatPage() {
     setMessages([])
     setComposerResetKey((current) => current + 1)
     setSearchParams({}, { replace: true })
-  }, [savingSettings, setSearchParams, settingsOpen])
+    // 新聊天默认用第一个可用密钥（runtimeKeys 已脱去禁用项，首项=下拉首项）。
+    const firstId = firstKeyId(runtimeKeys)
+    if (firstId !== null) {
+      setSettings((s) => (s.apiKeyId === firstId ? s : { ...s, apiKeyId: firstId }))
+    }
+  }, [runtimeKeys, savingSettings, setSearchParams, settingsOpen])
 
   // 历史弹框删除会话后回调：被删的是当前会话就回到新对话态。
   // 列表本身由弹框自行维护（打开/滚动时从后端拉），这里只管当前会话。
@@ -916,7 +983,7 @@ function SettingsForm({
 }: {
   settings: ChatSettings
   setSettings: React.Dispatch<React.SetStateAction<ChatSettings>>
-  runtimeKeys: RuntimeKeyItem[]
+  runtimeKeys: ApiKeyTreeItem[]
   filteredModels: AvailableModel[]
 }) {
   return (
@@ -944,21 +1011,16 @@ function SettingsForm({
         </div>
       </div>
 
-      {/* API Key —— 占满整行，支持搜索 */}
+      {/* API Key —— 占满整行，父/子 Key 树形折叠 + 搜索 */}
       <div className="space-y-1.5">
         <Label>API Key</Label>
-        <SearchableSelect
-          value={settings.apiKeyId ? String(settings.apiKeyId) : ""}
+        <ApiKeyTreeSelect
+          value={settings.apiKeyId ?? null}
+          onChange={(id) => setSettings((s) => ({ ...s, apiKeyId: id }))}
+          keys={runtimeKeys}
           placeholder="选择 API Key"
-          searchPlaceholder="搜索 Key..."
-          emptyText="无匹配的 Key"
-          onChange={(v) => setSettings((s) => ({ ...s, apiKeyId: Number(v) }))}
-          options={runtimeKeys.map((k) => ({
-            value: String(k.id),
-            label: k.name || `Key #${k.id}`,
-            description: k.key_masked,
-            keywords: [k.key_masked],
-          }))}
+          emptyText="暂无可用 Key，请先在设置中创建 API Key"
+          className="w-full"
         />
         {runtimeKeys.length === 0 && (
           <p className="text-xs text-muted-foreground">暂无可用 Key，请先在设置中创建 API Key</p>

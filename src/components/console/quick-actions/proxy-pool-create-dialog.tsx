@@ -8,8 +8,7 @@
  * 与该页完全一致；新增走 addProxy（读列表 → 追加 → 全量 PUT），后端已改为按 owner
  * 分段合并，非管理员不会冲掉他人条目。
  */
-import { useEffect, useState } from "react"
-import { Eye, EyeOff } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 
 import { addProxy } from "@/@admin-port/api/proxyPool"
@@ -29,6 +28,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
+import { parseProxyUrl } from "@/utils/proxy-url"
 
 interface ProxyFormValues {
   name: string
@@ -58,9 +58,14 @@ export function ProxyPoolCreateDialog({
   const [saving, setSaving] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
-  const [showPassword, setShowPassword] = useState(false)
   const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [nodesLoading, setNodesLoading] = useState(false)
+
+  // 地址框里粘的凭据（若有）。仅 network 模式参与，url_prefix 的基址不走认证。
+  const parsedUrl = useMemo(
+    () => (form.mode === "network" ? parseProxyUrl(form.url) : { url: form.url, username: "", password: "", hasCredentials: false }),
+    [form.mode, form.url],
+  )
 
   // 打开时重置表单并拉取可转发的执行节点（node 模式要用）。
   useEffect(() => {
@@ -68,7 +73,6 @@ export function ProxyPoolCreateDialog({
     setForm(EMPTY_FORM)
     setModalError(null)
     setUrlError(null)
-    setShowPassword(false)
     setNodesLoading(true)
     void listNodes("approved")
       .then((all) => setNodes(all.filter((n) => n.role === "execution")))
@@ -98,12 +102,17 @@ export function ProxyPoolCreateDialog({
     // url_prefix 前缀基址即请求目标、direct 不走代理、node 走节点转发：均不使用 URL 认证，提交时清空。
     const isPrefix = form.mode === "url_prefix"
     const noAuth = isPrefix || isDirect || isNode
+    // 网络代理只留一个地址框，凭据可能就粘在里面（scheme://user:pass@host:port）：
+    // 拆出来提交，后端存的仍是 地址/用户名/密码 三个字段，运行时再拼回去。
+    // 仅 network 模式拆：url_prefix 的基址不走认证，其 path 里若有 @ 不应被当凭据摘掉。
+    const parsed = form.mode === "network" ? parseProxyUrl(form.url) : null
+    const useParsed = !!parsed?.hasCredentials
     const payload: ProxyInput = {
       name: form.name.trim(),
       mode: form.mode,
-      url: isDirect || isNode ? "" : form.url.trim(),
-      username: noAuth ? "" : (form.username || "").trim(),
-      password: noAuth ? "" : (form.password || ""),
+      url: isDirect || isNode ? "" : parsed ? parsed.url : form.url.trim(),
+      username: noAuth ? "" : useParsed ? parsed!.username : (form.username || "").trim(),
+      password: noAuth ? "" : useParsed ? parsed!.password : (form.password || ""),
       ...(isNode ? { node_id: (form.nodeId || "").trim() } : {}),
     }
 
@@ -177,13 +186,29 @@ export function ProxyPoolCreateDialog({
                 placeholder={
                   form.mode === "url_prefix"
                     ? "https://proxy.example.com"
-                    : "http://127.0.0.1:7890（例如本机 Clash / V2Ray 的混合端口）"
+                    : "http://127.0.0.1:7890（可整行粘贴 http://用户名:密码@主机:端口）"
                 }
                 value={form.url}
                 aria-invalid={!!urlError}
                 onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
               />
               {urlError ? <span className="text-xs text-destructive">{urlError}</span> : null}
+              {/* 凭据直接粘在地址里即可：当场回显拆到了什么，避免用户以为没生效。 */}
+              {form.mode === "network" && (parsedUrl.username || parsedUrl.password) ? (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span className="text-green-600 dark:text-green-400">已识别认证：</span>
+                  {parsedUrl.username ? <span>用户名 {parsedUrl.username}</span> : null}
+                  {parsedUrl.password ? <span>密码已设置</span> : null}
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => setForm((f) => ({ ...f, url: parsedUrl.url, username: "", password: "" }))}
+                    aria-label="清除代理认证"
+                  >
+                    清除
+                  </button>
+                </div>
+              ) : null}
               {/* 前缀转发没有现成文档，给一条可操作的去处（社区有免费方案）。 */}
               {form.mode === "url_prefix" ? (
                 <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
@@ -231,44 +256,10 @@ export function ProxyPoolCreateDialog({
           ) : null}
 
           {form.mode === "network" ? (
-            <>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="proxy-username">用户名</Label>
-                <Input
-                  id="proxy-username"
-                  disabled={saving}
-                  autoComplete="off"
-                  placeholder="代理认证用户名（可选）"
-                  value={form.username ?? ""}
-                  onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
-                />
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="proxy-password">密码</Label>
-                <div className="relative">
-                  <Input
-                    id="proxy-password"
-                    type={showPassword ? "text" : "password"}
-                    disabled={saving}
-                    autoComplete="new-password"
-                    placeholder="代理认证密码（可选）"
-                    className="pr-9"
-                    value={form.password ?? ""}
-                    onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "隐藏密码" : "显示密码"}
-                  >
-                    {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
-                </div>
-              </div>
-            </>
+            <p className="mb-0 text-xs text-muted-foreground">
+              认证信息直接写在代理地址里即可（如 http://用户名:密码@主机:端口），系统会自动拆分保存；
+              用户名/密码会在运行时自动拼回代理 URL。账号只能从代理池绑定代理。
+            </p>
           ) : null}
 
           {form.mode === "url_prefix" ? (

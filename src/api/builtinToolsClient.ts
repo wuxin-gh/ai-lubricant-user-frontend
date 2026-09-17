@@ -10,6 +10,17 @@
 
 const BASE = "/api/v1/users/builtin-tools"
 
+/** 带 HTTP 状态的错误。仅凭 message 无法区分「资源不存在」(404) 与其它失败，
+ *  而轮询类调用必须能识别 404（job 已失效/服务端重启过）并停止重试。 */
+export class ToolHttpError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "ToolHttpError"
+    this.status = status
+  }
+}
+
 async function toolFetch<T>(path: string, init?: RequestInit & { baseOverride?: string }): Promise<T> {
   const base = init?.baseOverride ?? BASE
   const { baseOverride, ...fetchInit } = init ?? {}
@@ -33,7 +44,7 @@ async function toolFetch<T>(path: string, init?: RequestInit & { baseOverride?: 
     } catch {
       // ignore parse error, keep default detail
     }
-    throw new Error(detail)
+    throw new ToolHttpError(detail, r.status)
   }
   const text = await r.text()
   return (text ? JSON.parse(text) : {}) as T
@@ -195,6 +206,11 @@ export interface DeviceResource extends BuiltinToolResource {
     udid?: string
     node_id?: string
     wda_state?: string
+    /** 当前 WDA job 进度 0-100 与阶段名。仅 wda_state="preparing" 时有意义。
+     *  来自节点 inventory（设备自报、持久），服务端重启后仍可读——这是「初始化
+     *  后台化」的依据，前端不再依赖易失的 job 快照。 */
+    wda_progress?: number
+    wda_stage?: string
     profile_expires_at?: string
     wda_bundle_id?: string
     signing_profile_id?: number

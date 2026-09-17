@@ -37,6 +37,8 @@ const ICONS: Record<string, typeof Bot> = {
 }
 
 const PROTOCOL_ICONS: Record<string, string> = {
+  // 'chat' 是前端对话协议主键（OpenAI 兼容），'openai' 为历史别名，两者同图标。
+  chat: "bot",
   openai: "bot",
   anthropic: "brain",
   gemini: "sparkles",

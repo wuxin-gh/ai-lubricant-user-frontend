@@ -15,6 +15,8 @@ import { EmbeddedAgentChat } from "@/components/console/agent/embedded-agent-cha
 import { NodeVersionEditor } from "@/components/marketplace/NodeVersionEditor"
 import { MobileVersionEditor } from "@/components/marketplace/MobileVersionEditor"
 import { DeviceControlVersionEditor } from "@/components/marketplace/DeviceControlVersionEditor"
+import { ServerVersionEditor } from "@/components/marketplace/ServerVersionEditor"
+import { ServerUpgradeCard } from "@/components/marketplace/ServerUpgradeCard"
 import { LeaderboardShell } from "@/components/marketplace/LeaderboardShell"
 import { LeaderboardConfigPanel } from "@/components/marketplace/LeaderboardConfigPanel"
 import { AgencyAgentsPanel } from "@/components/marketplace/AgencyAgentsPanel"
@@ -119,6 +121,8 @@ export default function MarketplaceAdmin() {
   const [mobileEditItem, setMobileEditItem] = useState<MarketplaceManifest | null>(null)
   const [deviceControlEditOpen, setDeviceControlEditOpen] = useState(false)
   const [deviceControlEditItem, setDeviceControlEditItem] = useState<MarketplaceManifest | null>(null)
+  const [serverEditOpen, setServerEditOpen] = useState(false)
+  const [serverEditItem, setServerEditItem] = useState<MarketplaceManifest | null>(null)
 
   const [importOpen, setImportOpen] = useState(false)
   const [importText, setImportText] = useState("")
@@ -224,11 +228,12 @@ export default function MarketplaceAdmin() {
     }
   }
 
-  // 节点版本 / 移动端版本 / 设备控制 App 版本 tab：按版本（≈上传时间）降序，最新的排最前。
-  // 版本号是 YYYYMMDD-HHMM 日期形态、数字串或 semver，都按数字分段比较——避免
-  // "1.10.0" < "1.9.0" 这类字符串误排。其它 tab 保持服务端返回的原顺序（index 按 id 升序）。
+  // 节点版本 / 移动端版本 / 设备控制 App 版本 / 服务端版本 tab：按版本（≈上传时间）
+  // 降序，最新的排最前。版本号是 YYYYMMDD-HHMM 日期形态、数字串或 semver，都按数字
+  // 分段比较——避免 "1.10.0" < "1.9.0" 这类字符串误排。其它 tab 保持服务端返回的
+  // 原顺序（index 按 id 升序）。
   const displayItems = useMemo(() => {
-    if (module !== "node-versions" && module !== "mobile-versions" && module !== "device-control-versions") return items
+    if (module !== "node-versions" && module !== "mobile-versions" && module !== "device-control-versions" && module !== "server-versions") return items
     return [...items].sort((a, b) => compareVersionDesc(a.latest_version, b.latest_version))
   }, [items, module])
 
@@ -251,6 +256,11 @@ export default function MarketplaceAdmin() {
     if (module === "device-control-versions") {
       setDeviceControlEditItem(null)
       setDeviceControlEditOpen(true)
+      return
+    }
+    if (module === "server-versions") {
+      setServerEditItem(null)
+      setServerEditOpen(true)
       return
     }
     setEditItem(null)
@@ -282,6 +292,11 @@ export default function MarketplaceAdmin() {
       if (activeModule === "device-control-versions") {
         setDeviceControlEditItem(manifest)
         setDeviceControlEditOpen(true)
+        return
+      }
+      if (activeModule === "server-versions") {
+        setServerEditItem(manifest)
+        setServerEditOpen(true)
         return
       }
       setEditItem(manifest)
@@ -360,6 +375,18 @@ export default function MarketplaceAdmin() {
       void load()
     } catch (err: any) {
       toast.error("设备控制 App 版本校验失败，请检查发行信息", { description: err?.message || String(err) })
+    }
+  }
+
+  const handleServerVersionSave = async (manifest: MarketplaceManifest) => {
+    try {
+      const res = await upsertMarketplaceItem("server-versions", manifest)
+      applyPublish(res?.publish)
+      toast.success("服务端版本已登记")
+      setServerEditOpen(false)
+      void load()
+    } catch (err: any) {
+      toast.error("服务端版本校验失败，请检查标签与说明", { description: err?.message || String(err) })
     }
   }
 
@@ -490,7 +517,7 @@ export default function MarketplaceAdmin() {
       title="市场管理"
       description={
         <span>
-          管理供应商模板 / 节点版本 / 移动端版本 / 设备控制 App / 外部榜单（MCP / 插件 / Skill / 提示词内容资源在资源中心统一管理）。当前仓库：
+          管理供应商模板 / 节点版本 / 移动端版本 / 设备控制 App / 服务端版本 / 外部榜单（MCP / 插件 / Skill / 提示词内容资源在资源中心统一管理）。当前仓库：
           {status.repo_url ? (
             <a href={status.repo_url} target="_blank" rel="noopener noreferrer" className="font-mono underline">
               {status.owner}/{status.repo}
@@ -503,6 +530,9 @@ export default function MarketplaceAdmin() {
       }
     >
       <div className="space-y-4">
+        {/* 服务端 tab：顶部固定升级卡片（当前 vs 已登记最新 + 一键升级）。
+            只在服务端 tab 显示——它讲的是本实例自身的版本，与其它模块无关。 */}
+        {module === "server-versions" && <ServerUpgradeCard />}
         <Tabs value={module} onValueChange={(v) => { setModule(v as ModuleTab); setChannelBatchMode(false); setSelectedChannelIds(new Set()) }}>
           <div className="flex items-center justify-between">
             <TabsList>
@@ -510,6 +540,7 @@ export default function MarketplaceAdmin() {
               <TabsTrigger value="node-versions">节点版本 ({moduleCounts["node-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="mobile-versions">移动端 ({moduleCounts["mobile-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="device-control-versions">设备控制 App ({moduleCounts["device-control-versions"] ?? 0})</TabsTrigger>
+              <TabsTrigger value="server-versions">服务端 ({moduleCounts["server-versions"] ?? 0})</TabsTrigger>
               <TabsTrigger value="leaderboard">外部榜单</TabsTrigger>
               <TabsTrigger value="node-ip">节点公网 IP</TabsTrigger>
               <TabsTrigger value="community">社区运营</TabsTrigger>
@@ -541,7 +572,7 @@ export default function MarketplaceAdmin() {
               <Button size="sm" variant="outline" onClick={() => void load()} title="刷新当前 tab"><RefreshCw className="h-4 w-4" /></Button>
               <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /></Button>
               <Button size="sm" variant="outline" onClick={handleExport}><Download className="h-4 w-4" /></Button>
-              <Button size="sm" onClick={handleCreate}><Plus className="h-4 w-4 mr-1" />{module === "node-versions" || module === "mobile-versions" || module === "device-control-versions" ? "上传新版本" : "新建"}</Button>
+              <Button size="sm" onClick={handleCreate}><Plus className="h-4 w-4 mr-1" />{module === "node-versions" || module === "mobile-versions" || module === "device-control-versions" ? "上传新版本" : module === "server-versions" ? "登记版本" : "新建"}</Button>
             </div>
           </div>
         </Tabs>
@@ -689,6 +720,15 @@ export default function MarketplaceAdmin() {
           onOpenChange={setDeviceControlEditOpen}
           item={deviceControlEditItem as never}
           onSave={handleDeviceControlVersionSave as (manifest: Record<string, any>) => Promise<void>}
+        />
+      )}
+
+      {serverEditOpen && (
+        <ServerVersionEditor
+          open={serverEditOpen}
+          onOpenChange={setServerEditOpen}
+          item={serverEditItem as never}
+          onSave={handleServerVersionSave as (manifest: Record<string, any>) => Promise<void>}
         />
       )}
 
